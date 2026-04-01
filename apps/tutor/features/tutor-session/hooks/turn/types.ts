@@ -1,0 +1,372 @@
+import type { SubjectFamiliarity, TutorVoicePreferences } from "@heytutor/tutor-core";
+import type { Dispatch, RefObject, SetStateAction } from "react";
+import type { ReplayCue } from "@/lib/replay/replayTimeline";
+import type { WhiteboardHandle } from "@heytutor/whiteboard";
+import type { DrawCommand, VerifiedDiagram } from "@heytutor/drawing";
+import type { ConversationExchange, InkPace, SpeakSegmentOptions, TTSClient } from "@heytutor/tutor-core";
+import type { TurnTelemetry } from "@/lib/obs/turnTelemetry";
+import type { RecordedSegmentPayload, StoredTurn } from "@/lib/boards/boardsClient";
+import type { BoardEntry } from "@/lib/boards/types";
+import type { TutorSegment } from "@heytutor/drawing";
+import type { FocusTargetSchedule } from "@heytutor/tutor-core";
+import type { TutorPhase, BoardLayoutState, SegmentPlanStats } from "../../types";
+import type { CodeLessonController } from "../../lib/code-lesson/codeLessonController";
+import type { LessonFigureSequence } from "../../lib/scene/lessonFigureSequence";
+import type { SpokenSegmentClock } from "../../lib/code-lesson/codeSpokenSync";
+import type { DoubtTurnRequest } from "../../lib/input/askDoubt";
+import type { BoardPageRecord, PageTurnKind, PausedLessonReason, PausedLessonRequest } from "../../lib/turn/doubtTurn";
+import type { BillingFailure } from "@/lib/billing/billingClient";
+import type { IntroLayoutCheckpoint } from "../../lib/board/introLayoutCheckpoint";
+import type { SegmentInkClock } from "../../lib/turn/segmentInk";
+
+/** A question opens a fresh page unless it carries a doubt or resumes this one. */
+export type HandleQuestionOptions = {
+  /** Exactly one receipt for the pending attempt, separate from lesson completion. */
+  onAdmission?: (admitted: boolean) => void;
+  doubt?: DoubtTurnRequest;
+  /** The rest of a lesson that stopped: by a doubt, by Stop, or before a reload. */
+  resume?: PausedLessonRequest;
+};
+
+export type TurnPauseSource = "control" | "keyboard" | "doubt-composer" | "marking" | "rewind";
+
+export type SpeechStartupStatus = {
+  turnGeneration: number;
+  segmentIndex: number;
+  blocked: NonNullable<Parameters<NonNullable<SpeakSegmentOptions["onPlaybackBlocked"]>>[0]>;
+  enableAudio: () => void;
+};
+
+export type ExecuteCommandOptions = {
+  /** Runtime observation only, after WRITE ink or TYPE characters actually appear. */
+  onInkStarted?: () => void;
+  /** Explicit metadata owner for atomic scene-intro commands. */
+  introLayoutCheckpoint?: IntroLayoutCheckpoint;
+  durationScale?: number;
+  /** Finish committed intro marks without changing their normal label instrument. */
+  finishVerifiedDiagramIntro?: boolean;
+  speechDurationMs?: number;
+  /** This command's slice of the segment's spoken time. */
+  speechShareMs?: number;
+  writeSchedule?: {
+    charStartOffsetsMs: number[];
+    charDurationsMs: number[];
+    getAudioPositionMs: () => number;
+    /** Live segment playback ownership; keeps a positive buffered clock authoritative. */
+    isAudioActive?: () => boolean;
+    /** Media ms per wall ms, so a glyph's spoken slot is drawn in wall time. */
+    getPlaybackRate?: () => number;
+    onCharacterStart?: (info: {
+      char: string;
+      index: number;
+      targetMs: number;
+      audioPositionMs: number;
+    }) => void;
+  };
+  applyLayout?: boolean;
+  segmentNarration?: string;
+  /** Preserve coordinates emitted by the verified scene compiler. */
+  trustedDiagramGeometry?: boolean;
+  /** Stops a command whose owning turn has been superseded. */
+  isCancelled?: () => boolean;
+  /** Text row was reserved before audio started; preserve the resolved coordinates. */
+  textPlacementReserved?: boolean;
+  /** Engine-selected pedagogical pace. Runtime-owned — never LLM. */
+  inkPace?: InkPace;
+  /** One trace per named part, each on its spoken word (see focusSchedule.ts). */
+  focusSchedule?: FocusTargetSchedule;
+  /** A following work cue bounds this gesture's transient motion, in media ms. */
+  focusDeadlineMs?: number;
+  /** Final alignment can replace estimates while a focus is waiting. */
+  getFocusTiming?: () => { schedule: FocusTargetSchedule; deadlineMs: number };
+  /** A paused segment cannot consume a gesture deadline or catch up ink. */
+  isPaused?: () => boolean;
+  /** Media ms from the segment's audio start; the FOCUS and cue waits read it. */
+  getAudioPositionMs?: () => number;
+  /** Recorded playback/export advances waits with its media clock, not host timers. */
+  waitForAdvance?: () => Promise<void>;
+  /** Media ms per wall ms; default 1. */
+  getPlaybackRate?: () => number;
+  /** Waits for `getAudioPositionMs` on a pumped export clock instead of wall-time polling. */
+  waitUntilAudioMs?: (targetMs: number, getTargetMs?: () => number) => Promise<void>;
+  /** A following work cue bounds transient POINT motion; final timing may arrive late. */
+  getPointDeadlineMs?: () => number | null;
+  /** Runtime-only explanation motion; resolves already-written work, never figure anchors. */
+  explanationPointing?: boolean;
+  /** Runtime continuation: verified targets only, never an unresolved work-row fallback. */
+  verifiedPointingOnly?: boolean;
+  /** Existing WRITE scheduling clock; gaps run only after row/page placement. */
+  explanationClock?: SegmentInkClock;
+  /** The sentence's narration, alignment and audio clock; the code-lesson branches follow its words. */
+  spokenClock?: SpokenSegmentClock;
+  /** Placed on its spoken cue and given that window; keeps it instead of the scene ceiling. */
+  cued?: boolean;
+};
+
+export type UseTurnLifecycleParams = {
+  sessionId: string;
+  /** Home board: no database row and no `/c/` URL until this first question. */
+  isDraft?: boolean;
+  /**
+   * Writes the home board's row and hands it the `/c/{id}` URL. Resolves true
+   * when this call is the one that created it, so the naming pass knows the
+   * board is brand new even though `boards` has not caught up yet.
+   */
+  commitDraftBoard?: () => Promise<boolean>;
+  /** Submit this question once the board and whiteboard are ready. */
+  autoQuestion?: string | null;
+  /** Strip `?q=` from the URL after consuming autoQuestion (student `/c/` path). */
+  replaceAutoQuestionUrl?: boolean;
+  /** Space-to-pause / Escape-to-stop. Off for the headless admin runner. */
+  enableKeyboardControls?: boolean;
+  onComplete?: () => void;
+  onError?: (error: { message: string; question: string; billing?: BillingFailure }) => void;
+  onSpeechStartupStatus?: (status: SpeechStartupStatus | null) => void;
+  /**
+   * True while a sentence is taught without its voice (both voices failed),
+   * false once a later sentence speaks or the turn ends. Forces the caption.
+   */
+  onVoiceDegraded?: (degraded: boolean) => void;
+  phase: TutorPhase;
+  isReplaying: boolean;
+  boardLoaded: boolean;
+  /** Restore a fresh authenticated history before publishing its Continue offer. */
+  refreshBoardFromTurns?: (boardId: string, turns: readonly StoredTurn[], current: () => boolean) => Promise<boolean>;
+  narrationText: string;
+  boards: BoardEntry[];
+  whiteboardRef: RefObject<WhiteboardHandle | null>;
+  pendingQuestionRef: RefObject<string | null>;
+  /**
+   * `${boardId}::${question}` already auto-submitted. A plain boolean latch
+   * never resets — the shell stays mounted across `/c/A` -> `/c/B`, so the
+   * second "Next Question" of a session would drop its `?q=` silently.
+   */
+  autoSubmitDoneRef: RefObject<string | null>;
+  phaseRef: RefObject<TutorPhase>;
+  isPausedRef: RefObject<boolean>;
+  /** True while the student is watching an earlier part of this same lecture. */
+  rewoundRef?: RefObject<boolean>;
+  conversationHistoryRef: RefObject<ConversationExchange[]>;
+  /** Question owning the turn in flight — the context a mid-lesson doubt needs. */
+  liveQuestionRef: RefObject<string>;
+  /**
+   * The page on the board and the turn teaching on it. A doubt reads it to
+   * answer on this page instead of clearing it; see `lib/turn/doubtTurn`.
+   */
+  boardPageRef: RefObject<BoardPageRecord | null>;
+  /**
+   * The board shows the page a stopped replay reached, not the last saved one.
+   * A doubt asked over it cannot claim to continue the saved lecture.
+   */
+  boardShowsStoppedReplayRef: RefObject<boolean>;
+  /** A lesson on a fresh page, or a doubt on this one: decides how the wait looks. */
+  setLiveTurnKind?: Dispatch<SetStateAction<PageTurnKind>>;
+  ttsClientRef: RefObject<TTSClient | null>;
+  replayAudioRef: RefObject<HTMLAudioElement | null>;
+  /** Active replay draw wall clock; pause controls mark transitions synchronously. */
+  replayDrawClockRef: RefObject<{ setPaused: (paused: boolean) => void } | null>;
+  replayAudioPreloadRef: RefObject<Map<string, HTMLAudioElement>>;
+  cancelRef: RefObject<boolean>;
+  turnActiveRef: RefObject<boolean>;
+  /** Monotonic owner for async work. A segment may only mutate the board for its turn. */
+  turnGenerationRef: RefObject<number>;
+  turnAbortRef: RefObject<AbortController | null>;
+  segmentChainRef: RefObject<Promise<void>>;
+  /** Serializes ink so drawing trails speech without blocking the next paragraph. */
+  drawChainRef: RefObject<Promise<void>>;
+  collectedSegmentsRef: RefObject<TutorSegment[]>;
+  recordedSegmentsRef: RefObject<RecordedSegmentPayload[]>;
+  storedTurnsRef: RefObject<StoredTurn[]>;
+  rawResponseRef: RefObject<string>;
+  currentTraceIdRef: RefObject<string | null>;
+  turnTelemetryRef: RefObject<TurnTelemetry | null>;
+  turnStatsRef: RefObject<{ drawMs: number; ttsChars: number }>;
+  narrationSinceEpochRef: RefObject<string>;
+  boardLayoutRef: RefObject<BoardLayoutState>;
+  fbdPhaseMarkedRef: RefObject<boolean>;
+  fbdPhaseStartedRef: RefObject<boolean>;
+  activeVerifiedDiagramRef: RefObject<VerifiedDiagram | null>;
+  setActiveVerifiedDiagram?: Dispatch<SetStateAction<VerifiedDiagram | null>>;
+  /** Owns the DSA code panel; DSA turns commit their CodeLessonPlan here. */
+  codeLessonControllerRef?: RefObject<CodeLessonController | null>;
+  /** A lesson's later figures (DIAGRAM_LESSON_FIGURES); the executor advances it. */
+  lessonFiguresRef?: RefObject<LessonFigureSequence | null>;
+  segmentPlanStatsRef: RefObject<SegmentPlanStats>;
+  stopTurnRef: RefObject<((options?: { keepVisibleBoard?: boolean; supersede?: boolean }) => void) | null>;
+  speedRef: RefObject<number>;
+  /** Prefer Fireworks Fast routers when configured. Default on. */
+  fastModeRef: RefObject<boolean>;
+  /**
+   * Familiarity of the subject, chosen per question in the chat bar (Settings
+   * only supplies the default). Shifts the teaching-prompt step budget and
+   * selects the scaffolding addon.
+   */
+  familiarityRef: RefObject<SubjectFamiliarity>;
+  /** The live voice. The Hinglish (Sarvam) voice turns the narration Hinglish. */
+  voicePreferencesRef?: RefObject<TutorVoicePreferences>;
+  /**
+   * A language switch made during a lesson. Hinglish words to an English
+   * voice (or the reverse) would be wrong, so it waits for the next question.
+   */
+  pendingVoicePreferencesRef?: RefObject<TutorVoicePreferences | null>;
+  /** Teaching-note and tutor toggles. Injected into the teaching prompt only. */
+  teachingPrefsRef?: RefObject<{
+    teachingNote: string;
+    alwaysShowUnits: boolean;
+    alwaysStateLawFirst: boolean;
+  }>;
+  /** Live count of segments enqueued but not yet finished — drives adaptive speed. */
+  pendingSegmentCountRef: RefObject<number>;
+  /** Narration density (chars per ms) of the current segment — drives adaptive speed. */
+  narrationDensityRef: RefObject<number>;
+  replayGenerationRef: RefObject<number>;
+  replayCueRef: RefObject<ReplayCue | null>;
+  setPhase: Dispatch<SetStateAction<TutorPhase>>;
+  setIsPaused: Dispatch<SetStateAction<boolean>>;
+  setNarrationText: Dispatch<SetStateAction<string>>;
+  setCurrentSegmentText: Dispatch<SetStateAction<string>>;
+  setLastError: Dispatch<SetStateAction<{ message: string; question: string; billing?: BillingFailure } | null>>;
+  setInputInteracted: Dispatch<SetStateAction<boolean>>;
+  setLiveQuestion?: Dispatch<SetStateAction<string>>;
+  setIsReplaying: Dispatch<SetStateAction<boolean>>;
+  setReplayProgressMs: Dispatch<SetStateAction<number>>;
+  setReplayTotalMs: Dispatch<SetStateAction<number>>;
+  setStoredTurnsCount: Dispatch<SetStateAction<number>>;
+  setBoards: Dispatch<SetStateAction<BoardEntry[]>>;
+  ensureTTSClient: () => TTSClient;
+  executeCommandWithCancel: (
+    command: DrawCommand,
+    options?: ExecuteCommandOptions,
+  ) => Promise<void>;
+  cancellableDelay: (duration: number) => Promise<void>;
+  raceWithCancel: <T>(promise: Promise<T>) => Promise<T | undefined>;
+  clearCancelTimers: () => void;
+  resetBoardLayout: (keepHeading?: boolean, forceSequentialWorkLayout?: boolean) => void;
+  beginBoardEpoch: () => Promise<void>;
+  /** Download notes: a doubt's fresh page is a notes page of its own (lane 9). */
+  captureNotesEpoch?: () => boolean;
+  reserveTextCommandPlacements: (
+    command: DrawCommand,
+    options?: { isCancelled?: () => boolean },
+  ) => Promise<DrawCommand[]>;
+  persistTurnForReplay: (
+    question: string,
+    rawResponse: string,
+    recordedSegments: RecordedSegmentPayload[],
+    scene?: {
+      sceneDocument?: unknown | null;
+      sceneEngineVersion?: string | null;
+      validationReport?: unknown | null;
+      visualStatus?: import("@/lib/boards/boardsClient").SceneVisualStatus | null;
+      sceneArtifacts?: unknown | null;
+    },
+  ) => StoredTurn;
+  registerReplayBlobUrl: (url: string) => void;
+  revokeUnreferencedReplayBlobUrls: () => void;
+};
+
+export type UseSegmentRunnerParams = Pick<
+  UseTurnLifecycleParams,
+  | "sessionId"
+  | "activeVerifiedDiagramRef"
+  | "codeLessonControllerRef"
+  | "cancellableDelay"
+  | "ensureTTSClient"
+  | "executeCommandWithCancel"
+  | "raceWithCancel"
+  | "cancelRef"
+  | "isPausedRef"
+  | "turnActiveRef"
+  | "turnGenerationRef"
+  | "turnTelemetryRef"
+  | "turnStatsRef"
+  | "recordedSegmentsRef"
+  | "narrationSinceEpochRef"
+  | "currentTraceIdRef"
+  | "setCurrentSegmentText"
+  | "narrationDensityRef"
+  | "drawChainRef"
+  | "reserveTextCommandPlacements"
+  | "onSpeechStartupStatus"
+  | "onVoiceDegraded"
+  | "lessonFiguresRef"
+> & {
+  applyTurnPhase: (next: TutorPhase) => void;
+};
+
+export type TurnControlApi = {
+  finishLectureUi: (turnGeneration?: number) => void;
+  applyTurnPhase: (next: TutorPhase) => void;
+  enqueueSegment: (segment: TutorSegment, turnGeneration?: number) => void;
+  enqueueVerifiedIntro: (
+    segments: TutorSegment[],
+    turnGeneration?: number,
+    options?: {
+      /**
+       * The beats of a figure Stop cut off, finished by Continue. Drawn, never
+       * saved: the stopped turn's save already holds the whole figure.
+       */
+      remainder?: boolean;
+    },
+  ) => void;
+  processResponseText: (
+    responseText: string,
+    introSegments?: TutorSegment[],
+    liveEnqueued?: boolean,
+    turnGeneration?: number,
+    givenSegments?: TutorSegment[],
+    options?: {
+      /**
+       * Draw the figure's withheld labels once the turn's own ink is done. A
+       * doubt that stopped a lesson halfway must not reveal what the lesson had
+       * not reached yet.
+       */
+      revealDeferredAnnotations?: boolean;
+      /** What an empty-response error names, so a retry asks this same turn again. */
+      errorQuestion?: string;
+      /** The lesson's later figures: segments are prepared against the figure each cue moves to. */
+      lessonFigures?: LessonFigureSequence | null;
+    },
+  ) => Promise<void>;
+  stopTurn: (options?: { keepVisibleBoard?: boolean; supersede?: boolean }) => void;
+  pauseTurn: (source?: TurnPauseSource) => void;
+  resumeTurn: () => void;
+  /**
+   * After a mid-lesson doubt finishes, continue the paused lecture on this
+   * board. No-op when nothing was paused.
+   */
+  flushPausedLesson: () => void;
+  /**
+   * After a doubt turn ends (or Stop), offer Continue lesson / Ask another doubt
+   * rather than picking the lesson back up on its own.
+   */
+  offerPausedLessonResume: (resume?: PausedLessonRequest) => void;
+  /** Drop a paused lecture: a fresh question, or a board change. */
+  clearPausedLesson: () => void;
+  /**
+   * A paused lesson on this board waits for Continue. A doubt figure or a
+   * fresh page hides the lesson's figure or page until that resume, so with
+   * none (the lesson finished) the doubt answers on the lesson's page.
+   */
+  hasPausedLesson: () => boolean;
+  /** True while a stopped lesson on this board can continue. */
+  pausedLessonOffer: boolean;
+  /** Why it stopped ("stop" or "doubt"), for the bar's copy; null with no offer. */
+  pausedLessonReason: PausedLessonReason | null;
+  /** This opening had no completed authority; the action starts a fresh lesson. */
+  earlyLessonRestartOffer: boolean;
+  earlyLessonRestartReason: PausedLessonReason | null;
+  restartEarlyLesson: () => void;
+  /**
+   * After a board is restored, offer the stopped lesson its saved turns leave
+   * (`pausedLessonFromStoredTurns`). Never continues on its own. Runs once per
+   * opened board; a no-op while a turn or a replay owns the board, so call it
+   * again when that ends. Returns what is offered.
+   */
+  restorePausedLesson: (turns: readonly StoredTurn[], refreshVisible?: boolean) => Promise<PausedLessonRequest | null>;
+  /**
+   * `options.prompt` carries an already-composed, board-grounded doubt and
+   * `options.title` what it is saved under.
+   */
+  handleAskDoubt: (question: string, options?: { prompt?: string; title?: string; markedFigureIds?: readonly string[] }) => void;
+};

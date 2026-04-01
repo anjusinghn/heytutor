@@ -1,0 +1,215 @@
+import type { DrawCommandType } from './drawingProtocol';
+import type { TutorSegment } from './drawingProtocol';
+import { getSegmentCommands } from './drawingProtocol';
+
+export interface SegmentAlignmentResult {
+  aligned: boolean;
+  reason?: string;
+}
+
+const ANNOTATION_TYPES: DrawCommandType[] = [
+  'UNDERLINE',
+  'CIRCLE_AROUND',
+  'ARROW',
+  'HIGHLIGHT',
+  'FOCUS',
+  'EMPHASIZE',
+  'SUPERSEDE',
+  'ANNOTATE',
+  'SCRIBBLE',
+];
+
+const REVIEW_MODE_CUES = [
+  'here',
+  'this',
+  'notice',
+  'again',
+  'underline',
+  'circle',
+  'arrow',
+  'highlight',
+  'focus',
+  'trace',
+  'follow',
+  'emphasize',
+  'remember',
+  'look at',
+  'this is',
+  'the image',
+  'the object',
+  'the focus',
+  'the pole',
+  'that term',
+  'that part',
+  'this part',
+  'this side',
+  'variable',
+  'unknown',
+  'friction',
+  'normal',
+  'weight',
+  'applied',
+  'push',
+  'pull',
+  'opposes',
+  'net force',
+  'free body',
+  'surface',
+  'mg',
+  'mu',
+  'μ',
+  'gravity',
+  'tension',
+  'upward',
+  'downward',
+  'horizontal',
+  'vertical',
+  'direction',
+  'force',
+];
+
+function isAnnotationCommand(type: DrawCommandType): boolean {
+  return ANNOTATION_TYPES.includes(type);
+}
+
+function hasReviewModeCue(narration: string): boolean {
+  return REVIEW_MODE_CUES.some((cue) => narration.includes(cue));
+}
+
+const HARD_MISMATCHES: Array<{
+  keywords: string[];
+  incompatible: DrawCommandType[];
+  label: string;
+}> = [
+  {
+    keywords: ['circle', 'radius', 'circumference'],
+    incompatible: ['DRAW_LINE', 'DRAW_RECT', 'DRAW_CUBE', 'DRAW_CUBOID'],
+    label: 'circle',
+  },
+  {
+    keywords: ['line', 'segment', 'hypotenuse', 'perpendicular'],
+    incompatible: ['DRAW_CIRCLE', 'DRAW_CUBE', 'DRAW_CUBOID'],
+    label: 'line',
+  },
+  {
+    keywords: ['rectangle', 'rect'],
+    incompatible: ['DRAW_CIRCLE', 'DRAW_LINE', 'DRAW_CUBE'],
+    label: 'rectangle',
+  },
+  {
+    keywords: ['cube'],
+    incompatible: ['DRAW_CIRCLE', 'DRAW_LINE', 'DRAW_RECT', 'DRAW_CUBOID'],
+    label: 'cube',
+  },
+  {
+    keywords: ['cuboid', 'prism'],
+    incompatible: ['DRAW_CIRCLE', 'DRAW_LINE', 'DRAW_CUBE'],
+    label: 'cuboid',
+  },
+];
+
+function hasHardMismatch(narration: string, commandType: DrawCommandType): string | null {
+  for (const rule of HARD_MISMATCHES) {
+    const mentionsConcept = rule.keywords.some((keyword) => narration.includes(keyword));
+    if (mentionsConcept && rule.incompatible.includes(commandType)) {
+      return `narration mentions ${rule.label} but command is ${commandType}`;
+    }
+  }
+
+  return null;
+}
+
+export function checkSegmentAlignment(segment: TutorSegment): SegmentAlignmentResult {
+  if (segment.verifiedDiagramIntro) {
+    return { aligned: true };
+  }
+
+  const commands = getSegmentCommands(segment);
+  if (commands.length === 0) {
+    return { aligned: true };
+  }
+
+  const narration = segment.narration.toLowerCase();
+
+  for (const cmd of commands) {
+    if (cmd.type === 'WRITE' || cmd.type === 'LABEL' || cmd.type === 'DIMENSION') {
+      continue;
+    }
+
+    if (cmd.type === 'FOCUS' || cmd.type === 'EMPHASIZE' || cmd.type === 'SUPERSEDE' || cmd.type === 'ANNOTATE') {
+      continue;
+    }
+
+    if (isAnnotationCommand(cmd.type)) {
+      if (hasReviewModeCue(narration)) {
+        continue;
+      }
+      if (cmd.text && narration.includes(cmd.text.toLowerCase())) {
+        continue;
+      }
+      return {
+        aligned: false,
+        reason: `annotation ${cmd.type} without review-mode cue in narration`,
+      };
+    }
+
+    if (cmd.type === 'DRAW_LINE' && (narration.includes('radius') || narration.includes('force') || narration.includes('arrow'))) {
+      continue;
+    }
+
+    if (cmd.type === 'DRAW_CIRCLE' && narration.includes('circle')) {
+      continue;
+    }
+
+    const mismatch = hasHardMismatch(narration, cmd.type);
+    if (mismatch) {
+      return { aligned: false, reason: mismatch };
+    }
+  }
+
+  return { aligned: true };
+}
+
+export function filterAlignedSegments(segments: TutorSegment[]): TutorSegment[] {
+  const result: TutorSegment[] = [];
+
+  for (const segment of segments) {
+    const alignment = checkSegmentAlignment(segment);
+
+    if (alignment.aligned) {
+      result.push(segment);
+      continue;
+    }
+
+    console.warn('[alignment]', alignment.reason, segment.narration.slice(0, 80));
+
+    const commands = getSegmentCommands(segment);
+    if (commands.length === 0) {
+      result.push(segment);
+      continue;
+    }
+
+    const keptCommands = commands.filter((cmd) => {
+      if (cmd.type === 'WRITE' || cmd.type === 'LABEL' || cmd.type === 'DIMENSION') {
+        return true;
+      }
+      if (isAnnotationCommand(cmd.type)) {
+        return true;
+      }
+      const mismatch = hasHardMismatch(segment.narration.toLowerCase(), cmd.type);
+      return mismatch === null;
+    });
+
+    if (keptCommands.length === 0) {
+      result.push({ ...segment, command: null, commands: undefined });
+    } else {
+      result.push({
+        ...segment,
+        command: keptCommands[0] ?? null,
+        commands: keptCommands.length > 0 ? keptCommands : undefined,
+      });
+    }
+  }
+
+  return result;
+}

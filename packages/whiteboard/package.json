@@ -1,0 +1,49 @@
+{
+  "name": "@heytutor/whiteboard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./pen-spinner": {
+      "types": "./dist/pen-spinner.d.ts",
+      "import": "./dist/pen-spinner.js"
+    },
+    "./marker-ink": {
+      "types": "./dist/marker-ink.d.ts",
+      "import": "./dist/marker-ink.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup src/index.ts src/pen-spinner.ts src/marker-ink.ts --format esm --dts --clean --external react --external react-dom --external konva --external react-konva --external @heytutor/drawing --external @heytutor/design-tokens",
+    "dev": "tsup src/index.ts src/pen-spinner.ts src/marker-ink.ts --format esm --dts --watch --external react --external react-dom --external konva --external react-konva --external @heytutor/drawing --external @heytutor/design-tokens",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/",
+    "verify": "tsx scripts/verify-draw-transactions.ts && tsx scripts/verify-command-ownership.ts && tsx scripts/verify-owned-cancellation.ts && tsx scripts/verify-cancelled-destructive-successor.ts && tsx scripts/verify-transaction-boundaries.ts && tsx scripts/verify-beat-savepoints.ts && tsx scripts/verify-pen-motion.ts && tsx scripts/verify-pen-choreography.ts && tsx scripts/verify-pen-idle.ts && tsx scripts/verify-pen-stunts.ts && tsx scripts/verify-whiteboard-export.ts && tsx scripts/verify-instrument-rule.ts && tsx scripts/verify-ink-kind.ts && tsx scripts/verify-pinned-ink.ts && tsx scripts/verify-ink-start-observation.ts && tsx scripts/verify-handwriting-notation-render.ts && tsx scripts/verify-open-endpoint.ts && tsx scripts/verify-active-audio-write.ts && tsx scripts/verify-reference-picture.ts && tsx scripts/verify-picture-scene-erase.ts && tsx scripts/verify-held-page.ts",
+    "preview": "tsx scripts/preview-instruments.ts",
+    "preview:idle": "tsx scripts/preview-pen-idle.ts",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@heytutor/drawing": "workspace:*"
+  },
+  "peerDependencies": {
+    "konva": "^10.3.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "react-konva": "^19.2.0"
+  },
+  "devDependencies": {
+    "@heytutor/eslint-config": "workspace:*",
+    "@heytutor/typescript-config": "workspace:*",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "eslint": "^9.39.4",
+    "tsup": "^8.5.0",
+    "tsx": "^4.22.4",
+    "typescript": "^5.8.3"
+  }
+}

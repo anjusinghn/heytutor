@@ -1,0 +1,1438 @@
+import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { tmpdir } from "node:os";
+import { createRequire } from "node:module";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import ts from "typescript";
+import { getSegmentCommands, serializeSegmentCommands, verifiedDiagramCommandToDrawCommand, type DrawCommand, type TutorSegment } from "@heytutor/drawing";
+import { findSpokenToken, mathToSpeech, voiceSettingsForDelivery, normalizeTutorQuestion, TUTOR_SYSTEM_PROMPT, type SpeakSegmentOptions, type TTSClient, type TutorVoiceKey, type TutorVoicePreferences, type CodeLessonPlan } from "@heytutor/tutor-core";
+import { validateTurnPlanV3, synthesizeFamilyScene, type TurnPlanV3, type ProblemIR } from "@heytutor/scene-engine";
+import { selectFastVerifiedRepresentation } from "../../features/tutor-session/lib/scene/representationFallback";
+import { buildVerifiedDiagramPresentation } from "../../features/tutor-session/lib/scene/verifiedScenePresentation";
+import { forgetVerifiedScene } from "../../features/tutor-session/lib/scene/verifiedSceneRecovery";
+import { createEmptySegmentPlanStats } from "../../features/tutor-session/lib/turn/segmentPlanning";
+import type { HandleQuestionOptions, UseTurnLifecycleParams, TurnControlApi } from "../../features/tutor-session/hooks/turn/types";
+import type { PausedLessonRequest } from "../../features/tutor-session/lib/turn/doubtTurn";
+import { buildEarlyLessonOpeningSegment } from "../../features/tutor-session/lib/turn/earlyLessonOpening";
+import { isBenignTurnAbort } from "../../features/tutor-session/lib/turn/turnFailurePolicy";
+import { CodeLessonController } from "../../features/tutor-session/lib/code-lesson/codeLessonController";
+import type { StoredTurn } from "../../lib/boards/boardsClient";
+import { lessonRecoveryFromStoredTurns } from "../../features/tutor-session/lib/turn/pausedLessonRestore";
+import { taughtSegmentCount, unsavedLessonBoard, unsavedNoticeAction } from "../../features/tutor-session/lib/board/unsavedBoard";
+import * as teachingAPI from "../../../../packages/tutor-core/src/llm/llmAPI";
+
+const app = fileURLToPath(new URL("../../", import.meta.url));
+const requireApp = createRequire(new URL("../../package.json", import.meta.url));
+requireApp("konva");
+const react = {
+  useRef: (current: unknown) => ({ current }),
+  useCallback: (fn: unknown) => fn,
+  useEffect() {},
+  useLayoutEffect: (commit: () => void) => commit(),
+  useState: (value: unknown) => [value, () => {}],
+};
+/** Only the recovery cases need mounted ref/state identity across control renders. */
+function recoveryHookRuntime() {
+  const roots = new Map<string, unknown[]>();
+  let slots: unknown[] = [];
+  let cursor = 0;
+  const api = {
+    ...react,
+    useRef(value: unknown) { const index = cursor++; return slots[index] ??= { current: value }; },
+    useState(value: unknown) {
+      const index = cursor++; const owned = slots;
+      if (!(index in owned)) owned[index] = value;
+      return [owned[index], (next: unknown) => { owned[index] = typeof next === "function" ? next(owned[index]) : next; }];
+    },
+    useCallback(fn: unknown) { cursor++; return fn; },
+  };
+  return { api, render<T>(root: string, fn: () => T): T {
+    slots = roots.get(root) ?? []; roots.set(root, slots); cursor = 0; return fn();
+  } };
+}
+const projectileQuestion = "Derive the formula for the range of a projectile on level ground, and show why 45° gives the maximum range.";
+const qualitativeQuestion = "Derive the formula for the range of a projectile on level ground.";
+const symbolicPlan: TurnPlanV3 = {
+  schemaVersion: "turn-plan/v3",
+  question: qualitativeQuestion,
+  givens: [],
+  unknowns: [{ id: "range", symbol: "R" }],
+  derived: [],
+  qualitativeClaims: [
+    { id: "range", claim: "R = u^2 sin(2 theta) / g", expected: "u^2 sin(2 theta) / g", relatedQuantityIds: ["range"] },
+  ],
+  lawIds: ["constant-acceleration"],
+  assumptions: ["Air resistance is negligible"],
+  visualRequirement: "required",
+};
+const recordedPlan: TurnPlanV3 = {
+  ...symbolicPlan,
+  question: normalizeTutorQuestion(projectileQuestion),
+  unknowns: [...symbolicPlan.unknowns, { id: "maximum_angle", symbol: "theta_max" }],
+  qualitativeClaims: [...symbolicPlan.qualitativeClaims,
+    { id: "maximum_angle", claim: "A launch angle of 45 degrees maximizes the level-ground range", expected: "The maximum range occurs at 45 degrees", relatedQuantityIds: ["maximum_angle"] }],
+};
+const numericQuestion = "A projectile is launched with u = 20 m/s and theta = 30 deg on level ground. Find its range.";
+const numericPlan: TurnPlanV3 = {
+  ...symbolicPlan,
+  question: numericQuestion,
+  givens: [
+    { id: "u", symbol: "u", value: 20, unit: "m/s", provenance: "given" },
+    { id: "theta", symbol: "theta", value: 30, unit: "deg", provenance: "given" },
+    { id: "g", symbol: "g", value: 9.8, unit: "m/s^2", provenance: "given" },
+  ],
+  unknowns: [{ id: "range", symbol: "R", unit: "m" }],
+  derived: [{ id: "range", symbol: "R", value: 400 * Math.sin(Math.PI / 3) / 9.8, unit: "m", provenance: "derived", sourceText: "R = 20^2 * sin(pi / 3) / 9.8" }],
+  qualitativeClaims: [],
+};
+const failedCompileQuestion = "Plot y = 1/x from x = -1 to x = 1 and shade the region below the graph.";
+const failedCompilePlan: TurnPlanV3 = {
+  ...symbolicPlan,
+  question: failedCompileQuestion,
+  unknowns: [],
+  derived: [],
+  qualitativeClaims: [],
+};
+assert(validateTurnPlanV3(symbolicPlan, symbolicPlan.question).plan, "the symbolic fixture must be a real valid TurnPlanV3");
+assert(validateTurnPlanV3(recordedPlan, recordedPlan.question).plan, "the recorded-question fixture must be a real valid TurnPlanV3");
+const numericValidation = validateTurnPlanV3(numericPlan, numericQuestion);
+assert(numericValidation.plan, `the numeric fixture must be a real valid TurnPlanV3: ${JSON.stringify(numericValidation)}`);
+assert(selectFastVerifiedRepresentation({ question: symbolicPlan.question, turnPlan: symbolicPlan }), "the source-valid projectile must compile without a scene model");
+assert(selectFastVerifiedRepresentation({ question: recordedPlan.question, turnPlan: recordedPlan }), "the source-stated angle must retain its verified deterministic figure");
+assert.equal(selectFastVerifiedRepresentation({ question: numericQuestion, turnPlan: numericPlan }), null, "the numeric fixture must retain normal model validation");
+assert.equal(synthesizeFamilyScene({ question: failedCompileQuestion, turnPlan: failedCompilePlan }), null, "the pole-crossing fixture must genuinely fail the deterministic family compile");
+
+type Mode = "ready" | "hinglish-opening" | "startup-timeout" | "recorded-projectile" | "numeric" | "failed-compile" | "retry" | "prefix-stall" | "partial-stall" | "pause-stall" | "pause-prelude" | "control-eof" | "one-step-stall" | "one-step-split-stall" | "resume-no-ink" | "retry-expires" | "stop-before-expiry" | "stop-during-retry" | "stale-content" | "marker-only" | "hedge-wins" | "hedge-primary-wins" | "hedge-fails" | "early-on" | "early-off" | "early-stop" | "early-doubt" | "early-pause" | "early-parity" | "early-late-ack" | "opening-prefetch-success" | "opening-prefetch-silent" | "opening-prefetch-stop" | "opening-prefetch-stop-scene";
+type Event = { atMs: number; name: string; data?: unknown };
+const HELD_PLANNER_MS = 15_000;
+export interface FrozenStartupFixture {
+  plan: TurnPlanV3;
+  /** Captured provider output appended after the stock teaching steps. */
+  teachingTail?: string;
+  /** Frozen, compiled planner output; all presentation/control/handler paths remain real. */
+  stopBeforeFigure?: {
+    representation: NonNullable<ReturnType<typeof selectFastVerifiedRepresentation>>;
+    stalePlan?: TurnPlanV3;
+    expectGiven: boolean;
+    uninterrupted?: boolean;
+  };
+  /** Replay recorded teaching through the real DSA planner/handler/queue. */
+  recordedCodeLesson?: { plan: CodeLessonPlan; response: string; continuationResponses?: string[]; revealCommittedCode?: boolean };
+  /** A language selected since the previous turn, applied by the real handler. */
+  voiceKey?: TutorVoiceKey;
+  /** Require the real Given-row request and committed WRITE path, not a no-givens prompt. */
+  requireGivenRows?: boolean;
+  /** A test-only fault at the actual selector boundary proves the parity gate is red-capable. */
+  dropSelectedFigureWhenEarly?: boolean;
+  /** Synthetic failures at real teaching boundaries; never dispatch a provider. */
+  teachingFailure?: "fetch" | "read" | "callback" | "internal" | "auth" | "forbidden" | "cancel";
+  /** Load the real preparation module afresh for each OFF/ON comparison. */
+  openingPrefetchEnabled?: boolean;
+  /** Hold fake scene responses so authority-only preparation has a measurable overlap. */
+  sceneResponseDelayMs?: number;
+  /** Deliberately corrupt preparation to prove the exact-opening gate can fail. */
+  mutatePreparedOpeningWhenEnabled?: boolean;
+}
+
+/** Content hashes keep the reusable hook trace free of question/narration/geometry text. */
+export interface FrozenStartupProjection {
+  requests: Array<{ kind: string; bodyHash: string }>;
+  output: Array<{ kind: string; contentHash: string }>;
+  stages: Array<{ name: string; atMs: number }>;
+  prefetched: Array<{ atMs: number; textHash: string; voiceSettingsHash: string; voiceKey: TutorVoiceKey }>;
+  planHash: string;
+  sceneHash: string;
+  visualStatus: string | null;
+  errors: number;
+  errorOutputHash: string;
+}
+
+const HEDGE_MODES: Mode[] = ["hedge-wins", "hedge-primary-wins", "hedge-fails"];
+const compiledHooks = new Map<string, string>();
+
+export async function scenario(mode: Mode, hedgeEnabled = false, earlyEnabled = false, fixture?: FrozenStartupFixture) {
+  const openingPrefetchMode = mode.startsWith("opening-prefetch-");
+  const earlyMode = mode.startsWith("early-") || mode === "startup-timeout" || openingPrefetchMode;
+  const plannerHoldMs = mode === "early-late-ack" ? 10 : HELD_PLANNER_MS;
+  const recoveryMode = mode === "early-stop" || mode === "early-doubt" || mode === "startup-timeout" || Boolean(fixture?.stopBeforeFigure);
+  const mounted = recoveryMode ? recoveryHookRuntime() : null;
+  let detachOpeningMirror = () => {};
+  let now = 0;
+  let sequence = 0;
+  const timers = new Map<number, { at: number; run: () => void }>();
+  const events: Event[] = [];
+  const saved = new Map<string, PropertyDescriptor | undefined>();
+  const originalDateNow = Date.now;
+  const record = (name: string, data?: unknown) => events.push({ atMs: now, name, data });
+  const hash = (value: unknown) => createHash("sha256").update(typeof value === "string" ? value : JSON.stringify(value) ?? "undefined").digest("hex");
+  const replace = (key: string, value: unknown) => {
+    saved.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
+    Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
+  };
+  const setTimer = (run: () => void, delay = 0) => {
+    const id = ++sequence;
+    timers.set(id, { at: now + delay, run });
+    return id;
+  };
+  const flush = async () => { for (let i = 0; i < 160; i++) await Promise.resolve(); };
+  const advance = async (target: number) => {
+    await flush();
+    while (true) {
+      const next = [...timers.entries()].filter(([, timer]) => timer.at <= target)
+        .sort((left, right) => left[1].at - right[1].at || left[0] - right[0])[0];
+      if (!next) break;
+      now = next[1].at;
+      timers.delete(next[0]);
+      next[1].run();
+      await flush();
+    }
+    now = target;
+    await flush();
+  };
+  const pump = async (done: () => boolean) => {
+    for (let i = 0; i < 200 && !done(); i++) {
+      await flush();
+      if (done()) return;
+      const next = [...timers.values()].sort((left, right) => left.at - right.at)[0];
+      assert(next && next.at < 90_000, `${mode}: the actual hook must settle without an unowned asynchronous operation`);
+      await advance(next.at);
+    }
+    assert(done(), `${mode}: the actual hook did not settle`);
+  };
+  replace("performance", { now: () => now });
+  replace("setTimeout", setTimer);
+  replace("clearTimeout", (id: number) => timers.delete(id));
+  replace("window", globalThis);
+  replace("addEventListener", () => {});
+  replace("removeEventListener", () => {});
+  const heldLocks = new Set<string>();
+  replace("navigator", { locks: {
+    async request(name: string, options: { ifAvailable?: boolean; signal?: AbortSignal }, callback: (lock: { name: string } | null) => Promise<void>) {
+      assert(!(options.ifAvailable && options.signal), "native Web Locks rejects ifAvailable with signal");
+      // Native requests run after the releasing callback returns; preserve that
+      // scheduling boundary when an actual doubt immediately follows Stop.
+      if (recoveryMode) for (let i = 0; i < 3; i++) await Promise.resolve();
+      if (heldLocks.has(name)) return callback(null);
+      heldLocks.add(name);
+      record("lesson-claim-acquired");
+      try { await callback({ name }); }
+      finally { heldLocks.delete(name); record("lesson-claim-released"); }
+    },
+    query: async () => ({ held: [...heldLocks].map((name) => ({ name, mode: "exclusive" })), pending: [] }),
+  } });
+  Date.now = () => 1_800_000_000_000 + now;
+  const timeoutQuestion = "Can you explain bonding? I am confused about what makes atoms stick together.";
+  const timeoutPlan: TurnPlanV3 = { schemaVersion: "turn-plan/v3", question: timeoutQuestion,
+    givens: [], unknowns: [], derived: [], qualitativeClaims: [], lawIds: [], assumptions: [], visualRequirement: "none" };
+  const plan = fixture?.plan ?? (mode === "startup-timeout" ? timeoutPlan : mode === "numeric" ? numericPlan : mode === "failed-compile" ? failedCompilePlan
+    : mode === "recorded-projectile" ? recordedPlan : symbolicPlan);
+  const question = plan.question;
+  const boardId = `startup-${mode}`;
+  const parentId = `${boardId}-stopped-parent`;
+  const parentTraceId = `${boardId}-parent-trace`;
+  const timeoutSeed: StoredTurn[] = mode === "startup-timeout" ? [{
+    id: parentId, orderIndex: 0, question, rawResponse: "", speedMultiplier: 1, traceId: parentTraceId,
+    kind: "lesson", status: "stopped", persistedStatus: "stopped", sceneDocument: null, sceneEngineVersion: null,
+    validationReport: null, visualStatus: "text_only", sceneArtifacts: null, resumeState: null,
+    segments: [{ id: `${parentId}:0`, orderIndex: 0, narration: "", spokenText: "",
+      command: { type: "CLEAR", params: [], charPosition: 0, narrationBefore: "" }, audioUrl: null, durationMs: 50, timings: null }],
+  }] : [];
+  const savedRepresentation = mode === "resume-no-ink" ? selectFastVerifiedRepresentation({ question, turnPlan: plan }) : null;
+  if (mode === "resume-no-ink") assert(savedRepresentation, "the stopped parent uses the same source-valid verified figure");
+  const savedCommands = savedRepresentation ? buildVerifiedDiagramPresentation(savedRepresentation.sceneDocument, savedRepresentation.renderScene).diagram.commands.map((command) => verifiedDiagramCommandToDrawCommand(command)) : [];
+  const streams: Array<{
+    controller: ReadableStreamDefaultController<Uint8Array>;
+    response: Response;
+    retry: boolean;
+    startupRetry: string | null;
+    hedge: boolean;
+    signal: AbortSignal | null | undefined;
+    cancelled: boolean;
+  }> = [];
+  const telemetry: Array<{ events?: Array<{ name: string; metadata?: Record<string, unknown> }> }> = [];
+  const teachingRequestBodies: Array<{ messages: Array<{ role: string; content: string }> }> = [];
+  const encoder = new TextEncoder();
+  const content = (index: number, text: string) => {
+    const stream = streams[index]!;
+    stream.controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}\n\n`));
+  };
+  const finishStream = (index: number) => {
+    streams[index]!.controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+  };
+  const completion = (value: unknown) => Response.json({ choices: [{ message: { content: JSON.stringify(value) } }] });
+  replace("fetch", async (url: string, init?: RequestInit) => {
+    const headers = new Headers(init?.headers);
+    if (fixture?.openingPrefetchEnabled !== undefined && (url.endsWith("/api/chat") || url.endsWith("/api/visual-need"))) {
+      const kind = url.endsWith("/api/visual-need") ? "visual-need"
+        : headers.has("x-turn-planner-version") ? "turn-plan"
+        : headers.has("x-problem-ir-version") ? "problem-authority"
+        : headers.has("x-scene-planner-version") ? "scene" : "teaching";
+      record("request-body", { kind, bodyHash: hash(String(init?.body)) });
+    }
+    if (fixture && ["x-turn-planner-version", "x-problem-ir-version", "x-scene-planner-version"]
+      .some((name) => headers.has(name))) {
+      record("frozen-planner-request", { body: JSON.parse(String(init?.body)),
+        version: headers.get("x-turn-planner-version") ?? headers.get("x-problem-ir-version") ?? headers.get("x-scene-planner-version"),
+        phase: headers.get("x-scene-planner-phase") });
+    }
+    if (url.endsWith(`/api/boards/${boardId}?page=0`)) {
+      record("owned-history-read");
+      return Response.json({ board: { id: boardId, title: "Projectile lesson", createdAt: 0 }, nextPage: null,
+        turns: savedRepresentation ? [{
+          id: parentId, orderIndex: 0, question, rawResponse: "The range follows from horizontal motion.",
+          speedMultiplier: 1, traceId: parentTraceId, status: "stopped", persistedStatus: "stopped", kind: "lesson",
+          sceneDocument: savedRepresentation.sceneDocument, sceneEngineVersion: null, validationReport: savedRepresentation.validationReport,
+          visualStatus: "validated", sceneArtifacts: { turnPlan: plan },
+          segments: [{ id: `${parentId}-figure`, orderIndex: 0, narration: "The range follows from horizontal motion.",
+            spokenText: "The range follows from horizontal motion.", command: serializeSegmentCommands(savedCommands, { trustedDiagramGeometry: true }),
+            audioUrl: null, durationMs: null, timings: null }],
+        }] : fixture?.stopBeforeFigure ? params.storedTurnsRef.current : timeoutSeed,
+      });
+    }
+    if (url.endsWith("/api/visual-need")) {
+      record("visual-need-request");
+      return Response.json({ decision: fixture ? plan.visualRequirement === "none" ? "none" : null : "required" });
+    }
+    if (fixture?.recordedCodeLesson && url.endsWith("/api/dsa-teaching-policy")) return new Response(null, { status: 503 });
+    if (url.endsWith("/api/trace/event")) {
+      telemetry.push(JSON.parse(String(init?.body)));
+      return Response.json({});
+    }
+    // The progressive lesson save (liveTurnSave): accept every checkpoint.
+    const checkpoint = /\/api\/boards\/[^/]+\/turns\/([^/]+)$/.exec(url);
+    if (checkpoint && (init?.method === "PUT" || init?.method === "PATCH")) {
+      record("board-save");
+      const meta = JSON.parse(init.method === "PUT" ? String((init.body as FormData).get("metadata")) : String(init.body)) as {
+        seq: number; status: string; baseCount: number; question?: string; appendSegments?: unknown[];
+      };
+      return Response.json({
+        turn: {
+          id: checkpoint[1], orderIndex: 0, question: meta.question ?? question, rawResponse: "", speedMultiplier: 1,
+          traceId: null, sceneDocument: null, sceneEngineVersion: null, validationReport: null, visualStatus: "text_only",
+          sceneArtifacts: null, segments: [], status: meta.status,
+        },
+        serverCount: meta.status === "complete" ? null : meta.baseCount + (meta.appendSegments?.length ?? 0),
+        serverSeq: meta.seq,
+        final: meta.status === "complete",
+      });
+    }
+    assert(url.endsWith("/api/chat"), `${mode}: no real network call is permitted: ${url}`);
+    if (fixture?.recordedCodeLesson && headers.get("x-code-lesson-version") === "1") {
+      return completion(fixture.recordedCodeLesson.plan);
+    }
+    if (headers.get("x-turn-planner-version") === "3") {
+      record("turn-plan-request");
+      if (earlyMode) await new Promise<void>((resolve) => { setTimer(resolve, plannerHoldMs); });
+      record("turn-plan-response");
+      return completion(plan);
+    }
+    if (headers.get("x-problem-ir-version") === "1") {
+      record("problem-authority-request");
+      const problem: ProblemIR = {
+        schemaVersion: "problem-ir/v1", id: "sourceAngle", question,
+        facts: [{ id: "request", kind: "requested", statement: question,
+          evidence: { source: "question", start: 0, end: question.length, quote: question } }],
+        entities: [], expressions: [], constraints: [], representationIntents: [], solveRequests: [],
+      };
+      if (plan === recordedPlan) {
+        problem.expressions.push({ id: "angle", valueType: "scalar", root: { kind: "number", value: 45 }, evidenceFactIds: ["request"] });
+        problem.solveRequests.push({ id: "angleValue", kind: "evaluate", expressionId: "angle",
+          resultBinding: { turnPlanQuantityId: "maximum_angle", symbol: "theta_max", unit: "deg", evidenceFactIds: ["request"] } });
+      } else if (plan === numericPlan) {
+        problem.expressions.push({ id: "rangeExpression", valueType: "scalar", evidenceFactIds: ["request"], root: {
+          kind: "binary", operator: "/", right: { kind: "number", value: 9.8 },
+          left: { kind: "binary", operator: "*",
+            left: { kind: "binary", operator: "^", left: { kind: "number", value: 20 }, right: { kind: "number", value: 2 } },
+            right: { kind: "call", function: "sin", argument: { kind: "binary", operator: "/",
+              left: { kind: "binary", operator: "*", left: { kind: "number", value: 60 }, right: { kind: "constant", name: "pi" } },
+              right: { kind: "number", value: 180 } } },
+          },
+        } });
+        problem.solveRequests.push({ id: "rangeValue", kind: "evaluate", expressionId: "rangeExpression",
+          resultBinding: { turnPlanQuantityId: "range", symbol: "R", unit: "m", evidenceFactIds: ["request"] } });
+      }
+      record("problem-authority-response");
+      return completion(problem);
+    }
+    if (headers.get("x-scene-planner-version") === "2") {
+      record("scene-model-request", { phase: headers.get("x-scene-planner-phase") });
+      if (fixture?.sceneResponseDelayMs) await new Promise<void>((resolve) => { setTimer(resolve, fixture.sceneResponseDelayMs); });
+      return completion({ schemaVersion: "scene-document/v2", source: { question }, entities: [{ id: "invalid-model-mark", kind: "not-a-real-entity" }] });
+    }
+    const hedgeRequest = headers.get("x-heytutor-teaching-hedge") === "1";
+    record("teaching-request", { retry: headers.get("x-heytutor-reasoning-retry") === "1", hedge: hedgeRequest });
+    teachingRequestBodies.push(JSON.parse(String(init?.body)));
+    if (fixture?.teachingFailure === "fetch") throw new TypeError("synthetic request network failure");
+    if (fixture?.teachingFailure === "auth" || fixture?.teachingFailure === "forbidden") {
+      return new Response("synthetic authorization denied", { status: fixture.teachingFailure === "auth" ? 401 : 403 });
+    }
+    if (fixture?.teachingFailure === "cancel") return await new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+    });
+    if (mode === "startup-timeout") throw new DOMException("The operation timed out", "TimeoutError");
+    if (hedgeRequest && mode === "hedge-fails") {
+      return new Response("provider busy", { status: 503 });
+    }
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const stream = {
+      get controller() { return controller; },
+      response: new Response(new ReadableStream<Uint8Array>({
+        start(next) { controller = next; },
+        cancel() { stream.cancelled = true; record("teaching-reader-cancelled"); },
+      }), { headers: { "content-type": "text/event-stream", "x-heytutor-trace-id": "offline-teaching-trace" } }),
+      retry: headers.get("x-heytutor-reasoning-retry") === "1",
+      startupRetry: headers.get("x-heytutor-startup-retry"),
+      hedge: hedgeRequest,
+      signal: init?.signal,
+      cancelled: false,
+    };
+    streams.push(stream);
+    if (fixture?.teachingFailure === "read") controller.error(new TypeError("synthetic response network failure"));
+    return stream.response;
+  });
+
+  const heldAcknowledgement: { finish: (() => void) | null } = { finish: null };
+  let acknowledgementHeld = false;
+  let activeVoiceKey: TutorVoiceKey = "en-IN";
+  const provider = {
+    setVoicePreferences(preferences: TutorVoicePreferences) { activeVoiceKey = preferences.voiceKey; record("voice-selected", activeVoiceKey); },
+    unlockAudio() { record("audio-unlock"); },
+    async prewarm(options?: { onConnect?: (result: { ms: number; ok: boolean }) => void }) {
+      record("tts-prewarm"); options?.onConnect?.({ ms: 0, ok: true });
+    },
+    prefetchSegment(text: string, options?: unknown) { record("opening-prefetch", { text, options, voiceKey: activeVoiceKey }); },
+    peekPrefetchedTimings() { return null; },
+    getPlaybackPositionMs: () => 1_000_000,
+    getPlaybackRate: () => 1,
+    setPlaybackRate() {},
+    async speakSegment(text: string, options: SpeakSegmentOptions = {}) {
+      if (mode === "early-late-ack" && text === buildEarlyLessonOpeningSegment().narration) {
+        await new Promise<void>((resolve) => { setTimer(resolve, 30); });
+      }
+      record("playback", { text, voiceSettings: options.voiceSettings, voiceKey: activeVoiceKey });
+      const chars = mathToSpeech(text).length;
+      options.onTimings?.({ totalDuration: chars * 0.02,
+        charStartTimes: Array.from({ length: chars }, (_, index) => index * 0.02),
+        charDurations: Array.from({ length: chars }, () => 0.02) });
+      options.onAudioReady?.();
+      options.onStart?.();
+      options.onAudioCaptured?.({ bytes: Uint8Array.of(82, 73, 70, 70), mimeType: "audio/wav" });
+      if (!acknowledgementHeld && ((mode === "early-stop" && text === buildEarlyLessonOpeningSegment().narration) ||
+        (fixture?.stopBeforeFigure && !fixture.stopBeforeFigure.uninterrupted))) {
+        acknowledgementHeld = true;
+        await new Promise<void>((resolve) => { heldAcknowledgement.finish = resolve; });
+      }
+      options.onEnd?.();
+    },
+    abandonSpeaking() { record("provider-stop"); },
+    stop() { record("provider-stop"); },
+    pause() {}, resume() {},
+  };
+  const ref = <T,>(current: T) => ({ current });
+  const cancelTimers = new Map<number, () => void>();
+  const fixtureCodeController = fixture?.recordedCodeLesson ? new CodeLessonController() : null;
+  const params = {
+    sessionId: boardId, boards: [{ id: boardId, title: "Projectile lesson", createdAt: 0, preview: "" }],
+    phase: "idle", boardLoaded: true, narrationText: "", isReplaying: false, enableKeyboardControls: false,
+    phaseRef: ref("idle"), cancelRef: ref(false), isPausedRef: ref(false), turnActiveRef: ref(false),
+    turnGenerationRef: ref(0), turnAbortRef: ref<AbortController | null>(null),
+    pendingQuestionRef: ref(null), autoSubmitDoneRef: ref(null), liveQuestionRef: ref(""),
+    boardPageRef: ref(null), boardShowsStoppedReplayRef: ref(false), conversationHistoryRef: ref([]),
+    collectedSegmentsRef: ref<TutorSegment[]>([]), recordedSegmentsRef: ref([]), storedTurnsRef: ref<StoredTurn[]>(structuredClone(timeoutSeed)),
+    rawResponseRef: ref(""), currentTraceIdRef: ref(null), turnTelemetryRef: ref(null),
+    segmentChainRef: ref(Promise.resolve()), drawChainRef: ref(Promise.resolve()),
+    turnStatsRef: ref({ drawMs: 0, ttsChars: 0 }), segmentPlanStatsRef: ref(createEmptySegmentPlanStats()),
+    narrationSinceEpochRef: ref(""), narrationDensityRef: ref(0), pendingSegmentCountRef: ref(0),
+    boardLayoutRef: ref({ rects: [], nextY: 100 }), fbdPhaseMarkedRef: ref(false), fbdPhaseStartedRef: ref(false),
+    activeVerifiedDiagramRef: ref(null), speedRef: ref(1), fastModeRef: ref(true), familiarityRef: ref("normal"),
+    stopTurnRef: ref(null), rewoundRef: ref(false), replayAudioRef: ref(null), replayDrawClockRef: ref(null),
+    replayAudioPreloadRef: ref(new Map()), replayGenerationRef: ref(0), replayCueRef: ref(null),
+    ttsClientRef: ref(provider), ensureTTSClient: () => provider as unknown as TTSClient,
+    ...(fixtureCodeController ? { codeLessonControllerRef: ref(fixtureCodeController) } : {}),
+    voicePreferencesRef: ref<TutorVoicePreferences>({ voiceKey: "en-IN", lowLatency: false }),
+    pendingVoicePreferencesRef: ref<TutorVoicePreferences | null>(fixture?.voiceKey || mode === "hinglish-opening"
+      ? { voiceKey: fixture?.voiceKey ?? "hi-IN", lowLatency: false } : null),
+    whiteboardRef: ref({
+      getDrawLayer: () => ({}), beginDrawTransaction: () => "offline-intro",
+      createDrawSavepoint: () => "offline-savepoint", rollbackDrawSavepoint() {},
+      commitDrawTransaction() { record("intro-commit"); }, abortDrawTransaction() {},
+      finishAbortedDrawTransaction() {}, setPaused() {}, cancelAnimations() {}, clearSpotlight() {},
+    }),
+    setPhase(value: unknown) { record("phase", value); },
+    setNarrationText(value: unknown) { record("narration", value); },
+    setCurrentSegmentText() {}, setLastError(value: unknown) { record("error-state", value); },
+    setIsPaused() {}, setInputInteracted() {}, setIsReplaying() {}, setReplayProgressMs() {}, setReplayTotalMs() {},
+    setStoredTurnsCount() {}, setBoards() {}, setActiveVerifiedDiagram() {},
+    beginBoardEpoch: async () => { record("board-epoch"); }, resetBoardLayout() {},
+    executeCommandWithCancel: async (command: DrawCommand) => {
+      record("board-command", command);
+      if (fixture?.recordedCodeLesson?.revealCommittedCode && command.type === "TYPE") {
+        const controller = fixtureCodeController;
+        const id = command.semanticRef?.entityId ?? command.text ?? "";
+        let typedMs = 0;
+        await controller?.typeBlock(id, { clock: () => (typedMs += 1_000), delay: async ms => { typedMs += ms; } });
+        const block = controller?.getActivePlan()?.sections.flatMap(section => section.blocks).find(block => block.id === id);
+        record("typed-code", { id, code: block?.code.slice(0, controller?.getState().revealedChars[id] ?? 0) });
+      }
+    },
+    reserveTextCommandPlacements: async (command: DrawCommand) => [command],
+    raceWithCancel: <T,>(promise: Promise<T>) => promise,
+    cancellableDelay: (delay: number) => new Promise<void>((resolve) => {
+      const timer = setTimer(() => { cancelTimers.delete(timer); resolve(); }, delay);
+      cancelTimers.set(timer, resolve);
+    }),
+    clearCancelTimers() {
+      for (const [timer, resolve] of cancelTimers) { timers.delete(timer); resolve(); }
+      cancelTimers.clear();
+    },
+    persistTurnForReplay: () => ({ id: "offline-turn", question, rawResponse: "", segments: [] }),
+    registerReplayBlobUrl() {}, revokeUnreferencedReplayBlobUrls() {},
+    onError(error: unknown) { record("turn-error", error); },
+  };
+  const loaded = new Map<string, Record<string, unknown>>();
+  if (fixture?.teachingFailure === "internal") {
+    let currentTrace: unknown = null;
+    Object.defineProperty(params.currentTraceIdRef, "current", { configurable: true,
+      get: () => currentTrace,
+      set: (value: unknown) => {
+        if (value === "offline-teaching-trace") throw new TypeError("synthetic internal fetch trace bug");
+        currentTrace = value;
+      },
+    });
+  }
+  function loadHook(file: string): Record<string, unknown> {
+    const cached = loaded.get(file);
+    if (cached) return cached;
+    const source = readFileSync(file.endsWith("/useQuestionHandler.ts")
+      ? process.env.STARTUP_TURN_HANDLER_SOURCE ?? file : file, "utf8");
+    let compiled = compiledHooks.get(source);
+    if (!compiled) {
+      compiled = ts.transpileModule(source, {
+        compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+      }).outputText;
+      compiledHooks.set(source, compiled);
+    }
+    const hookModule = { exports: {} };
+    const localRequire = (specifier: string) => {
+      if (specifier === "react") return mounted?.api ?? react;
+      if (specifier === "@heytutor/tutor-core" && fixture?.teachingFailure) return {
+        ...requireApp(specifier), ...teachingAPI,
+        streamLLMResponse: (options: teachingAPI.StreamLLMResponseParams, onDelta?: (chunk: string) => void) =>
+          teachingAPI.streamLLMResponse(options, chunk => {
+            if (fixture.teachingFailure === "callback") throw new TypeError("synthetic internal fetch callback bug");
+            onDelta?.(chunk);
+          }),
+      };
+      if (specifier === "@/lib/billing/billingClient") return {
+        ...requireApp(path.join(app, "lib/billing/billingClient.ts")),
+        beginTurn: async () => { record("turn-admission"); return { ok: true }; },
+      };
+      if (specifier === "@/lib/boards/boardsClient") return {
+        ...requireApp(path.join(app, "lib/boards/boardsClient.ts")),
+        saveTurn: async () => { record("board-save"); return null; },
+        requestBoardTitle: async () => null,
+        updateBoard: async () => null,
+      };
+      if (["./useSegmentRunner", "./useBoardViewport"].includes(specifier)) {
+        return loadHook(path.resolve(path.dirname(file), `${specifier}.ts`));
+      }
+      const target = specifier.startsWith("@/") ? path.join(app, specifier.slice(2))
+        : specifier.startsWith(".") ? path.resolve(path.dirname(file), specifier) : specifier;
+      if (target.endsWith("/earlyLessonOpening")) return loadHook(`${target}.ts`);
+      if (target.endsWith("/lessonOpeningPreparation")) {
+        const actual = loadHook(`${target}.ts`);
+        if (!fixture?.mutatePreparedOpeningWhenEnabled || !fixture.openingPrefetchEnabled) return actual;
+        return { ...actual, prepareLessonOpening(...args: unknown[]) {
+          const opening = (actual.prepareLessonOpening as (...values: unknown[]) => TutorSegment | null)(...args);
+          return opening ? { ...opening, narration: `${opening.narration} Deliberate parity mutation.` } : null;
+        } };
+      }
+      if ((fixture?.dropSelectedFigureWhenEarly || fixture?.stopBeforeFigure) && target.endsWith("/productionSceneSelection")) {
+        const actual: typeof import("../../features/tutor-session/lib/scene/productionSceneSelection") = requireApp(target);
+        return { ...actual, selectProductionScene(input: Parameters<typeof actual.selectProductionScene>[0]) {
+          const selected = actual.selectProductionScene(input);
+          if (fixture?.stopBeforeFigure) return { ...selected, representation: fixture.stopBeforeFigure.representation, visualStatus: "validated" };
+          return earlyEnabled && selected.representation
+            ? { ...selected, representation: null, visualStatus: "text_only", reason: "deliberate parity mutation" }
+            : selected;
+        } };
+      }
+      return requireApp(target);
+    };
+    new Function("require", "module", "exports", compiled)(localRequire, hookModule, hookModule.exports);
+    loaded.set(file, hookModule.exports);
+    return hookModule.exports;
+  }
+
+  const savedHedgeFlag = process.env.NEXT_PUBLIC_TEACHING_HEDGE;
+  const savedEarlyFlag = process.env.NEXT_PUBLIC_EARLY_LESSON_OPENING;
+  const savedOpeningPrefetchFlag = process.env.NEXT_PUBLIC_LESSON_OPENING_PREFETCH;
+  // The hook reads the flag once at module load, and each scenario loads it fresh.
+  if (hedgeEnabled) process.env.NEXT_PUBLIC_TEACHING_HEDGE = "1";
+  else delete process.env.NEXT_PUBLIC_TEACHING_HEDGE;
+  process.env.NEXT_PUBLIC_EARLY_LESSON_OPENING = earlyEnabled ? "1" : "0";
+  process.env.NEXT_PUBLIC_LESSON_OPENING_PREFETCH = fixture?.openingPrefetchEnabled ? "1" : "0";
+  try {
+    forgetVerifiedScene(question, { boardId });
+    const lifecycle = params as unknown as UseTurnLifecycleParams;
+    const handleRef = ref<(question: string, options?: HandleQuestionOptions) => Promise<void>>(async () => {});
+    const runControl = loadHook(path.join(app, "features/tutor-session/hooks/turn/useTurnControl.ts")).useTurnControl as
+      typeof import("../../features/tutor-session/hooks/turn/useTurnControl").useTurnControl;
+    const renderControl = () => mounted
+      ? mounted.render("control", () => runControl({ ...lifecycle, phase: lifecycle.phaseRef.current }, handleRef))
+      : runControl({ ...lifecycle, phase: lifecycle.phaseRef.current }, handleRef);
+    const control = renderControl();
+    if (recoveryMode) {
+      const saveModule: typeof import("../../features/tutor-session/lib/turn/liveTurnSave") = requireApp(path.join(app, "features/tutor-session/lib/turn/liveTurnSave.ts"));
+      detachOpeningMirror = saveModule.liveTurnSave().attach(params.cancelRef, {
+        openBoardId: () => boardId,
+        mirror(event) {
+          // Local rows are the exact requests the fake save transport accepts;
+          // server receipts stamp raw final status without dropping those rows.
+          const prior = lifecycle.storedTurnsRef.current.find((turn) => turn.id === event.turnId);
+          const snapshot: StoredTurn = event.source === "server" && prior
+            ? { ...prior, status: event.turn.status, persistedStatus: event.turn.status }
+            : { ...event.turn, segments: event.rows.map((row, orderIndex) => ({ ...row, id: `${event.turnId}:${orderIndex}`, audioUrl: null })) };
+          lifecycle.storedTurnsRef.current = saveModule.overlayLiveTurnEvent(lifecycle.storedTurnsRef.current, event, snapshot);
+        },
+      });
+    }
+    const observeControl: Pick<TurnControlApi, "finishLectureUi" | "enqueueSegment" | "enqueueVerifiedIntro" | "processResponseText" | "offerPausedLessonResume" | "clearPausedLesson" | "hasPausedLesson"> = {
+      ...control,
+      enqueueSegment(segment, generation) { record("enqueue", segment); control.enqueueSegment(segment, generation); },
+      enqueueVerifiedIntro(segments, generation) { record("enqueue-intro", segments); control.enqueueVerifiedIntro(segments, generation); },
+      offerPausedLessonResume(resume) { record("resume-offer", resume); control.offerPausedLessonResume(resume); },
+    };
+    const runHandler = loadHook(path.join(app, "features/tutor-session/hooks/turn/useQuestionHandler.ts")).useQuestionHandler as
+      typeof import("../../features/tutor-session/hooks/turn/useQuestionHandler").useQuestionHandler;
+    const handler = mounted ? mounted.render("handler", () => runHandler(lifecycle, observeControl)) : runHandler(lifecycle, observeControl);
+    handleRef.current = handler.handleQuestion;
+    const resume: PausedLessonRequest | undefined = mode === "resume-no-ink" ? {
+      boardId, reason: "doubt", lessonQuestion: question, turnPlan: plan, solverProjection: null,
+      parentTurnId: parentId, parentTraceId,
+      scene: null, figureDrawn: true, codeLesson: false, lessonBoardRows: [], interruptedStep: "The range follows from horizontal motion.",
+    } : undefined;
+    if (resume) control.offerPausedLessonResume(resume);
+    let done = false;
+    let dispatchedQuestion = plan === recordedPlan ? projectileQuestion : question;
+    if (mode === "startup-timeout") {
+      const notice = unsavedLessonBoard({ isDraft: false, boardLoaded: true, title: "Explain bonding", preview: question.slice(0, 60),
+        turns: timeoutSeed.map((turn) => ({ question: turn.question, segmentCount: taughtSegmentCount(turn.segments) })) });
+      assert(notice, "a previously stopped empty lesson offers Teach it again before this attempt");
+      const action = unsavedNoticeAction(notice);
+      assert.equal(action.exact, true, "the existing board has its complete question, not only the shortened preview");
+      dispatchedQuestion = action.text;
+      record("teach-again-dispatch", action);
+    }
+    const turn = handler.handleQuestion(dispatchedQuestion, resume ? { resume } : undefined)
+      .catch((error: unknown) => {
+        if ((!recoveryMode && !mode.startsWith("opening-prefetch-stop")) || !isBenignTurnAbort(error)) throw error;
+        record("stopped-planning-abort");
+      }).finally(() => { done = true; });
+    await flush();
+    const claimAt = events.findIndex((event) => event.name === "lesson-claim-acquired");
+    const historyAt = events.findIndex((event) => event.name === "owned-history-read");
+    const billingAt = events.findIndex((event) => event.name === "turn-admission");
+    assert(claimAt >= 0 && historyAt >= 0 && billingAt >= 0, "startup requires positive claim, history and billing receipts");
+    assert(claimAt < historyAt, "fresh history is read under the held claim");
+    assert(historyAt < billingAt, "successful owned history precedes billing");
+    if (fixture?.teachingFailure) {
+      await pump(() => events.some(event => event.name === "teaching-request"));
+      if (fixture.teachingFailure === "cancel") renderControl().stopTurn({ keepVisibleBoard: true });
+      if (fixture.teachingFailure === "callback") {
+        await pump(() => streams.length === 1);
+        content(0, "[STEP]Synthetic callback input.[/STEP]");
+      }
+      await pump(() => done);
+      await turn;
+      const errors = events.filter(event => event.name === "turn-error").map(event => event.data as { message: string });
+      const failure = lifecycle.boardPageRef.current?.failureTelemetry;
+      const network = fixture.teachingFailure === "fetch" || fixture.teachingFailure === "read";
+      const cancelled = fixture.teachingFailure === "cancel";
+      assert.equal(errors.length, cancelled ? 0 : 1, "Stop stays quiet; a current failure reaches the student exactly once");
+      if (!cancelled) {
+        assert.equal(failure?.code, network ? "transport_error" : "lesson_not_taught", "only boundary-typed network failures get the transport code");
+        assert.equal(errors[0]?.message, network ? "network error. check your connection" : "something went wrong. try asking again.");
+      } else assert.notEqual(failure?.failed, true, "Stop cannot classify a failed teaching attempt");
+      const requests = events.filter(event => event.name === "teaching-request").length;
+      assert.equal(requests, network && hedgeEnabled ? 2 : 1, "classification cannot introduce an extra request allowance");
+      assert.equal(lifecycle.turnAbortRef.current, null);
+      assert.equal(lifecycle.turnActiveRef.current, false);
+      assert.equal(lifecycle.phaseRef.current, "idle");
+      assert.equal(lifecycle.pendingSegmentCountRef.current, 0);
+      assert.equal(lifecycle.turnTelemetryRef.current, null);
+      assert.equal(heldLocks.size, 0, "failure settlement releases native lesson ownership");
+      for (const stream of streams) assert.equal(stream.response.body?.locked, false);
+      assert.equal(timers.size, 0, "failure settlement leaves no startup/queue timers");
+      return { mode, teachingFailure: fixture.teachingFailure, requests, code: failure?.code ?? null,
+        message: errors[0]?.message ?? null };
+    }
+    assert(heldLocks.has(`heytutor-lesson:${boardId}`), "the native claim remains held throughout the live teaching turn");
+    const outputs = () => events.filter((event) => ["enqueue", "enqueue-intro", "playback", "board-command"].includes(event.name));
+    const startupProjection = (): FrozenStartupProjection => {
+      const scene = lifecycle.boardPageRef.current?.turn.scene;
+      return {
+        requests: events.filter((event) => event.name === "request-body").map((event) => event.data as { kind: string; bodyHash: string }),
+        output: outputs().map((event) => ({ kind: event.name, contentHash: hash(event.data) })),
+        stages: events.filter((event) => ["turn-admission", "turn-plan-request", "turn-plan-response", "problem-authority-request",
+          "problem-authority-response", "scene-model-request", "teaching-request", "usable-step-delivered", "cancel-requested"].includes(event.name))
+          .map(({ name, atMs }) => ({ name, atMs })),
+        prefetched: events.filter((event) => event.name === "opening-prefetch").map((event) => {
+          const data = event.data as { text: string; options?: { voiceSettings?: unknown }; voiceKey: TutorVoiceKey };
+          return { atMs: event.atMs, textHash: hash(data.text), voiceSettingsHash: hash(data.options?.voiceSettings), voiceKey: data.voiceKey };
+        }),
+        planHash: hash(lifecycle.boardPageRef.current?.turnPlan ?? null),
+        sceneHash: hash(scene?.sceneDocument ?? null),
+        visualStatus: scene?.visualStatus ?? null,
+        errors: events.filter((event) => event.name === "turn-error").length,
+        errorOutputHash: hash(events.filter((event) => ["turn-error", "error-state"].includes(event.name))
+          .map((event) => ({ kind: event.name, data: event.data instanceof Error
+            ? { name: event.data.name, message: event.data.message } : event.data }))),
+      };
+    };
+    if (fixture?.stopBeforeFigure) {
+      const test = fixture.stopBeforeFigure;
+      let figureEventsFrom = 0;
+      await pump(() => streams.length === 1);
+      content(0, "[STEP]We identify the rod before calculating the requested length.[WRITE:Identify the rod,80,150][/STEP]");
+      if (test.uninterrupted) {
+        finishStream(0);
+        await pump(() => done);
+        await turn;
+      } else {
+        await pump(() => Boolean(heldAcknowledgement.finish));
+        assert.equal(events.filter(event => event.name === "board-command" && (event.data as DrawCommand).type.startsWith("DRAW_")).length, 0,
+          "Stop catches the actual handler before any figure ink");
+        renderControl().stopTurn();
+        heldAcknowledgement.finish!();
+        await pump(() => done);
+        await turn;
+        const stopped = renderControl();
+        assert.equal(stopped.pausedLessonOffer, true, "actual Stop offers Continue after taught opening");
+        assert.equal(lifecycle.boardPageRef.current?.figureDrawn, false);
+        assert(lifecycle.boardPageRef.current?.turn.scene?.sceneArtifacts, "paused scene retains saved artifacts");
+        // Freeze the paused planner scene in the authenticated history fixture.
+        // This isolates handler reconstruction from partial-save ink pruning.
+        const pausedScene = lifecycle.boardPageRef.current!.turn.scene!;
+        for (const row of lifecycle.storedTurnsRef.current) Object.assign(row, structuredClone(pausedScene));
+        if (test.stalePlan) {
+          // Corrupt only persisted authority, leaving the real paused question and runtime plan intact.
+          for (const row of lifecycle.storedTurnsRef.current) {
+            row.sceneArtifacts = { ...row.sceneArtifacts as object, turnPlan: test.stalePlan };
+            const scene = structuredClone(test.representation.sceneDocument);
+            scene.source.question = test.stalePlan.question;
+            row.sceneDocument = scene;
+          }
+        }
+        let continued: Promise<void> | undefined;
+        handleRef.current = (text, options) => continued = handler.handleQuestion(text, options);
+        figureEventsFrom = events.length;
+        stopped.flushPausedLesson();
+        await pump(() => streams.length === 2);
+        assert(continued, "Continue dispatches the actual question handler");
+        content(1, "[STEP]We continue identifying the rod without deriving the requested result.[WRITE:Continue the setup,80,200][/STEP]");
+        finishStream(1);
+        let resumed = false;
+        void continued.finally(() => { resumed = true; });
+        await pump(() => resumed);
+        await continued;
+      }
+      const figureEvents = events.slice(figureEventsFrom);
+      const intro = figureEvents.filter(event => event.name === "enqueue-intro")
+        .flatMap(event => (event.data as TutorSegment[]).flatMap(getSegmentCommands));
+      assert(intro.some(command => command.type.startsWith("DRAW_")), "real handler releases the compiled figure");
+      assert.equal(intro.some(command => command.text === "L = 5 m"), test.expectGiven,
+        "given L = 5 m must remain visible on Continue; invalid saved authority must fail closed");
+      assert(!intro.some(command => command.text === "R = 5 m"), "same-valued derived measurement remains withheld");
+      assert(!intro.some(command => command.semanticRef?.entityId === "result"), "derived measurement bar and witnesses also remain withheld");
+      assert.equal(intro.filter(command => command.semanticRef?.entityId === "given").length,
+        test.expectGiven ? 4 : 0, "given measurement label, bar and both witnesses move as one atom");
+      const teachingPlaybackAt = figureEvents.findIndex(event => event.name === "playback" &&
+        /We (?:identify|continue identifying) the rod/.test((event.data as { text: string }).text));
+      assert(teachingPlaybackAt >= 0, "actual runner reaches teaching after the figure intro");
+      const committed = figureEvents.slice(0, teachingPlaybackAt).filter(event => event.name === "board-command").map(event => event.data as DrawCommand);
+      assert.equal(committed.some(command => command.text === "L = 5 m"), test.expectGiven, "given reaches the actual board runner");
+      assert(!committed.some(command => command.text === "R = 5 m"), "derived label never reaches the board before derivation");
+      assert(!events.some(event => event.name === "turn-error"), "Stop/Continue completes without turn failures");
+      assert.equal(timers.size, 0);
+      return { mode, stopBeforeFigure: !test.uninterrupted, givenVisible: test.expectGiven, stalePlan: Boolean(test.stalePlan) };
+    }
+    if (openingPrefetchMode) {
+      assert.equal(earlyEnabled, false, "opening prefetch does not enable the acknowledgement experiment");
+      assert.equal(outputs().length, 0, "preparing audio cannot release speech or ink while planning is held");
+      if (mode.startsWith("opening-prefetch-stop")) {
+        if (mode === "opening-prefetch-stop-scene") await pump(() => events.some((event) => event.name === "scene-model-request"));
+        record("cancel-requested");
+        renderControl().stopTurn({ supersede: true });
+        await advance(HELD_PLANNER_MS);
+        await pump(() => done);
+        await turn;
+        await advance(now + 31_000);
+        assert.equal(streams.length, 0, "Stop before authority prevents teaching dispatch");
+      } else {
+        await pump(() => streams.length === 1);
+        assert.equal(outputs().length, 0, "planning and prefetch retain the usable-step release gate");
+        if (mode === "opening-prefetch-silent") {
+          content(0, "[STEP][PAUSE:11][/STEP]");
+          finishStream(0);
+        } else {
+          record("usable-step-delivered");
+          content(0, "[STEP]We identify what the question asks us to establish.[WRITE:Identify the target,80,150][/STEP]");
+          finishStream(0);
+        }
+        await pump(() => done);
+        await turn;
+      }
+      if (mode !== "opening-prefetch-success") assert.equal(outputs().length, 0, "silent failure and Stop cannot release prefetched speech or board work");
+      if (mode === "opening-prefetch-silent") assert(events.some((event) => event.name === "turn-error"), "a control-only teaching response still fails visibly");
+      if (mode === "opening-prefetch-success") {
+        assert(!events.some((event) => event.name === "turn-error"), "frozen successful teaching reaches the actual runner");
+        assert.equal(events.filter((event) => event.name === "enqueue" && (event.data as TutorSegment).delivery === "opening").length, 1);
+      }
+      assert.equal(lifecycle.turnActiveRef.current, false);
+      assert.equal(lifecycle.pendingSegmentCountRef.current, 0);
+      assert.equal(timers.size, 0);
+      return { mode, startup: startupProjection() };
+    }
+    if (fixture?.recordedCodeLesson) {
+      await pump(() => streams.length === 1);
+      content(0, fixture.recordedCodeLesson.response);
+      finishStream(0);
+      for (const [index, response] of (fixture.recordedCodeLesson.continuationResponses ?? []).entries()) {
+        await pump(() => streams.length > index + 1 || done);
+        assert(!done, "a missing committed code block must request continuation rather than silently finish");
+        content(index + 1, response);
+        finishStream(index + 1);
+      }
+      await pump(() => done);
+      await turn;
+      await pump(() => lifecycle.pendingSegmentCountRef.current === 0);
+      assert(!events.some(event => event.name === "turn-error"), "recorded DSA must complete through the actual handler");
+      assert.equal(lifecycle.turnActiveRef.current, false);
+      assert.equal(lifecycle.phaseRef.current, "idle");
+      assert.equal(timers.size, 0);
+      return { mode, recordedCodeEvents: events, recordedCodeTeachingRequests: teachingRequestBodies };
+    }
+    if (earlyMode) {
+      const opening = buildEarlyLessonOpeningSegment();
+      const playbacks = () => events.filter((event) => event.name === "playback");
+      assert.equal(streams.length, 0, "teaching must wait for the held authoritative planner");
+      assert(!events.some((event) => event.name === "turn-plan-response"));
+      if (mode === "early-late-ack") {
+        await advance(10);
+        assert.equal(streams.length, 1, "fast planning may finish before the acknowledgement becomes audible");
+        assert.equal(lifecycle.phaseRef.current, "thinking");
+        await advance(30);
+      }
+      assert.equal(playbacks().length, earlyEnabled ? 1 : 0, "only ON may speak its safe opening before the planner responds");
+      if (earlyEnabled) {
+        assert.equal((playbacks()[0]!.data as { text: string }).text, opening.narration);
+        assert(events.indexOf(playbacks()[0]!) > billingAt, "safe speech must follow admission");
+        if (mode !== "early-stop") {
+          await pump(() => lifecycle.pendingSegmentCountRef.current === 0);
+          if (mode === "early-late-ack") {
+            assert.equal(lifecycle.phaseRef.current, "thinking", "a late acknowledgement must return to the still-pending real teaching wait");
+          } else {
+            assert(!events.some((event) => event.name === "turn-plan-response"), "the acknowledgement really completes while planning is held");
+            assert.equal(lifecycle.phaseRef.current, "planning",
+              "after the acknowledgement finishes, a held planner must show planning rather than silent speaking");
+          }
+        }
+      }
+      assert.equal(events.filter((event) => ["board-command", "enqueue-intro"].includes(event.name)).length, 0,
+        "safe speech cannot acquire figure or numeric ink authority");
+      if (mode === "startup-timeout") {
+        assert.equal(earlyEnabled, false, "this regression exercises the shipped flag-OFF path");
+        await advance(HELD_PLANNER_MS);
+        await pump(() => done);
+        await turn;
+        await flush();
+        assert(events.some((event) => event.name === "teaching-request"), "timeout occurs after authoritative planning");
+        assert(events.some((event) => event.name === "turn-error" &&
+          /took too long/i.test((event.data as { message: string }).message)), "the actual timeout explains retry to the student");
+        assert.equal(playbacks().length, 0, "OFF cannot save an acknowledgement before usable teaching");
+        assert.equal(events.filter((event) => ["board-command", "enqueue-intro"].includes(event.name)).length, 0);
+        const saved = structuredClone(lifecycle.storedTurnsRef.current);
+        assert.equal(saved.length, 2, "Teach it again persists a distinct stopped lesson after the old attempt");
+        assert.deepEqual(saved[0], timeoutSeed[0], "the restart preserves the previous stopped attempt");
+        const restarted = saved[1]!;
+        assert.notEqual(restarted.id, parentId);
+        assert.equal(restarted.kind, "lesson", "Teach it again starts a fresh lesson rather than a resume");
+        assert.equal(restarted.question, question, "the failed fresh attempt preserves the complete original question");
+        assert.equal(restarted.persistedStatus, "stopped");
+        assert(!restarted.segments.some((segment) => segment.narration.trim()), "no taught speech exists to continue");
+        const recovered = lessonRecoveryFromStoredTurns(saved, { boardId, ownerState: "inactive" });
+        assert.notEqual(recovered?.kind, "continue", "reopening an OFF startup timeout never offers Continue");
+        const notice = unsavedLessonBoard({ isDraft: false, boardLoaded: true, title: "Projectile lesson", preview: question.slice(0, 60),
+          turns: saved.map((turn) => ({ question: turn.question, segmentCount: taughtSegmentCount(turn.segments) })) });
+        assert(notice, "the reopened empty board offers Teach it again");
+        assert.deepEqual(unsavedNoticeAction(notice), { text: question, exact: true }, "Teach it again dispatches the complete original question");
+        assert.equal(lifecycle.phaseRef.current, "idle");
+        assert.equal(lifecycle.turnActiveRef.current, false);
+        assert.equal(lifecycle.turnAbortRef.current, null);
+        assert.equal(timers.size, 0);
+        return { mode, early: false, restartedFromSavedQuestion: true, savedStatus: restarted.persistedStatus,
+          savedRows: restarted.segments.length, recovery: recovered?.kind ?? "teach-again", playbacks: 0 };
+      }
+      if (recoveryMode) {
+        const beforeStop = outputs().length;
+        if (mode === "early-doubt") renderControl().handleAskDoubt("What does the launch speed symbol mean?");
+        else renderControl().stopTurn();
+        if (mode === "early-stop") {
+          assert(heldAcknowledgement.finish, "the source runner still owns a late acknowledgement completion");
+          assert.equal(lifecycle.phaseRef.current, "idle", "Stop itself finishes idle");
+          // Model a newer generation already speaking before the old voice's
+          // completion. Its phase must survive the old promise continuation.
+          lifecycle.phaseRef.current = "speaking";
+          heldAcknowledgement.finish();
+          await advance(1_000);
+          assert.equal(lifecycle.phaseRef.current, "speaking", "late acknowledgement cannot clobber a successor turn's phase");
+          lifecycle.phaseRef.current = "idle";
+        }
+        if (mode === "early-doubt") {
+          await flush();
+          assert.equal(streams.length, 1, "the actual interruption starts one doubt teaching request");
+          content(0, "[STEP]The symbol denotes launch speed.[WRITE:u: launch speed,80,150][/STEP]");
+          finishStream(0);
+          await pump(() => lifecycle.phaseRef.current === "idle" && !lifecycle.turnActiveRef.current);
+          await flush();
+        }
+        await advance(HELD_PLANNER_MS);
+        await pump(() => done);
+        await turn;
+        if (mode === "early-stop") {
+          assert.equal(outputs().length, beforeStop, "Stop suppresses every late planner, figure and teaching effect");
+          assert.equal(streams.length, 0);
+        } else {
+          const saved = lifecycle.storedTurnsRef.current;
+          assert(saved.some((turn) => turn.kind === "doubt" && turn.persistedStatus === "complete" && turn.segments.length > 0),
+            "the actual handler saves the substantive doubt before publishing restart");
+          const recovered = lessonRecoveryFromStoredTurns(saved, { boardId, ownerState: "inactive" });
+          assert.equal(recovered?.kind, "restart", "the actual saved opening/doubt chain recovers identically on reload");
+          assert.equal(recovered?.request.lessonQuestion, question);
+        }
+        assert(events.some((event) => event.name === "stopped-planning-abort"), "Stop keeps the existing cancelled-planning boundary");
+        const idle = renderControl();
+        assert.equal(idle.pausedLessonOffer, false, "an opening-only lesson has no Continue action");
+        assert.equal(idle.earlyLessonRestartOffer, true, "the actual mounted hook publishes explicit restart");
+        const savedBeforeRestart = structuredClone(lifecycle.storedTurnsRef.current);
+        const plannerRequestsBeforeRestart = events.filter((event) => event.name === "turn-plan-request").length;
+        let restarted = false;
+        let restartedQuestion = "";
+        let restartedOptions: HandleQuestionOptions | undefined;
+        handleRef.current = async (text, options) => {
+          assert(!restarted, "double click cannot dispatch a second fresh attempt");
+          restarted = true; restartedQuestion = text; restartedOptions = options;
+          await handler.handleQuestion(text, options);
+        };
+        idle.restartEarlyLesson(); idle.restartEarlyLesson();
+        await flush();
+        assert.equal(restartedQuestion, question);
+        assert(!restartedOptions?.resume && !restartedOptions?.doubt, "explicit restart dispatch is a fresh ordinary lesson");
+        assert(events.filter((event) => event.name === "turn-plan-request").length > plannerRequestsBeforeRestart,
+          "the actual restart re-enters admission and a new authoritative planner request");
+        assert.equal(events.filter((event) => event.name === "turn-admission").length, mode === "early-doubt" ? 3 : 2,
+          "one restart click gets one new billing/admission receipt");
+        assert.deepEqual(lifecycle.storedTurnsRef.current.slice(0, savedBeforeRestart.length), savedBeforeRestart,
+          "restart does not rewrite the saved opening or doubt to fake completion");
+        await advance(now + HELD_PLANNER_MS);
+        assert.equal(streams.length, mode === "early-doubt" ? 2 : 1);
+        const restartStream = streams.length - 1;
+        content(restartStream, "[STEP]We identify the target.[WRITE:Identify the target,80,150][/STEP]");
+        finishStream(restartStream);
+        await pump(() => lifecycle.phaseRef.current === "idle" && !lifecycle.turnActiveRef.current);
+        await flush();
+        assert.equal(lifecycle.turnActiveRef.current, false);
+        assert.equal(lifecycle.pendingSegmentCountRef.current, 0);
+        assert.equal(timers.size, 0);
+        return { mode, early: earlyEnabled, events: events.length };
+      }
+      if (mode === "early-pause") control.pauseTurn();
+      await advance(Math.max(now, plannerHoldMs));
+      assert.equal(streams.length, 1, "the frozen planner must still start exactly one teaching request");
+      const teachingBody = teachingRequestBodies[0]!;
+      const teachingSystem = teachingBody.messages.find((message) => message.role === "system")!.content;
+      if (fixture?.requireGivenRows) {
+        assert(teachingSystem.includes("GIVEN VALUES ARE ALREADY ON THE BOARD"),
+          "the numeric fixture must exercise the actual generated Given-row addon");
+        assert(teachingSystem.includes("Do not rewrite those givens as a second list"),
+          "acknowledgement framing must preserve runtime ownership of the Given rows");
+      }
+      if (earlyEnabled) {
+        assert(!teachingSystem.includes("THE LESSON HAS ALREADY BEEN OPENED"),
+          "an acknowledgement must not falsely claim question framing was already spoken");
+        assert(!teachingSystem.includes("naming what the question asks for"),
+          "the actual ON base prompt must not claim question framing was already spoken");
+        assert(!teachingSystem.includes("do not say what the question asks for again"),
+          "the actual ON base prompt must not forbid the still-required question framing");
+        assert(!teachingSystem.includes("The runtime already spoke the opening line"),
+          "the actual ON Given-row addon must not falsely claim a question-specific opening");
+        assert(teachingSystem.includes("briefly identify what this question asks"),
+          "the actual teaching request still asks for question-specific framing after the acknowledgement");
+      } else {
+        assert(teachingSystem.startsWith(`${TUTOR_SYSTEM_PROMPT}\n\n--- current lesson (runtime) ---\n`),
+          "OFF retains every byte of the existing tutor base prompt");
+        assert(teachingSystem.includes("THE LESSON HAS ALREADY BEEN OPENED"), "OFF retains its legacy spoken framing policy");
+      }
+      content(0, "[STEP]We identify what the question asks us to establish.[WRITE:Identify the target,80,150][/STEP]");
+      finishStream(0);
+      if (mode === "early-pause") {
+        await advance(HELD_PLANNER_MS + 1_000);
+        assert.equal(playbacks().length, 1, "Pause holds substantive speech after planning");
+        assert.equal(events.filter((event) => event.name === "board-command").length, 0);
+        control.resumeTurn();
+      }
+      await pump(() => done);
+      await turn;
+      if (fixture?.requireGivenRows) {
+        assert(events.some((event) => event.name === "board-command" &&
+          (event.data as DrawCommand).type === "WRITE" && (event.data as DrawCommand).text?.startsWith("Given:")),
+        "the numeric fixture must commit real runtime Given rows after release, not only a prompt marker");
+      }
+      assert(!events.some((event) => event.name === "turn-error"));
+      assert.equal(events.filter((event) => event.name === "enqueue" && (event.data as TutorSegment).delivery === "opening").length, 1,
+        "the acknowledgement replaces, rather than duplicates, the legacy opening");
+      assert.equal(lifecycle.turnAbortRef.current, null);
+      assert.equal(lifecycle.turnActiveRef.current, false);
+      assert.equal(lifecycle.pendingSegmentCountRef.current, 0);
+      assert.equal(timers.size, 0);
+      const page = lifecycle.boardPageRef.current;
+      const scene = page?.turn.scene;
+      return {
+        mode, early: earlyEnabled, figureDrawn: page?.figureDrawn ?? false,
+        sceneDocument: scene?.sceneDocument ?? null, visualStatus: scene?.visualStatus ?? null,
+        figureSource: scene?.sceneArtifacts && typeof scene.sceneArtifacts === "object" && "figureSource" in scene.sceneArtifacts
+          ? scene.sceneArtifacts.figureSource : null,
+        plannerRequests: events.filter((event) => event.name === "frozen-planner-request").map((event) => event.data),
+        drawing: events.filter((event) => event.name === "board-command").map((event) => event.data as DrawCommand)
+          .filter((command) => command.type.startsWith("DRAW_") || ["LABEL", "DIMENSION", "ARROW"].includes(command.type))
+          .map(({ type, params, text }) => ({ type, params, text })),
+        ...(fixture?.openingPrefetchEnabled === undefined ? {} : { startup: startupProjection() }),
+      };
+    }
+    assert.equal(streams.length, 1, `${mode}: planning must reach the real teaching stream`);
+    assert.equal(outputs().length, 0, "planning/prefetch must not enqueue or play the opening");
+    const prefetch = events.find((event) => event.name === "opening-prefetch");
+    if (!resume) {
+      assert(prefetch, "the actual opening must be prefetched");
+      assert(events.indexOf(prefetch) < events.findIndex((event) => event.name === "teaching-request"), "opening prefetch must precede the teaching request");
+    }
+    if (mode === "numeric" || mode === "failed-compile" || mode === "recorded-projectile") {
+      assert(prefetch);
+      const authority = events.findIndex((event) => event.name === "problem-authority-response");
+      assert(authority >= 0 && authority < events.indexOf(prefetch), "source numbers/operators must retain a formulation attempt before teaching");
+      if (mode === "numeric") {
+        assert(authority < events.findIndex((event) => event.name === "scene-model-request"), "numeric solver authority must resolve before startup scene selection");
+      }
+    } else if (plan === symbolicPlan) {
+      assert.equal(events.filter((event) => event.name === "problem-authority-request").length, 0, "the source-answered symbolic projectile must not formulate a numeric problem");
+    }
+    const sceneRequests = events.filter((event) => event.name === "scene-model-request");
+    if (mode === "numeric" || mode === "failed-compile") {
+      assert(sceneRequests.length > 0, "rejected fast representations must still request and validate model scenes");
+      const artifacts = lifecycle.boardPageRef.current?.turn.scene?.sceneArtifacts;
+      assert(typeof artifacts === "object" && artifacts !== null && "candidates" in artifacts && Array.isArray(artifacts.candidates));
+      assert(artifacts.candidates.length > 0);
+      assert(artifacts.candidates.every((candidate) => candidate.validationReport.valid === false && candidate.accepted === false),
+        `invalid model scenes must be rejected by actual validation: ${JSON.stringify(artifacts.candidates.map((candidate) => ({ id: candidate.candidateId, valid: candidate.validationReport.valid, accepted: candidate.accepted, codes: candidate.rejectionCodes })))}`);
+      assert("selectedCandidateId" in artifacts);
+      assert.equal(artifacts.selectedCandidateId, null, "an invalid model candidate cannot be recorded as the selected numeric fallback");
+    } else {
+      assert.equal(sceneRequests.length, 0, "accepted source-valid projectile startup must never call the scene model");
+    }
+    streams[0]!.controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"role":"assistant","reasoning_content":"Hidden planning only."}}]}\n\n'));
+    content(0, " \n");
+    await flush();
+    assert.equal(outputs().length, 0, "reasoning and whitespace are not a usable teaching step");
+    if (mode === "pause-stall" || mode === "pause-prelude") {
+      content(0, "[STEP][PAUSE:11][/STEP][STEP][PAUSE:22][/STEP]");
+      await flush();
+      assert.equal(outputs().length, 0, "accepted PAUSE-only steps cannot release any opening, queue, or playback");
+      assert([...timers.values()].some((timer) => timer.at === 15_000), "control-only steps must keep the startup deadline armed");
+    }
+
+    if (mode === "resume-no-ink") {
+      content(0, "[STEP]We continue from the horizontal motion without writing anything.[/STEP]");
+      finishStream(0);
+      await flush();
+      assert.equal(streams.length, 2, "a speech-only notebook resume must get its existing corrective ink retry");
+      content(1, "[STEP]The corrective attempt also speaks without a board row.[/STEP]");
+      finishStream(1);
+      await pump(() => done);
+      await turn;
+      assert.equal(outputs().length, 0, "no-ink resumed attempts must not release opening, figure or speech");
+      assert(events.some((event) => event.name === "turn-error"), "a failed no-ink resume must expose an error");
+      const restoredOffer = events.find((event) => event.name === "resume-offer")?.data as PausedLessonRequest | undefined;
+      assert(restoredOffer && savedRepresentation, "failed notebook resumption must restore its authenticated request");
+      assert.equal(restoredOffer.boardId, boardId);
+      assert.equal(restoredOffer.parentTurnId, parentId);
+      assert.equal(restoredOffer.parentTraceId, parentTraceId);
+      assert.equal(restoredOffer.lessonQuestion, question);
+      assert.equal(restoredOffer.reason, "stop", "the saved parent is an explicit Stop, not the obsolete doubt context");
+      assert.deepEqual(restoredOffer.turnPlan, plan, "retry retains the source plan in the owned parent receipt");
+      assert.deepEqual(restoredOffer.scene, {
+        sceneDocument: savedRepresentation.sceneDocument, sceneEngineVersion: null,
+        validationReport: savedRepresentation.validationReport, visualStatus: "validated", sceneArtifacts: { turnPlan: plan },
+      }, "retry retains the already drawn, source-validated parent scene");
+      assert.equal(restoredOffer.solverProjection, null, "retry preserves the saved null solver projection");
+      assert.equal(restoredOffer.figureDrawn, true);
+      assert.equal(restoredOffer.codeLesson, false);
+      assert.equal(restoredOffer.interruptedStep, "The range follows from horizontal motion.");
+      assert.deepEqual(restoredOffer.lessonBoardRows, []);
+      let continued: { question: string; options?: HandleQuestionOptions } | undefined;
+      handleRef.current = async (nextQuestion, options) => {
+        continued = { question: nextQuestion, options };
+        lifecycle.turnActiveRef.current = true;
+      };
+      control.flushPausedLesson();
+      await flush();
+      assert.equal(continued?.question, question, "the restored Continue action must still dispatch the paused lecture");
+      assert.equal(continued?.options?.resume, restoredOffer, "Continue dispatches the exact restored receipt object with its board/plan/scene ownership");
+      control.finishLectureUi(lifecycle.turnGenerationRef.current);
+    } else if (mode === "control-eof") {
+      content(0, "[STEP][PAUSE:11][/STEP]");
+      finishStream(0);
+      await pump(() => done);
+      await turn;
+      assert.equal(outputs().length, 0, "control-only EOF must never enqueue an opening, figure, playback or board work");
+      assert(events.some((event) => event.name === "turn-error"), "control-only EOF must expose an actionable error");
+      assert(!events.some((event) => event.name === "persist-local"), "a control-only response is not a saved lecture");
+    } else if (mode === "one-step-stall" || mode === "one-step-split-stall") {
+      record("usable-step-delivered");
+      content(0, "[STEP]The range follows from horizontal motion.[WRITE:R = u t,80,150]" +
+        (mode === "one-step-split-stall" ? "[/ST" : "[/STEP]"));
+      if (mode === "one-step-split-stall") {
+        await flush();
+        assert.equal(outputs().length, 0, "an incomplete closing STEP must not release the buffered teaching step");
+        content(0, "EP]");
+      }
+      await flush();
+      assert(outputs().length > 0, "one complete usable teaching step must release the opening without waiting for another step");
+      assert(events.some((event) => event.name === "enqueue" && (event.data as TutorSegment).narration.startsWith("The range follows")),
+        "the complete first step must reach the actual teaching queue");
+      await advance(30_000);
+      assert.equal(streams.length, 1, "a complete usable step must not be discarded by a startup timeout retry");
+      assert(!events.some((event) => event.name === "turn-error"), "available teaching content must not become a false startup error");
+      const countBeforeStop = outputs().length;
+      runControl({ ...lifecycle, phase: lifecycle.phaseRef.current }, handleRef).stopTurn({ keepVisibleBoard: true });
+      await pump(() => done);
+      await turn;
+      assert.equal(outputs().length, countBeforeStop, "Stop must not release more work from the stalled stream");
+    } else if (mode === "stop-before-expiry" || mode === "stale-content") {
+      if (mode === "stale-content") {
+        content(0, "[STEP]This queued stale sentence must not play.[WRITE:R = u t,80,150][/STEP][STEP]Nor may this one.[/STEP]");
+      }
+      runControl({ ...lifecycle, phase: lifecycle.phaseRef.current }, handleRef).stopTurn({ keepVisibleBoard: true });
+      await flush();
+      assert.equal(streams[0]!.signal?.aborted, true);
+      assert.equal(streams[0]!.cancelled, true);
+      await pump(() => done);
+      await turn;
+      assert.equal(timers.size, 0, "Stop must immediately release startup and planner timers");
+      await advance(now + 31_000);
+      assert.equal(streams.length, 1, "Stop must never start the no-reasoning retry");
+      assert.equal(outputs().length, 0, "Stop must prevent stale opening, playback, and board work");
+    } else {
+      let active = 0;
+      let expectedStreams = 1;
+      if (["retry", "prefix-stall", "partial-stall", "pause-stall", "retry-expires", "stop-during-retry"].includes(mode)) {
+        if (mode === "prefix-stall") content(0, "[STEP]");
+        if (mode === "partial-stall") content(0, "[STEP]Abandoned incomplete narration from the first attempt");
+        await flush();
+        assert.equal(outputs().length, 0, "partial prefixes/narration cannot release the opening");
+        // A primary that has said nothing at all is hedged at 8s; one that
+        // already sent a content token (even a bare prefix) is not.
+        const silent = hedgeEnabled && !["prefix-stall", "partial-stall", "pause-stall"].includes(mode);
+        await advance(8_000);
+        assert.equal(streams.length, silent ? 2 : 1, silent ? "a silent primary must be hedged at 8 seconds"
+          : hedgeEnabled ? "a primary with a content token is never hedged" : "with the hedge flag off no second request opens at 8 seconds");
+        if (silent) {
+          assert.equal(streams[1]!.hedge, true);
+          assert.equal(streams[1]!.retry, true, "the hedge must ask for reasoning off");
+          assert.equal(streams[0]!.signal?.aborted, false, "opening a hedge must not abort the primary");
+        }
+        await advance(15_000);
+        active = silent ? 2 : 1;
+        assert.equal(streams.length, active + 1, "a first-content expiry must retry exactly once");
+        assert(streams.slice(0, active).every((stream) => stream.cancelled), "expiry must cancel the primary and any hedge");
+        assert.equal(streams[active]!.retry, true, "the retry must send noReasoning to the actual stream transport");
+        assert.equal(streams[active]!.hedge, false, "the startup retry is never hedged");
+        assert.equal(streams[active]!.startupRetry, "first_content_timeout",
+          "the startup retry must name itself so the server moves it off the stalled Fast router");
+        assert(streams.slice(0, active).every((stream) => stream.startupRetry === null),
+          "the first request and its hedge are never startup retries");
+        assert.equal(outputs().length, 0, "the first expiry must not prematurely enqueue an opening");
+        expectedStreams = active + 1;
+      }
+      if (["hedge-wins", "hedge-primary-wins", "hedge-fails"].includes(mode)) {
+        await advance(7_999);
+        assert.equal(events.filter((event) => event.name === "teaching-request").length, 1, "the hedge must wait for its threshold");
+        await advance(8_000);
+        const requests = events.filter((event) => event.name === "teaching-request");
+        assert.equal(requests.length, 2, "a silent primary must be hedged at 8 seconds");
+        assert.deepEqual(requests[1]!.data, { retry: true, hedge: true }, "the hedge must send both hedge and reasoning-off headers");
+        assert.equal(streams[0]!.signal?.aborted, false, "opening a hedge must not abort the primary");
+        assert.equal(outputs().length, 0, "opening a hedge must not release the opening");
+        if (mode === "hedge-wins") {
+          active = 1;
+          expectedStreams = 2;
+        } else {
+          expectedStreams = mode === "hedge-fails" ? 1 : 2;
+        }
+      }
+      if (mode === "retry-expires") {
+        await advance(30_000);
+      } else if (mode === "stop-during-retry") {
+        runControl({ ...lifecycle, phase: lifecycle.phaseRef.current }, handleRef).stopTurn({ keepVisibleBoard: true });
+        await flush();
+      } else {
+        content(active, "[STEP]");
+        await flush();
+        assert.equal(outputs().length, 0, "an incomplete STEP prefix must not release the opening");
+        if (mode === "marker-only") {
+          content(active, "[DRAW_CIRCLE:800,300,40][/STEP][STEP][DRAW_CIRCLE:800,300,40][/STEP]");
+          await flush();
+          assert.equal(outputs().length, 0, "filtered marker-only steps must not release the opening");
+          content(active, "[STEP]");
+        }
+        if (mode === "hedge-wins" || mode === "hedge-primary-wins") {
+          const loser = mode === "hedge-wins" ? 0 : 1;
+          assert.equal(streams[loser]!.signal?.aborted, true, "the first content token must abort the other request");
+          assert.equal(streams[loser]!.cancelled, true, "the losing paid body must be cancelled");
+          assert.equal(streams[active]!.signal?.aborted, false);
+        }
+        record("usable-step-delivered");
+        content(active, "The range follows from horizontal motion.[WRITE:R = u t,80,150][/STEP]\n[STEP]The flight time comes from vertical motion.[WRITE:t = 2 u sin(theta) / g,80,205][/STEP]");
+        if (fixture?.teachingTail) content(active, fixture.teachingTail);
+        finishStream(active);
+      }
+      await pump(() => done);
+      await turn;
+      assert.equal(streams.length, expectedStreams, "the one-shot startup retry cannot repeat or silently continue");
+      if (mode === "retry-expires") {
+        const error = events.find((event) => event.name === "turn-error");
+        assert(error, "a second startup expiry must expose a clear error, not an empty success");
+        assert.match((error.data as { message: string }).message, /start|time|too long/i, "the terminal retry error must explain startup expiry");
+        assert.equal(outputs().length, 0);
+      } else if (mode === "stop-during-retry") {
+        assert.equal(outputs().length, 0, "Stop must suppress the retry's stale content and opening");
+        assert(streams.every((stream) => stream.signal?.aborted && stream.cancelled), "Stop must abort the primary, the hedge and the retry");
+      } else {
+        const usable = events.findIndex((event) => event.name === "usable-step-delivered");
+        assert(outputs().length > 0, "a usable teaching step must actually run through the real queue and provider");
+        assert(outputs().every((event) => events.indexOf(event) > usable), "opening playback and enqueue must follow usable teaching content");
+        const opening = events.find((event) => event.name === "enqueue" && (event.data as TutorSegment).delivery === "opening");
+        assert(opening, "the opening must be enqueued once the real step gate opens");
+        const segment = opening.data as TutorSegment;
+        assert(prefetch);
+        const fetched = prefetch.data as { text: string; options: { voiceSettings: unknown; traceId: string; sessionId: string } };
+        assert.equal(fetched.text, segment.narration);
+        assert.equal(fetched.options.sessionId, boardId);
+        assert(fetched.options.traceId);
+        assert.deepEqual(fetched.options.voiceSettings, voiceSettingsForDelivery(segment.delivery));
+        const spoken = events.find((event) => event.name === "playback" && (event.data as { text: string }).text === segment.narration);
+        assert(spoken, "the real segment runner must play the prefetched opening");
+        assert.deepEqual((spoken.data as { voiceSettings: unknown }).voiceSettings, fetched.options.voiceSettings, "prefetch and actual playback must use the same delivery settings");
+        assert(!events.some((event) => event.name === "turn-error"));
+        const openings = events.filter((event) => event.name === "enqueue" && (event.data as TutorSegment).delivery === "opening");
+        assert.equal(openings.length, 1, "the opening must be released exactly once");
+        assert(events.filter((event) => event.name === "enqueue-intro").length <= 1, "the figure intro must be released at most once");
+        const narrations = events.filter((event) => event.name === "enqueue").map((event) => (event.data as TutorSegment).narration);
+        assert.equal(narrations.filter((text) => text.startsWith("The range follows")).length, 1, "no teaching step may be queued twice");
+        if (mode === "hinglish-opening") {
+          assert.equal(earlyEnabled, false, "Hinglish openings must work with the early acknowledgement experiment off");
+          const played = events.filter((event) => event.name === "playback")
+            .map((event) => event.data as { text: string; voiceKey: TutorVoiceKey });
+          const openingSpeech = played.slice(0, 3);
+          assert.equal(openingSpeech.length, 3, "the ordinary opening and both verified figure groups must reach the actual runner");
+          for (const beat of openingSpeech) {
+            assert.match(beat.text, /\p{Script=Devanagari}/u, "every runtime opening beat must be Hinglish, including both figure groups");
+            assert.equal(beat.voiceKey, "hi-IN", "the actual speaking provider must use the selected Hinglish voice from the first beat");
+            const lookahead = events.filter((event) => event.name === "opening-prefetch")
+              .map((event) => event.data as { text: string; voiceKey: TutorVoiceKey });
+            assert(lookahead.some((entry) => entry.text === beat.text && entry.voiceKey === "hi-IN"), "prefetch must generate those same words in that same voice");
+          }
+          assert.match(openingSpeech[0]!.text, /range of a projectile/, "ordinary question framing retains its target");
+          assert.match(openingSpeech[1]!.text, /launch velocity u/, "the first figure beat keeps its verified physical meaning");
+          assert.match(openingSpeech[1]!.text, /^(?:पहले इस figure का setup देखते हैं|ये setup है)\./, "the first figure beat starts with neutral Hinglish setup speech");
+          assert.match(openingSpeech[2]!.text, /^अब (?:figure का अगला हिस्सा देखते हैं|अगला हिस्सा देखते हैं)\./, "the next figure beat continues the neutral setup tour");
+          for (const beat of openingSpeech.slice(1)) {
+            assert.doesNotMatch(beat.text, /the parabolic path with its highest point and range|\d/, "figure beats must not speak the planner explanation or computed values");
+          }
+          const figureIntro = events.find((event) => event.name === "enqueue-intro")!.data as TutorSegment[];
+          assert.deepEqual(figureIntro.map((beat) => beat.narration), openingSpeech.slice(1).map((beat) => beat.text), "the actual runner speaks both verified neutral figure beats");
+          for (const beat of figureIntro) for (const command of getSegmentCommands(beat)) {
+            assert(command.spokenCue?.token && findSpokenToken(mathToSpeech(beat.narration), mathToSpeech(command.spokenCue.token)) >= 0,
+              "neutral runtime figure beats keep schedulable cue tokens for every mark");
+          }
+        }
+        const marks = telemetry.flatMap((payload) => payload.events ?? []);
+        const named = (name: string) => marks.filter((event) => event.name === name);
+        for (const name of ["teaching-first-token", "teaching-first-step"]) {
+          assert.equal(named(name).length, 1, `${name} must be marked once whatever the hedge flag`);
+        }
+        assert(named("teaching-request").length >= 1, "every teaching request must be marked");
+        if (!hedgeEnabled) {
+          assert.equal(marks.filter((event) => event.name.startsWith("teaching-hedge-")).length, 0, "no hedge marks without a hedge");
+          assert(named("teaching-request").every((event) => event.metadata?.attempt === "primary"));
+        }
+        if (HEDGE_MODES.includes(mode)) {
+          assert.deepEqual(named("teaching-request").map((event) => event.metadata?.attempt), ["primary", "hedge"]);
+          assert.equal(named("teaching-hedge-start").length, 1);
+          assert.equal(named("teaching-hedge-start")[0]!.metadata?.after_ms, 8_000);
+          const winner = named("teaching-hedge-winner");
+          if (mode === "hedge-fails") {
+            assert.equal(winner.length, 1, "a primary that outlives a failed hedge still wins the race");
+            assert.equal(winner[0]!.metadata?.winner, "primary");
+          } else {
+            assert.equal(winner.length, 1);
+            assert.equal(winner[0]!.metadata?.winner, mode === "hedge-wins" ? "hedge" : "primary");
+            assert.equal(typeof winner[0]!.metadata?.first_content_token_ms, "number");
+          }
+          for (const name of ["teaching-first-token", "teaching-first-step"]) {
+            assert.equal(named(name).length, 1, `${name} must be marked once`);
+            assert(Number(named(name)[0]!.metadata?.ms_since_request) >= 8_000, `${name} must be measured from the first request`);
+          }
+          const leaked = JSON.stringify(marks.filter((event) => event.name.startsWith("teaching-")));
+          assert(!leaked.includes("projectile") && !leaked.includes("range follows"), "teaching startup marks carry no student or lesson text");
+        }
+        if (mode === "prefix-stall" || mode === "partial-stall") {
+          assert(!lifecycle.rawResponseRef.current.includes("Abandoned incomplete narration"), "startup recovery must discard partial failed content");
+          assert.equal((lifecycle.rawResponseRef.current.match(/\[STEP\]/g) ?? []).length, 2, "startup recovery must reset the partial STEP parser and markup");
+        }
+        if (mode === "pause-stall" || mode === "pause-prelude") {
+          const queuedPauses = events.filter((event) => event.name === "enqueue")
+            .flatMap((event) => getSegmentCommands(event.data as TutorSegment))
+            .filter((command) => command.type === "PAUSE");
+          const executedPauses = events.filter((event) => event.name === "board-command" && (event.data as DrawCommand).type === "PAUSE");
+          if (mode === "pause-stall") {
+            assert.deepEqual(queuedPauses, [], "timeout retry must discard held control-only prelude segments");
+            assert.deepEqual(executedPauses, [], "abandoned controls must never execute on the retry's board");
+            assert(!lifecycle.rawResponseRef.current.includes("[PAUSE:"), "abandoned controls must not leak into the final saved response");
+          } else {
+            assert.deepEqual(queuedPauses.map((command) => command.params[0]), [11, 22], "held controls must release in their original order once narration is usable");
+            assert.deepEqual(executedPauses.map((event) => (event.data as DrawCommand).params[0]), [11, 22], "the real queue must execute each released control in order");
+            const firstTeaching = events.findIndex((event) => event.name === "enqueue" && (event.data as TutorSegment).narration.startsWith("The range follows"));
+            assert(firstTeaching > usable);
+            assert(events.filter((event) => event.name === "enqueue" && getSegmentCommands(event.data as TutorSegment).some((command) => command.type === "PAUSE"))
+              .every((event) => events.indexOf(event) > usable && events.indexOf(event) < firstTeaching), "released controls must precede the first teaching segment without starting the lesson early");
+          }
+        }
+      }
+    }
+    assert.equal(lifecycle.turnAbortRef.current, null, "settlement must release the owned abort controller");
+    assert.equal(lifecycle.turnActiveRef.current, false, "success and error must release the turn latch");
+    assert.equal(lifecycle.phaseRef.current, "idle");
+    assert.equal(lifecycle.pendingSegmentCountRef.current, 0);
+    assert.equal(lifecycle.turnTelemetryRef.current, null);
+    for (const stream of streams) assert.equal(stream.response.body?.locked, false, "every real stream reader must be released");
+    if (!hedgeEnabled) {
+      assert(streams.every((stream) => !stream.hedge), "the hedge flag is off by default: no hedge request may open");
+      assert(!events.some((event) => event.name === "teaching-request" && (event.data as { hedge: boolean }).hedge), "no hedge request may open");
+    }
+    assert.equal(timers.size, 0, `${mode}: settled success/error must not leave startup or queue timers running (${[...timers.values()].map((timer) => timer.at - now).join(", ")} ms remain)`);
+    if (mode === "retry") {
+      assert(telemetry.some((payload) => payload.events?.some((event) => event.name === "teaching-startup-retry" || event.name === "reasoning-only-retry")), "the actual expiry must emit retry telemetry");
+    }
+    return { mode, hedge: hedgeEnabled, events: events.length, teachingRequests: streams.length, sceneRequests: sceneRequests.length,
+      ...(mode === "hinglish-opening" ? {
+        playbacks: events.filter((event) => event.name === "playback").map((event) => event.data),
+        prefetched: events.filter((event) => event.name === "opening-prefetch").map((event) => event.data),
+      } : {}),
+      ...(fixture?.teachingTail ? {
+        collected: lifecycle.collectedSegmentsRef.current,
+        recorded: lifecycle.recordedSegmentsRef.current,
+      } : {}) };
+  } finally {
+    detachOpeningMirror();
+    if (savedHedgeFlag === undefined) delete process.env.NEXT_PUBLIC_TEACHING_HEDGE;
+    else process.env.NEXT_PUBLIC_TEACHING_HEDGE = savedHedgeFlag;
+    if (savedEarlyFlag === undefined) delete process.env.NEXT_PUBLIC_EARLY_LESSON_OPENING;
+    else process.env.NEXT_PUBLIC_EARLY_LESSON_OPENING = savedEarlyFlag;
+    if (savedOpeningPrefetchFlag === undefined) delete process.env.NEXT_PUBLIC_LESSON_OPENING_PREFETCH;
+    else process.env.NEXT_PUBLIC_LESSON_OPENING_PREFETCH = savedOpeningPrefetchFlag;
+    params.clearCancelTimers();
+    timers.clear();
+    forgetVerifiedScene(question, { boardId });
+    Date.now = originalDateNow;
+    for (const [key, descriptor] of saved) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else Reflect.deleteProperty(globalThis, key);
+    }
+  }
+}
+
+function verifySymlinkEntrypoint() {
+  const directory = mkdtempSync(path.join(tmpdir(), "heytutor-startup-entry-"));
+  const linkedScript = path.join(directory, "verify-startup-turn.ts");
+  try {
+    symlinkSync(fileURLToPath(import.meta.url), linkedScript);
+    // Select one real scenario, not another recursive full-suite parent.
+    const passed = spawnSync(process.execPath, ["--import", "tsx", linkedScript, "early-off"],
+      { cwd: app, encoding: "utf8", timeout: 30_000 });
+    assert.equal(passed.status, 0, `symlink scenario failed: ${passed.error?.message ?? passed.stderr}`);
+    assert(passed.stdout.includes("mode: 'early-off'") && passed.stdout.includes("checked_modes: 1"),
+      "a symlink subprocess must execute a nonzero number of actual hook scenarios, not just import successfully");
+    const rejected = spawnSync(process.execPath, ["--import", "tsx", linkedScript, "not-a-real-case"],
+      { cwd: app, encoding: "utf8", timeout: 30_000 });
+    assert.notEqual(rejected.status, 0, "symlink entry must also propagate assertion failure");
+    assert(rejected.stderr.includes("unknown case: not-a-real-case"), "the real main validates the symlink's selected case");
+    console.log("verify-startup-turn: symlink executed one actual OFF scenario and propagated its invalid-case assertion");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+async function main() {
+  const selected = process.argv[2];
+  if (selected === "entrypoint") { verifySymlinkEntrypoint(); return; }
+  const failures: string[] = [];
+  let checkedModes = 0;
+  const modes: Mode[] = ["ready", "hinglish-opening", "startup-timeout", "recorded-projectile", "numeric", "failed-compile", "retry", "prefix-stall", "partial-stall", "pause-stall", "pause-prelude", "control-eof", "one-step-stall", "one-step-split-stall", "resume-no-ink", "retry-expires", "stop-before-expiry", "stop-during-retry", "stale-content", "marker-only", "hedge-wins", "hedge-primary-wins", "hedge-fails", "early-on", "early-off", "early-stop", "early-doubt", "early-pause", "early-late-ack"];
+  // Default modes run with the hedge flag off, as shipped. The hedge modes,
+  // and one retry with a silent hedge, run with it forced on.
+  const runs: Array<[Mode, boolean]> = [
+    ...modes.map((mode): [Mode, boolean] => [mode, HEDGE_MODES.includes(mode)]),
+    ["retry", true],
+  ];
+  assert(!selected || modes.includes(selected as Mode), `unknown case: ${selected}`);
+  for (const [mode, hedge] of runs) {
+    if (selected && selected !== mode) continue;
+    const label = hedge && !HEDGE_MODES.includes(mode) ? `${mode}+hedge` : mode;
+    checkedModes += 1;
+    try {
+      const result = await scenario(mode, hedge, mode.startsWith("early-") && mode !== "early-off");
+      console.log("verify-startup-turn:", "drawing" in result
+        ? { mode: result.mode, early: result.early, figureDrawn: result.figureDrawn, drawingCount: result.drawing?.length ?? 0 }
+        : result);
+      if (mode === "early-pause") {
+        await scenario(mode, hedge, true, { plan: numericPlan, requireGivenRows: true });
+        console.log("verify-startup-turn:", { mode, numeric_given_request_and_rows: true });
+      }
+    }
+    catch (error) {
+      console.error(`verify-startup-turn: ${label}`, error);
+      failures.push(`${label}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  assert.equal(failures.length, 0, failures.join("\n"));
+  assert(checkedModes > 0, "a selected entrypoint must actually execute a scenario");
+  console.log("verify-startup-turn:", { checked_modes: checkedModes });
+  if (!selected) verifySymlinkEntrypoint();
+  if (!selected) {
+    const { verifyContinueGivenMeasurement } = await import("./verify-continue-given-measurement");
+    await verifyContinueGivenMeasurement();
+  }
+  console.log("verify-startup-turn: actual handler, validation, first-step gate, opening delivery, hedge, retry, Stop, and cleanup verified");
+}
+function isDirectEntrypoint() {
+  if (!process.argv[1]) return false;
+  try { return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url)); }
+  catch { return false; }
+}
+if (isDirectEntrypoint()) {
+  void main().catch((error) => { console.error(error); process.exitCode = 1; });
+}

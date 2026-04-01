@@ -1,0 +1,437 @@
+import {
+  DEFAULT_FIREWORKS_FAST_MODEL,
+  DEFAULT_CHEAP_FIREWORKS_MODEL,
+  DEFAULT_PROBLEM_IR_MODEL,
+  resolveCheapFireworksModel,
+} from "../../lib/llm/fireworksModels";
+import {
+  fetchPlannerCompletion,
+  PlannerReservationDenied,
+  resolvePlannerMaxTokens,
+  resolvePlannerModels,
+} from "../../lib/llm/plannerTransport";
+
+function assert(condition: unknown, message: string): asserts condition {
+  if (!condition) throw new Error(message);
+}
+
+async function main(): Promise<void> {
+  const defaultSceneModels = resolvePlannerModels({
+    semanticSceneV2: true,
+    turnPlanV3: false,
+    plannerPhase: "plan",
+    env: {},
+  });
+  assert(
+    defaultSceneModels[0] === "accounts/fireworks/models/kimi-k3",
+    "the default ENV model must be Kimi K3",
+  );
+
+  const envOnly = resolvePlannerModels({
+    semanticSceneV2: true,
+    turnPlanV3: false,
+    plannerPhase: "plan",
+    plannerLane: "alternate",
+    env: { FIREWORKS_MODEL: "only-this-model" },
+  });
+  assert(
+    JSON.stringify(envOnly) === JSON.stringify(["only-this-model"]),
+    "FIREWORKS_MODEL must be the only model used",
+  );
+  assert(
+    resolvePlannerMaxTokens({
+      semanticSceneV2: false,
+      turnPlanV3: true,
+      plannerPhase: "plan",
+      plannerLane: "primary",
+      env: {},
+    }) === 2800,
+    "hard turn plans need enough output budget to finish valid compact JSON",
+  );
+  const problemIRModels = resolvePlannerModels({
+    semanticSceneV2: false,
+    turnPlanV3: false,
+    problemIRV1: true,
+    plannerPhase: "plan",
+    env: {},
+  });
+  assert(
+    JSON.stringify(problemIRModels) === JSON.stringify([DEFAULT_PROBLEM_IR_MODEL]),
+    "Problem IR must default to its own model",
+  );
+  assert(
+    DEFAULT_PROBLEM_IR_MODEL === "accounts/fireworks/routers/kimi-k3-fast",
+    "the Problem IR default is Kimi K3 Fast in both modes",
+  );
+  const problemIRFast = resolvePlannerModels({
+    semanticSceneV2: false,
+    turnPlanV3: false,
+    problemIRV1: true,
+    plannerPhase: "plan",
+    fastMode: true,
+    env: {},
+  });
+  assert(
+    JSON.stringify(problemIRFast) === JSON.stringify([DEFAULT_PROBLEM_IR_MODEL]),
+    "fast mode must not change the Problem IR model",
+  );
+  const problemIRIgnoresPlannerEnv = resolvePlannerModels({
+    semanticSceneV2: false,
+    turnPlanV3: false,
+    problemIRV1: true,
+    plannerPhase: "plan",
+    fastMode: true,
+    env: {
+      FIREWORKS_MODEL: "planner-standard",
+      FIREWORKS_FAST_MODEL: "planner-fast",
+      FIREWORKS_TEACHING_MODEL: "teaching-only",
+      FIREWORKS_TEACHING_FAST_MODEL: "teaching-fast",
+    },
+  });
+  assert(
+    JSON.stringify(problemIRIgnoresPlannerEnv) === JSON.stringify([DEFAULT_PROBLEM_IR_MODEL]),
+    "FIREWORKS_MODEL / FIREWORKS_FAST_MODEL must not leak into Problem IR",
+  );
+  const problemIROverride = resolvePlannerModels({
+    semanticSceneV2: false,
+    turnPlanV3: false,
+    problemIRV1: true,
+    plannerPhase: "plan",
+    fastMode: true,
+    env: {
+      FIREWORKS_PROBLEM_IR_MODEL: "problem-ir-only",
+      FIREWORKS_MODEL: "planner-standard",
+      FIREWORKS_FAST_MODEL: "planner-fast",
+    },
+  });
+  assert(
+    JSON.stringify(problemIROverride) === JSON.stringify(["problem-ir-only"]),
+    "FIREWORKS_PROBLEM_IR_MODEL must be the only Problem IR override",
+  );
+  // Notes chat resolved its cheap model through Problem IR's resolver. Moving
+  // Problem IR to Kimi must leave that resolution byte for byte unchanged.
+  assert(
+    DEFAULT_CHEAP_FIREWORKS_MODEL === "accounts/fireworks/models/deepseek-v4p1-flash" &&
+      resolveCheapFireworksModel({ env: {} }) === "accounts/fireworks/models/deepseek-v4p1-flash" &&
+      resolveCheapFireworksModel({ env: { FIREWORKS_PROBLEM_IR_MODEL: " problem-ir-only " } }) === "problem-ir-only" &&
+      resolveCheapFireworksModel({ env: { FIREWORKS_MODEL: "planner-standard", FIREWORKS_FAST_MODEL: "planner-fast" } }) ===
+        "accounts/fireworks/models/deepseek-v4p1-flash",
+    "the cheap notes model must resolve exactly as before",
+  );
+  assert(
+    resolvePlannerMaxTokens({
+      semanticSceneV2: false,
+      turnPlanV3: false,
+      problemIRV1: true,
+      plannerPhase: "plan",
+      env: {},
+    }) === 3600,
+    "ProblemIR JSON must use the bounded structured-planner token budget",
+  );
+
+  const configuredModel = resolvePlannerModels({
+    semanticSceneV2: true,
+    turnPlanV3: false,
+    plannerPhase: "repair",
+    plannerLane: "alternate",
+    env: { FIREWORKS_MODEL: "only-this-model" },
+  });
+  assert(
+    JSON.stringify(configuredModel) === JSON.stringify(["only-this-model"]),
+    "lane-specific ENV must not override FIREWORKS_MODEL",
+  );
+  const teachingEnvMustNotLeak = resolvePlannerModels({
+    semanticSceneV2: true,
+    turnPlanV3: false,
+    plannerPhase: "plan",
+    env: { FIREWORKS_TEACHING_MODEL: "teaching-only-model" },
+  });
+  assert(
+    teachingEnvMustNotLeak[0] === "accounts/fireworks/models/kimi-k3",
+    "FIREWORKS_TEACHING_MODEL must not leak into planners",
+  );
+  assert(
+    resolvePlannerMaxTokens({
+      semanticSceneV2: true,
+      turnPlanV3: false,
+      plannerPhase: "plan",
+      plannerLane: "primary",
+      env: {},
+    }) === 4800,
+    "the primary scene lane needs enough output budget to avoid truncated JSON",
+  );
+  assert(
+    resolvePlannerMaxTokens({
+      semanticSceneV2: true,
+      turnPlanV3: false,
+      plannerPhase: "plan",
+      plannerLane: "alternate",
+      env: {},
+    }) === 5200,
+    "the alternate scene lane needs enough output budget for complete JSON",
+  );
+  assert(
+    resolvePlannerMaxTokens({
+      semanticSceneV2: true,
+      turnPlanV3: false,
+      plannerPhase: "plan",
+      plannerLane: "alternate",
+      env: { FIREWORKS_SCENE_ALTERNATE_MAX_TOKENS: "9000" },
+    }) === 6000,
+    "alternate scene token configuration must remain bounded",
+  );
+
+  const defaultFastModels = resolvePlannerModels({
+    semanticSceneV2: true,
+    turnPlanV3: false,
+    plannerPhase: "plan",
+    fastMode: true,
+    env: {},
+  });
+  assert(
+    JSON.stringify(defaultFastModels) === JSON.stringify([DEFAULT_FIREWORKS_FAST_MODEL]),
+    "fast mode must default to Kimi K3 Fast",
+  );
+  assert(
+    DEFAULT_FIREWORKS_FAST_MODEL === "accounts/fireworks/routers/kimi-k3-fast",
+    "the planner Fast SKU must stay on Kimi K3 Fast",
+  );
+  const turnPlanFast = resolvePlannerModels({
+    semanticSceneV2: false,
+    turnPlanV3: true,
+    plannerPhase: "plan",
+    fastMode: true,
+    env: {},
+  });
+  assert(
+    JSON.stringify(turnPlanFast) === JSON.stringify([DEFAULT_FIREWORKS_FAST_MODEL]),
+    "turn-plan-v3 fast mode must stay on Kimi K3 Fast",
+  );
+  const codeLessonFast = resolvePlannerModels({
+    semanticSceneV2: false,
+    turnPlanV3: false,
+    codeLessonV1: true,
+    plannerPhase: "plan",
+    fastMode: true,
+    env: {},
+  });
+  assert(
+    JSON.stringify(codeLessonFast) === JSON.stringify([DEFAULT_FIREWORKS_FAST_MODEL]),
+    "code-lesson-v1 fast mode must stay on Kimi K3 Fast",
+  );
+  const fastModels = resolvePlannerModels({
+    semanticSceneV2: true,
+    turnPlanV3: false,
+    plannerPhase: "plan",
+    fastMode: true,
+    env: {
+      FIREWORKS_MODEL: "standard-model",
+      FIREWORKS_FAST_MODEL: "fast-model",
+    },
+  });
+  assert(
+    JSON.stringify(fastModels) === JSON.stringify(["fast-model"]),
+    "fast mode must use FIREWORKS_FAST_MODEL when set",
+  );
+  const standardOnly = resolvePlannerModels({
+    semanticSceneV2: true,
+    turnPlanV3: false,
+    plannerPhase: "plan",
+    fastMode: false,
+    env: {
+      FIREWORKS_MODEL: "standard-model",
+      FIREWORKS_FAST_MODEL: "fast-model",
+    },
+  });
+  assert(
+    JSON.stringify(standardOnly) === JSON.stringify(["standard-model"]),
+    "turning fast mode off must use FIREWORKS_MODEL only",
+  );
+
+  const requestedModels: string[] = [];
+  const delays: number[] = [];
+  const transientThenFallback = await fetchPlannerCompletion({
+    apiKey: "test-key",
+    body: { messages: [] },
+    models: ["primary", "fallback"],
+    maxAttemptsPerModel: 1,
+    fetchImpl: async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as { model: string };
+      requestedModels.push(body.model);
+      return body.model === "primary"
+        ? new Response("busy", { status: 503, headers: { "retry-after": "0.5" } })
+        : new Response("ok", { status: 200 });
+    },
+    sleep: async (delayMs) => {
+      delays.push(delayMs);
+    },
+    url: "https://planner.test",
+  });
+  assert(transientThenFallback.response.status === 200, "a transient response must reach the fallback model");
+  assert(transientThenFallback.model === "fallback", "the successful fallback model must be reported");
+  assert(requestedModels.join(",") === "primary,fallback", "models must be tried in order");
+  assert(delays.length === 1 && delays[0] === 500, "Retry-After seconds must control the bounded delay");
+
+  let networkAttempts = 0;
+  const networkThenSuccess = await fetchPlannerCompletion({
+    apiKey: "test-key",
+    body: {},
+    models: ["primary", "fallback"],
+    maxAttemptsPerModel: 1,
+    fetchImpl: async () => {
+      networkAttempts += 1;
+      if (networkAttempts === 1) throw new TypeError("network unavailable");
+      return new Response("recovered", { status: 200 });
+    },
+    sleep: async () => undefined,
+    url: "https://planner.test",
+  });
+  assert(networkThenSuccess.response.status === 200, "network errors must retry on the next model");
+  assert(networkAttempts === 2, "one thrown fetch must produce one retry");
+
+  let permanentAttempts = 0;
+  const permanentFailure = await fetchPlannerCompletion({
+    apiKey: "test-key",
+    body: {},
+    models: ["primary", "fallback"],
+    fetchImpl: async () => {
+      permanentAttempts += 1;
+      return new Response("invalid request", { status: 400 });
+    },
+    sleep: async () => undefined,
+    url: "https://planner.test",
+  });
+  assert(permanentFailure.response.status === 400, "permanent upstream status must be preserved");
+  assert(await permanentFailure.response.text() === "invalid request", "permanent response body must be preserved");
+  assert(permanentAttempts === 1, "permanent 4xx responses must not be retried");
+
+  const unavailableThenFallbackModels: string[] = [];
+  const unavailableThenFallback = await fetchPlannerCompletion({
+    apiKey: "test-key",
+    body: {},
+    models: ["retired", "fallback"],
+    maxAttemptsPerModel: 2,
+    fetchImpl: async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as { model: string };
+      unavailableThenFallbackModels.push(body.model);
+      return body.model === "retired"
+        ? new Response("model not found", { status: 404 })
+        : new Response("ok", { status: 200 });
+    },
+    sleep: async () => undefined,
+    url: "https://planner.test",
+  });
+  assert(unavailableThenFallback.response.status === 200, "an undeployed model must reach the next configured model");
+  assert(unavailableThenFallback.model === "fallback", "the successful fallback model must be reported after a 404");
+  assert(
+    unavailableThenFallbackModels.join(",") === "retired,fallback",
+    "a missing model must skip remaining attempts on that id",
+  );
+
+  let exhaustedAttempts = 0;
+  const exhausted = await fetchPlannerCompletion({
+    apiKey: "test-key",
+    body: {},
+    models: ["primary"],
+    maxAttemptsPerModel: 2,
+    fetchImpl: async () => {
+      exhaustedAttempts += 1;
+      return new Response(`busy-${exhaustedAttempts}`, { status: 429 });
+    },
+    sleep: async () => undefined,
+    url: "https://planner.test",
+  });
+  assert(exhausted.response.status === 429, "the final transient status must be preserved after exhaustion");
+  assert(await exhausted.response.text() === "busy-2", "the final transient response body must remain readable");
+
+  let mixedAttempts = 0;
+  const mixedFailure = await fetchPlannerCompletion({
+    apiKey: "test-key",
+    body: {},
+    models: ["primary", "fallback"],
+    maxAttemptsPerModel: 1,
+    fetchImpl: async () => {
+      mixedAttempts += 1;
+      if (mixedAttempts === 1) return new Response("primary busy", { status: 503 });
+      throw new TypeError("fallback network unavailable");
+    },
+    sleep: async () => undefined,
+    url: "https://planner.test",
+  });
+  assert(mixedFailure.response.status === 503, "the last upstream response must survive later network errors");
+  assert(await mixedFailure.response.text() === "primary busy", "the retained upstream error body must remain readable");
+
+  let timeoutSignalObserved = false;
+  let timeoutRejected = false;
+  try {
+    await fetchPlannerCompletion({
+      apiKey: "test-key",
+      attemptTimeoutMs: 5,
+      body: {},
+      models: ["primary"],
+      maxAttemptsPerModel: 1,
+      fetchImpl: async (_input, init) => new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          timeoutSignalObserved = true;
+          reject(init.signal?.reason);
+        }, { once: true });
+      }),
+      url: "https://planner.test",
+    });
+  } catch {
+    timeoutRejected = true;
+  }
+  assert(timeoutSignalObserved && timeoutRejected, "a stalled planner fetch must abort at its per-attempt deadline");
+
+  const fundedAttempts: number[] = [];
+  let fundedFetches = 0;
+  const funded = await fetchPlannerCompletion({
+    apiKey: "test-key",
+    body: {},
+    models: ["primary"],
+    maxAttemptsPerModel: 2,
+    beforeAttempt: async ({ attempt }) => {
+      fundedAttempts.push(attempt);
+    },
+    fetchImpl: async () => {
+      fundedFetches += 1;
+      return new Response(fundedFetches === 1 ? "busy" : "ok", {
+        status: fundedFetches === 1 ? 503 : 200,
+        headers: fundedFetches === 1 ? { "retry-after": "0" } : undefined,
+      });
+    },
+    sleep: async () => undefined,
+    url: "https://planner.test",
+  });
+  assert(funded.response.status === 200, "a funded retry still reaches the next attempt");
+  assert(fundedAttempts.join(",") === "1,2", "each planner attempt asks for funding before dispatch");
+  assert(fundedFetches === 2, "both funded attempts dispatch");
+
+  let unfundedFetches = 0;
+  let denied: unknown = null;
+  try {
+    await fetchPlannerCompletion({
+      apiKey: "test-key",
+      body: {},
+      models: ["primary", "fallback"],
+      maxAttemptsPerModel: 2,
+      beforeAttempt: async ({ attempt }) => {
+        if (attempt === 2) throw new PlannerReservationDenied(new Response("denied", { status: 402 }));
+      },
+      fetchImpl: async () => {
+        unfundedFetches += 1;
+        return new Response("busy", { status: 503, headers: { "retry-after": "0" } });
+      },
+      sleep: async () => undefined,
+      url: "https://planner.test",
+    });
+  } catch (error) {
+    denied = error;
+  }
+  assert(denied instanceof PlannerReservationDenied && denied.response.status === 402, "a funding refusal escapes the transport");
+  assert(unfundedFetches === 1, "a refused planner attempt is not dispatched and is not retried on another model");
+
+  console.log("planner transport verification passed");
+}
+
+void main();

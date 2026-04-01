@@ -1,0 +1,70 @@
+import { completionTokenCap, providerChatBody, resolveLlmEndpoint } from "./llmProvider";
+import { resolvePlannerMaxTokens } from "./plannerTransport";
+import { resolveTeachingContentBudget } from "./teachingTransport";
+import { VISUAL_NEED_SERVER_TIMEOUT_MS } from "./visualNeedPolicy";
+import { EVALUATION_POLICY_VERSION, JEV_GATEWAY_MODEL } from "./evaluation/types";
+import { rubricVersionForJob } from "./evaluation/rubrics";
+import { VISUAL_NEED_CLIENT_TIMEOUT_MS, VISUAL_NEED_EVIDENCE_VERSION } from "../../features/tutor-session/lib/scene/visualNeedClient";
+import { plannerSpeedSettings } from "./planningSpeed";
+import { buildLabModelProfile } from "./labModelProfile";
+import { liveDiagramPromptInputBounds } from "../scene/diagramExampleLibrary.server";
+
+/** A profile the lab cannot use (no relay prices, fallback on) is a reason, not a 500. */
+function standardProfile(endpoint: ReturnType<typeof resolveLlmEndpoint>) {
+  try {
+    return { modelProfile: buildLabModelProfile({ endpoint, env: process.env }), modelProfileError: null };
+  } catch (error) {
+    return { modelProfile: null, modelProfileError: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function fastProfileOrNull(endpoint: ReturnType<typeof resolveLlmEndpoint>) {
+  try {
+    return buildLabModelProfile({ endpoint, env: process.env, fastMode: true });
+  } catch {
+    return null;
+  }
+}
+
+/** Non-secret, authenticated preflight from the actual server configuration. */
+export function labProviderConfig() {
+  const endpoint = resolveLlmEndpoint();
+  const configured = Boolean(endpoint.apiKey && !endpoint.fallbackReason);
+  const plannerBodies = ["primary", "alternate"].flatMap((plannerLane) => [
+    { semanticSceneV2: true, turnPlanV3: false },
+    { semanticSceneV2: false, turnPlanV3: true },
+    { semanticSceneV2: false, turnPlanV3: false, problemIRV1: true },
+    { semanticSceneV2: false, turnPlanV3: false, codeLessonV1: true },
+  ].map((options) => providerChatBody({
+    max_tokens: resolvePlannerMaxTokens({ ...options, plannerLane: plannerLane as "primary" | "alternate", plannerPhase: "plan" }),
+    thinking: { type: "disabled" },
+  }, endpoint)));
+  const caps = [
+    ...plannerBodies.map(completionTokenCap),
+    completionTokenCap(providerChatBody({ max_tokens: 4000, thinking: { type: "enabled", budget_tokens: 2048 } }, endpoint)),
+  ];
+  const teachingCaps = [false, true].map((codeLesson) => completionTokenCap(providerChatBody({
+    max_tokens: resolveTeachingContentBudget({ codeLesson }) + 2048,
+    thinking: { type: "enabled", budget_tokens: 2048 },
+  }, endpoint)));
+  return {
+    provider: endpoint.provider, deployment: endpoint.deployment,
+    configured,
+    ...(configured ? standardProfile(endpoint) : { modelProfile: null, modelProfileError: endpoint.fallbackReason }),
+    // Production routing for `--model fast` evals (no standard-evaluation header).
+    // An unsupported Fast identity advertises null, so `--model fast` fails closed
+    // while the standard profile stays available.
+    fastModelProfile: configured && endpoint.provider === "fireworks" ? fastProfileOrNull(endpoint) : null,
+    inputBounds: liveDiagramPromptInputBounds(),
+    // The first translated body is the primary scene request, including Azure's or the relay's floor.
+    planningSpeed: { sceneEffort: endpoint.provider !== "fireworks" ? String(plannerBodies[0]?.reasoning_effort ?? "unknown") : "low",
+      ...(endpoint.provider === "azure" ? plannerSpeedSettings() : { priority: false }),
+      requestTier: endpoint.provider === "azure" && process.env.DIAGRAM_PLANNER_PRIORITY === "1" ? "priority"
+        : "auto" },
+    plannerOutputCap: Math.max(...caps), teachingOutputCap: Math.max(...teachingCaps),
+    visualNeed: { evidenceVersion: VISUAL_NEED_EVIDENCE_VERSION, model: JEV_GATEWAY_MODEL,
+      rubricVersion: rubricVersionForJob("visual_need"), policyVersion: EVALUATION_POLICY_VERSION,
+      clientTimeoutMs: VISUAL_NEED_CLIENT_TIMEOUT_MS, serverTimeoutMs: VISUAL_NEED_SERVER_TIMEOUT_MS,
+      configured: Boolean(process.env.AI_GATEWAY_API_KEY?.trim()) },
+  };
+}

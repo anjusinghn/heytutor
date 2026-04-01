@@ -1,0 +1,998 @@
+import { unwrapMathMarkup } from './mathMarkup';
+import { normalizeStrokeText } from '../handwriting/handwriting';
+import { WORK_ZONE } from '../layout/boardZones';
+
+export type DrawCommandType =
+  | 'DRAW_CUBOID'
+  | 'DRAW_CUBE'
+  | 'DRAW_RECT'
+  | 'DRAW_CIRCLE'
+  | 'DRAW_ARC'
+  | 'DRAW_POINT'
+  | 'DRAW_LINE'
+  | 'WRITE'
+  | 'TYPE'
+  | 'FRAME'
+  // Runtime-only: move the marker to part of the figure without drawing.
+  // The conductor emits it on a spoken step that carries no tag of its own,
+  // so the pen goes to what is being talked about instead of standing still.
+  | 'POINT'
+  // Runtime-only: reveal a stored reference picture along its stroke plan
+  // (protocol/referencePicture.ts). Never parsed from model text.
+  | 'DRAW_PICTURE'
+  | 'LABEL'
+  | 'UNDERLINE'
+  | 'CIRCLE_AROUND'
+  | 'ARROW'
+  | 'HIGHLIGHT'
+  | 'FOCUS'
+  | 'EMPHASIZE'
+  | 'SUPERSEDE'
+  | 'ANNOTATE'
+  | 'SCRIBBLE'
+  | 'DIMENSION'
+  | 'PAUSE'
+  | 'CLEAR'
+  | 'ERASE';
+
+export type DrawStrokeRole = 'primary' | 'construction' | 'trace';
+
+export interface DrawCommandVisualStyle {
+  strokeRole?: DrawStrokeRole;
+  strokeWidth?: number;
+  dashed?: boolean;
+  /** Verified closed region rendered below its boundary ink. */
+  fillRole?: 'region';
+  /** Engine-owned excluded endpoint; its center masks underlying figure ink. */
+  pointStyle?: 'open';
+  correspondingFamily?: 1 | 2 | 3;
+  /** Verified distance ink; witnesses must travel and reveal with their bar. */
+  measurementRole?: 'bar' | 'witness';
+  /** Label callout ink is never the figure's focus trace. */
+  labelLeader?: boolean;
+}
+
+export interface DrawCommandSemanticRef {
+  entityId?: string;
+  primitiveId?: string;
+  actionId?: string;
+}
+
+/** Ink preferences frozen when this command first reaches the board. */
+export interface DrawCommandInkSettings {
+  markerColor: string;
+  pencilColor: string;
+  markerThickness: number;
+  pencilThickness: number;
+}
+
+export interface DrawCommand {
+  type: DrawCommandType;
+  params: number[];
+  text?: string;
+  charPosition: number;
+  narrationBefore: string;
+  syncable?: boolean;
+  syncReason?: string;
+  /** Optional verified-scene styling. Parser-produced freehand commands omit it. */
+  visualStyle?: DrawCommandVisualStyle;
+  /** Draw-time appearance for persisted replay, rewind, restore, and export. */
+  inkSettings?: DrawCommandInkSettings;
+  /** Stable semantic ownership for compiled ink and later replay/debugging. */
+  semanticRef?: DrawCommandSemanticRef;
+  /** TYPE only: UTF-16 code units actually shown before an interrupted recorded beat. */
+  shownChars?: number;
+  /**
+   * The word in the segment's sentence that names this mark, so the pen can
+   * wait for it and draw the part while it is being said. Set by the verified
+   * scene presentation on figure intro commands; `entityId` is the part the
+   * word names, which for a command with no word of its own is still its own
+   * entity while `token` is inherited from the command before it.
+   */
+  spokenCue?: DrawCommandSpokenCue;
+}
+
+export interface DrawCommandSpokenCue {
+  token: string;
+  entityId: string;
+}
+
+export interface ParsedResponse {
+  narration: string;
+  commands: DrawCommand[];
+  segments: { text: string; commandIndex: number }[];
+}
+
+export const DRAW_COMMAND_TYPES = [
+  'DRAW_CUBOID',
+  'DRAW_CUBE',
+  'DRAW_RECT',
+  'DRAW_CIRCLE',
+  'DRAW_ARC',
+  'DRAW_POINT',
+  'DRAW_LINE',
+  'WRITE',
+  'TYPE',
+  'FRAME',
+  'LABEL',
+  'UNDERLINE',
+  'CIRCLE_AROUND',
+  'ARROW',
+  'HIGHLIGHT',
+  'FOCUS',
+  'EMPHASIZE',
+  'SUPERSEDE',
+  'ANNOTATE',
+  'SCRIBBLE',
+  'DIMENSION',
+  'PAUSE',
+  'CLEAR',
+  'ERASE',
+] as const satisfies readonly DrawCommandType[];
+
+const DRAW_COMMAND_TYPE_SET = new Set<string>(DRAW_COMMAND_TYPES);
+
+export const DRAWING_TAG_SCAN_PATTERN = /\[[^\]\n]{1,256}\]/g;
+
+/** WRITE/LABEL bodies may contain bracketed math. End at an outer ,x,y]. */
+const WRITE_LABEL_HEADER_PATTERN = /^\[(WRITE|LABEL):/i;
+const WRITE_LABEL_ENDING_PATTERN =
+  /,\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*(?:,\s*(-?\d+(?:\.\d+)?)\s*)?\]/g;
+// Semantic text tags delimit a broken row even with symbolic parameters.
+// Other command words, including numeric arguments, may be ordinary notation:
+// [Type: 1], [frame: 0] and [highlight, 3, 4]. The outer coordinate suffix
+// closes a canonical row; nested brackets alone do not introduce commands.
+// A closed row may also quote a full DRAW_LINE, HIGHLIGHT or FRAME tag. Keep
+// that tag as literal row text; only a tag outside the row is a command.
+const SEMANTIC_TEXT_COMMANDS = 'WRITE|LABEL|FOCUS|EMPHASIZE|SUPERSEDE|ANNOTATE|PAUSE';
+const TEXT_BODY_BOUNDARY = String.raw`\[\s*(?:${SEMANTIC_TEXT_COMMANDS})\s*(?=[:,])|\[(?:STEP|\/STEP)\]`;
+const WRITE_LABEL_BODY_BREAK_PATTERN = new RegExp(TEXT_BODY_BOUNDARY, 'iu');
+// Body-outside-header repair remains stricter: it cannot swallow a real tag
+// with symbolic parameters or borrow that tag's coordinates. Bare text-tag
+// boundaries also matter here, unlike names nested inside a canonical body.
+// In this malformed spelling, a command followed by numeric coordinates or
+// a colon still stops repair. A two-word comma list (e.g. [clear, undo]) is
+// text, while semantic tags retain their boundaries even with word arguments.
+// TYPE also takes a symbolic code-block id, so either separator must keep it
+// as a command when there is no canonical outer row bracket.
+const HEADER_ONLY_BODY_BOUNDARY = String.raw`\[\s*(?:${SEMANTIC_TEXT_COMMANDS}|TYPE)\s*(?=[:,])|\[\s*(?:${DRAW_COMMAND_TYPES.join('|')})\s*(?::|,(?!\s*[\p{L}_][\p{L}\p{N}_]*\s*\]))|\[(?:STEP|\/STEP)\]|(?<![\p{L}\p{N}_$)\]])\[(?:WRITE|LABEL|DIMENSION)\]`;
+
+/**
+ * `[WRITE]text,x,y` instead of `[WRITE:text,x,y]`.
+ *
+ * Observed live on a dimensional-analysis lesson: the teaching model closed
+ * every text tag after the name, so all 22 rows parsed as an empty WRITE and
+ * the row text *and its coordinates* fell through into the narration. The
+ * student would have heard "N colon L caret minus three, comma ninety, comma
+ * two one one" and watched a blank column. The intent is unambiguous, so the
+ * body is repaired back into the tag rather than spoken.
+ *
+ * The coordinates must close the line or the teaching STEP. A body cannot
+ * cross another protocol tag and borrow that later tag's coordinates.
+ */
+const HEADER_ONLY_TEXT_TAG_PATTERN = new RegExp(
+  String.raw`\[(WRITE|LABEL|DIMENSION)\]\s*((?:(?!${HEADER_ONLY_BODY_BOUNDARY})[^\r\n])*?,\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?(?:\s*,\s*-?\d+(?:\.\d+)?)?)\s*(?=\r?\n|\[\/STEP\]|$)`, 'giu',
+);
+
+/** The same shape with nothing after the name yet, for the streaming parser. */
+export const HEADER_ONLY_TEXT_TAG_EXACT = /^\[(WRITE|LABEL|DIMENSION)\]$/i;
+
+export function repairHeaderOnlyTextTags(responseText: string): string {
+  HEADER_ONLY_TEXT_TAG_PATTERN.lastIndex = 0;
+  return responseText.replace(
+    HEADER_ONLY_TEXT_TAG_PATTERN,
+    (_match, name: string, body: string) => `[${name.toUpperCase()}:${body.trim()}]`,
+  );
+}
+
+export interface ParsedDrawingTag {
+  type: DrawCommandType;
+  rawParams: string;
+}
+
+const LEGACY_DRAW_TYPE_ALIASES: Record<string, DrawCommandType | 'DOT'> = {
+  CUBOID: 'DRAW_CUBOID',
+  CUBE: 'DRAW_CUBE',
+  RECT: 'DRAW_RECT',
+  RECTANGLE: 'DRAW_RECT',
+  CIRCLE: 'DRAW_CIRCLE',
+  LINE: 'DRAW_LINE',
+  POINT: 'DOT',
+  DOT: 'DOT',
+};
+
+function splitNameAndParams(inner: string): { name: string; rawParams: string } {
+  const colonIndex = inner.indexOf(':');
+  const commaIndex = inner.indexOf(',');
+  const candidates = [colonIndex, commaIndex].filter((index) => index >= 0);
+  const splitIndex = candidates.length > 0 ? Math.min(...candidates) : -1;
+
+  if (splitIndex < 0) {
+    return { name: inner.trim(), rawParams: '' };
+  }
+
+  return {
+    name: inner.slice(0, splitIndex).trim(),
+    rawParams: inner.slice(splitIndex + 1).trim(),
+  };
+}
+
+function normalizeLegacyTextParams(rawParams: string): string {
+  const match = /^\s*([^,]+)\s*,\s*([^,]+)\s*,\s*(?:"([^"]*)"|'([^']*)'|(.+?))\s*$/.exec(rawParams);
+  if (!match) {
+    return rawParams;
+  }
+
+  const [, rawX = '', rawY = '', doubleQuoted, singleQuoted, unquoted] = match;
+  const text = (doubleQuoted ?? singleQuoted ?? unquoted ?? '').trim();
+  return `${text},${rawX.trim()},${rawY.trim()}`;
+}
+
+function normalizeDotParams(rawParams: string): string {
+  const params = parseNumericParams(rawParams);
+  if (params.length >= 3) {
+    return rawParams;
+  }
+  if (params.length >= 2) {
+    return `${params[0]},${params[1]},8`;
+  }
+  return rawParams;
+}
+
+export function parseDrawingTag(rawTag: string): ParsedDrawingTag | null {
+  if (!rawTag.startsWith('[') || !rawTag.endsWith(']')) {
+    return null;
+  }
+
+  // A bare `[WRITE]` carries no row and no coordinates. It used to compile to
+  // an empty write, so a lesson that closed every tag after the name reported
+  // dozens of board rows while the column stayed blank.
+  if (HEADER_ONLY_TEXT_TAG_EXACT.test(rawTag)) {
+    return null;
+  }
+
+  const inner = rawTag.slice(1, -1).trim();
+  if (!inner || inner.startsWith('/')) {
+    return null;
+  }
+
+  if (/^DRAW[:_,]/i.test(inner)) {
+    const legacy = inner.replace(/^DRAW[:_,]/i, '');
+    const { name, rawParams } = splitNameAndParams(legacy);
+    const mappedType = LEGACY_DRAW_TYPE_ALIASES[name.trim().toUpperCase()];
+    if (!mappedType) {
+      return null;
+    }
+
+    if (mappedType === 'DOT') {
+      return { type: 'DRAW_CIRCLE', rawParams: normalizeDotParams(rawParams) };
+    }
+
+    return { type: mappedType, rawParams };
+  }
+
+  const { name, rawParams } = splitNameAndParams(inner);
+  const normalizedName = name.trim().toUpperCase();
+
+  if (normalizedName === 'DRAW_DOT') {
+    return { type: 'DRAW_CIRCLE', rawParams: normalizeDotParams(rawParams) };
+  }
+
+  if (normalizedName === 'DRAW_POINT' || normalizedName === 'POINT') {
+    return { type: 'DRAW_POINT', rawParams: normalizeDotParams(rawParams) };
+  }
+
+  if (normalizedName === 'DRAW_ARC' || normalizedName === 'ARC') {
+    return { type: 'DRAW_ARC', rawParams };
+  }
+
+  if (
+    normalizedName === 'FOCUS' ||
+    normalizedName === 'EMPHASIZE' ||
+    normalizedName === 'SUPERSEDE' ||
+    normalizedName === 'ANNOTATE' ||
+    // [TYPE:blockId] reveals one pre-committed code-lesson block.
+    normalizedName === 'TYPE'
+  ) {
+    return {
+      type: normalizedName,
+      rawParams: rawParams.trim(),
+    };
+  }
+
+  if (normalizedName === 'LABEL' || normalizedName === 'WRITE') {
+    return {
+      type: normalizedName,
+      rawParams: inner.includes(',') && !inner.includes(':')
+        ? normalizeLegacyTextParams(rawParams)
+        : rawParams,
+    };
+  }
+
+  if (normalizedName === 'DIMENSION') {
+    return { type: 'DIMENSION', rawParams };
+  }
+
+  if (!DRAW_COMMAND_TYPE_SET.has(normalizedName)) {
+    return null;
+  }
+
+  return { type: normalizedName as DrawCommandType, rawParams };
+}
+
+export function parseNumericParams(rawParams: string): number[] {
+  if (rawParams.trim() === '') {
+    return [];
+  }
+
+  return rawParams
+    .split(',')
+    .map((param) => Number(param.trim()))
+    .filter((param) => Number.isFinite(param));
+}
+
+export function parseTextCommandParams(rawParams: string): { text: string; params: number[] } {
+  const parts = rawParams.split(',');
+
+  if (parts.length < 3) {
+    return { text: rawParams.trim(), params: [] };
+  }
+
+  const last = Number(parts.at(-1)?.trim());
+  const secondLast = Number(parts.at(-2)?.trim());
+  const thirdLast = Number(parts.at(-3)?.trim());
+
+  // Optional compact font: [LABEL:text,x,y,fontSize] with fontSize in 12–40.
+  if (
+    parts.length >= 4 &&
+    Number.isFinite(last) &&
+    last >= 12 &&
+    last <= 40 &&
+    Number.isFinite(secondLast) &&
+    Number.isFinite(thirdLast)
+  ) {
+    const text = normalizeBoardText(parts.slice(0, -3).join(',').trim());
+    return { text, params: [thirdLast, secondLast, last] };
+  }
+
+  if (!Number.isFinite(secondLast) || !Number.isFinite(last)) {
+    return { text: rawParams.trim(), params: [] };
+  }
+
+  const text = normalizeBoardText(parts.slice(0, -2).join(',').trim());
+  return { text, params: [secondLast, last] };
+}
+
+export function parseDimensionCommandParams(rawParams: string): { text: string; params: number[] } {
+  const parts = rawParams.split(',');
+
+  if (parts.length < 6) {
+    return { text: rawParams.trim(), params: [] };
+  }
+
+  const offset = Number(parts.at(-1)?.trim());
+  const y2 = Number(parts.at(-2)?.trim());
+  const x2 = Number(parts.at(-3)?.trim());
+  const y1 = Number(parts.at(-4)?.trim());
+  const x1 = Number(parts.at(-5)?.trim());
+  const text = normalizeBoardText(parts.slice(0, -5).join(',').trim());
+
+  if (![x1, y1, x2, y2, offset].every(Number.isFinite)) {
+    return { text: rawParams.trim(), params: [] };
+  }
+
+  return { text, params: [x1, y1, x2, y2, offset] };
+}
+
+const GREEK_WORD_TO_SYMBOL: ReadonlyArray<readonly [RegExp, string]> = [
+  [/\bomicron\b/gi, 'ο'],
+  [/\bepsilon\b/gi, 'ε'],
+  [/\bupsilon\b/gi, 'υ'],
+  [/\blambda\b/gi, 'λ'],
+  [/\bomega\b/gi, 'ω'],
+  [/\btheta\b/gi, 'θ'],
+  [/\bphi\b/gi, 'φ'],
+  [/\balpha\b/gi, 'α'],
+  [/\bbeta\b/gi, 'β'],
+  [/\bgamma\b/gi, 'γ'],
+  [/\bDelta\b/g, 'Δ'],
+  [/\bdelta\b/gi, 'δ'],
+  [/\bmu\b/gi, 'μ'],
+  [/(?<![A-Za-z\\])pi(?![A-Za-z])/gi, 'π'],
+  [/\brho\b/gi, 'ρ'],
+  [/\bsigma\b/gi, 'σ'],
+  [/\btau\b/gi, 'τ'],
+  [/\bpsi\b/gi, 'ψ'],
+  [/\bchi\b/gi, 'χ'],
+  [/\bnu\b/gi, 'ν'],
+  [/\bxi\b/gi, 'ξ'],
+  [/\bkappa\b/gi, 'κ'],
+  [/\beta\b/gi, 'η'],
+  [/\bzeta\b/gi, 'ζ'],
+  [/\biota\b/gi, 'ι'],
+];
+
+function normalizeGreekBoardSymbols(text: string): string {
+  let normalized = text;
+  for (const [pattern, symbol] of GREEK_WORD_TO_SYMBOL) {
+    normalized = normalized.replace(pattern, symbol);
+  }
+  return normalized;
+}
+
+/**
+ * A row that is source code rather than mathematics. In code, `*` and
+ * `sqrt(` are the program, so the board keeps them as typed. A code lesson
+ * never [WRITE]s (its code arrives by [TYPE]), and a DSA lesson without one
+ * is told to write no code, so this guards the rows that reach the work column
+ * anyway: an ordinary lesson about a language, or a phrase that slipped.
+ * Every signal here is code syntax that no maths or physics row uses.
+ */
+const CODE_ROW =
+  /\*\*|==|!=|&&|[+\-*/%]=(?!=)|\/\/|[A-Za-z_]\w*\.[A-Za-z_]\w*\s*\(|[A-Za-z_]\w*\[[^\]\n]*\]|\b(?:print|printf|len|range|append|input)\s*\(|^\s*(?:def|class|import|function|const|var|elif|#include)\b|[{;]\s*$|^\s*(?:int|float|double|bool|char|string|auto|void)\s+[A-Za-z_]/;
+
+export function isCodeBoardRow(text: string): boolean {
+  return CODE_ROW.test(text);
+}
+
+/**
+ * `arcsin(`, `arccos(` and `arctan(` written the way a student writes them.
+ * Only the arc spelling is an inverse: in SHM and waves `acos(ωt)` and
+ * `asin(kx - ωt)` are the amplitude a times a sine, so `asin(`, `acos(` and
+ * `atan(` stay as typed (PR #274 review).
+ */
+const INVERSE_TRIG: ReadonlyArray<readonly [RegExp, string]> = [
+  [/\barcsin\s*\(/g, 'sin⁻¹('],
+  [/\barccos\s*\(/g, 'cos⁻¹('],
+  [/\barctan\s*\(/g, 'tan⁻¹('],
+];
+
+/**
+ * ASCII math the teaching model types, said the way the board writes it:
+ * `sqrt(` is `√(`, a product star is `×`, and `arctan(` is `tan⁻¹(`. Measured on
+ * 20 Oct 2026 in the recorded relative velocity lessons, `sqrt(` reached the
+ * board in 22 rows across 6 lessons, `*` in 14 rows across 5, and `atan` or
+ * `arcsin` in 3, and two of the `sqrt(` rows were this function's own
+ * spelling of "square root of". `atan2(` is a two argument function with its
+ * own meaning and keeps its name.
+ *
+ * A star is a product only where it cannot be a superscript star. A
+ * conjugate or optimum sits on its symbol (`ψ*ψ`, `ψ*(x)`, `ψ(x)*ψ(x)`,
+ * `ψ_1*ψ_2`, `z* − z`), as does an antibonding orbital (`σ*2s`), so a star is
+ * `×` only after a number: a standalone number before it (`3*4`,
+ * `10*sin(30)`, `5*√(3)`, `2 * 5`), or a closing bracket with a number after
+ * it (`(a+b)*2`). Never before a minus: `2 * -3` keeps its star.
+ *
+ * A star between two symbols or two brackets keeps its star (PR #249 review):
+ * between vectors `×` reads as a cross product, so `W = F * d` and
+ * `(A+B)*(A-B)` must not become one. For the same reason the spoken word
+ * "times" is still written `*`.
+ */
+const PRODUCT_STARS: readonly RegExp[] = [
+  /(?<=(?<![\p{L}\p{N}_.])\d+(?:\.\d+)?\s*)\*(?=\s*[\p{L}\p{N}(√])/gu,
+  /(?<=[)\]]\s*)\*(?=\s*\p{N})/gu,
+];
+
+function writeMathGlyphs(text: string): string {
+  let out = text.replace(/(?<![A-Za-z0-9_.])sqrt\s*\(/g, '√(');
+  for (const [pattern, glyph] of INVERSE_TRIG) out = out.replace(pattern, glyph);
+  for (const star of PRODUCT_STARS) out = out.replace(star, '×');
+  return out;
+}
+
+export function normalizeBoardText(text: string): string {
+  // Normalize math before the pen sees it so WRITE schedules and ink share one form.
+  const code = isCodeBoardRow(text);
+  const words = normalizeGreekBoardSymbols(text)
+    .replace(/\bdistance\s+squared\b/gi, 'd^2')
+    .replace(/\bradius\s+squared\b/gi, 'r^2')
+    .replace(/\br\s+squared\b/gi, 'r^2')
+    .replace(/\bx\s+squared\b/gi, 'x^2')
+    .replace(/\by\s+squared\b/gi, 'y^2')
+    // In "5 squared units", squared describes the unit, not the number.
+    .replace(/\b([a-z0-9)])\s+squared\b(?!\s+units?\b)/gi, '$1^2')
+    .replace(/\bsquare\s+root\s+of\s+([a-z0-9()+\-\s]+)\b/gi, code ? 'sqrt($1)' : '√($1)')
+    .replace(/\bminus\b/gi, '-')
+    .replace(/\bplus\b/gi, '+')
+    .replace(/\bequals\b/gi, '=')
+    .replace(/\btimes\b/gi, '*');
+  return normalizeStrokeText(
+    (code ? words : writeMathGlyphs(words))
+      .replace(/\s+([=+\-*×])\s+/g, ' $1 ')
+      .replace(/\s{2,}/g, ' ')
+      .trim(),
+  );
+}
+
+export function normalizeNarration(text: string): string {
+  return text.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+export function parseDrawCommandFromTag(
+  type: DrawCommandType,
+  rawParams: string,
+  charPosition: number,
+  narrationBefore: string,
+): DrawCommand {
+  const parsed =
+    type === 'FOCUS' || type === 'EMPHASIZE' || type === 'SUPERSEDE' || type === 'ANNOTATE' || type === 'TYPE'
+      ? { text: rawParams.trim(), params: [] }
+      : type === 'WRITE'
+      // Teaching rows arrive with LaTeX delimiters; the pen draws plain math.
+      ? parseTextCommandParams(unwrapMathMarkup(rawParams))
+      : type === 'LABEL'
+      ? parseTextCommandParams(rawParams)
+      : type === 'DIMENSION'
+        ? parseDimensionCommandParams(rawParams)
+        : { params: parseNumericParams(rawParams), text: undefined };
+
+  return {
+    type,
+    params: parsed.params,
+    text: parsed.text,
+    charPosition,
+    narrationBefore: normalizeNarration(narrationBefore),
+  };
+}
+
+/**
+ * How a segment is spoken.
+ *
+ * `opening` is the one runtime beat that leads a turn: it is delivered with
+ * more expression than the body of a lesson, because a teacher starting a
+ * question and a teacher reading the fourth line of algebra do not sound the
+ * same. Everything without a delivery uses the steady teaching voice.
+ */
+export type SegmentDelivery = "opening";
+
+export interface TutorSegment {
+  narration: string;
+  /** Spoken character of this segment. Omitted means the teaching voice. */
+  delivery?: SegmentDelivery;
+  command: DrawCommand | null;
+  commands?: DrawCommand[];
+  /** Commands emitted by the verified scene compiler before teaching starts. */
+  verifiedDiagramIntro?: boolean;
+  /**
+   * The figure is a diagram whose text is part of the sketch, not prose the
+   * student watches being written. A DSA figure is cells and their values:
+   * lettering them at handwriting pace makes the opening figure take three
+   * times its own sentence to appear, and the voice waits for the ink.
+   */
+  sceneText?: boolean;
+}
+
+export function getSegmentCommands(segment: TutorSegment): DrawCommand[] {
+  if (segment.commands && segment.commands.length > 0) {
+    return segment.commands;
+  }
+
+  return segment.command ? [segment.command] : [];
+}
+
+export function captureCommandInk(command: DrawCommand, settings: DrawCommandInkSettings): DrawCommand {
+  if (!command.inkSettings) {
+    command.inkSettings = { ...settings };
+  }
+  return command;
+}
+
+/** Recreated marks use the recorded parent appearance, not the replay-time dials. */
+export function inheritCommandInk(parent: DrawCommand, child: DrawCommand): DrawCommand {
+  if (parent.inkSettings) captureCommandInk(child, parent.inkSettings);
+  return child;
+}
+
+export function parseStoredSegmentCommands(stored: unknown): DrawCommand[] {
+  if (!stored || typeof stored !== "object") {
+    return [];
+  }
+
+  if ("commands" in stored && Array.isArray((stored as { commands: unknown }).commands)) {
+    return (stored as { commands: DrawCommand[] }).commands.filter(Boolean);
+  }
+
+  return [stored as DrawCommand];
+}
+
+export interface StoredCommandEnvelope {
+  commands: DrawCommand[];
+  /** Commands were emitted by a verified deterministic compiler. */
+  trustedDiagramGeometry?: boolean;
+}
+
+export function isStoredCommandTrustedGeometry(stored: unknown): boolean {
+  return Boolean(
+    stored &&
+    typeof stored === "object" &&
+    "trustedDiagramGeometry" in stored &&
+    (stored as { trustedDiagramGeometry?: unknown }).trustedDiagramGeometry === true,
+  );
+}
+
+export function serializeSegmentCommands(
+  commands: DrawCommand[],
+  options: { trustedDiagramGeometry?: boolean } = {},
+): DrawCommand | StoredCommandEnvelope | null {
+  if (commands.length === 0) {
+    return null;
+  }
+
+  if (commands.length === 1 && !options.trustedDiagramGeometry) {
+    return commands[0]!;
+  }
+
+  return {
+    commands,
+    ...(options.trustedDiagramGeometry ? { trustedDiagramGeometry: true } : {}),
+  };
+}
+
+function coalesceSegments(segments: TutorSegment[]): TutorSegment[] {
+  return segments.map((segment) => ({
+    narration: segment.narration,
+    command: segment.command,
+    commands: segment.command ? [segment.command] : [],
+  }));
+}
+
+export function parsedResponseToSegments(parsed: ParsedResponse): TutorSegment[] {
+  const segments: TutorSegment[] = [];
+
+  for (let i = 0; i < parsed.segments.length; i++) {
+    const seg = parsed.segments[i];
+    const narration = seg.text.trim();
+    const command =
+      seg.commandIndex < parsed.commands.length ? parsed.commands[seg.commandIndex] : null;
+
+    if (!narration && !command) {
+      continue;
+    }
+
+    segments.push({ narration, command });
+  }
+
+  return coalesceSegments(segments);
+}
+
+function matchWriteLabelTag(slice: string): string | null {
+  const header = WRITE_LABEL_HEADER_PATTERN.exec(slice);
+  if (!header) {
+    return null;
+  }
+
+  WRITE_LABEL_ENDING_PATTERN.lastIndex = header[0].length;
+  let ending: RegExpExecArray | null;
+  while ((ending = WRITE_LABEL_ENDING_PATTERN.exec(slice)) !== null) {
+    const body = slice.slice(header[0].length, ending.index);
+    if (WRITE_LABEL_BODY_BREAK_PATTERN.test(body)) {
+      return null;
+    }
+    // A matrix row or vector can itself end in numeric comma-separated
+    // values. Only a suffix outside its text brackets can close the tag.
+    // An unmatched closing evaluation bar keeps the existing text behavior.
+    const brackets: string[] = [];
+    for (const char of body) {
+      if (char === '[' || (char === '(' && brackets.length > 0)) brackets.push(char);
+      // Intervals may have a square opening and round closing endpoint.
+      else if (char === ']' || char === ')') brackets.pop();
+    }
+    if (brackets.length > 0) continue;
+    return slice.slice(0, ending.index + ending[0].length);
+  }
+  return null;
+}
+
+/**
+ * A WRITE that closed without its two numbers: `[WRITE:text]`,
+ * `[WRITE:text,277]` or `[WRITE:text,x,211]`.
+ *
+ * Production, 21 to 25 Oct: resumed lessons wrote every row this way, the
+ * parser refused all of them, and the lesson was failed for having no ink.
+ * The runtime owns where a work row goes (the sequential slot finder ignores
+ * the model's x and y), so the numbers carry nothing a row needs and the
+ * repair cannot move ink. It applies only when the tag cannot close the
+ * canonical way, only to WRITE (labels belong to the scene engine), and only
+ * to a body that is plainly row text. A trailing number is taken as y only
+ * when it sits on the work row grid and is glued to its comma, the way the
+ * model writes coordinates; any other trailing number, a placeholder letter,
+ * a labelled coordinate such as `, y=475`, a row id in front such as `w4:`,
+ * or an id and coordinate body such as `w6:y475` is refused, so a list like "2, 3" is never cut down to "2" and
+ * no coordinate is ever written as row text.
+ */
+const COORDINATE_LESS_WRITE_HEADER = /^\[WRITE:/i;
+const COORDINATE_ONLY_WRITE_BODY = /^(?:w\d+\s*[:,]?\s*)?(?:y\s*=?\s*-?\d+)?$/i;
+// A work row id in front (`w4:...`) names a row; it is not row text.
+const ROW_ID_PREFIXED_WRITE_BODY = /^w\d+\s*[:.,)]/i;
+
+function onWorkRowGrid(y: number): boolean {
+  const offset = y - WORK_ZONE.topY;
+  return Number.isInteger(y) && offset >= 0 && offset % WORK_ZONE.lineHeight === 0;
+}
+
+function coordinateLessWriteRow(body: string): { text: string; y: number } | null {
+  const trimmed = body.trim();
+  if (!/[\p{L}\p{N}]/u.test(trimmed) || COORDINATE_ONLY_WRITE_BODY.test(trimmed) || ROW_ID_PREFIXED_WRITE_BODY.test(trimmed)) return null;
+  const placeholderX = /^(.*\S),x,(\d+)$/u.exec(trimmed);
+  if (placeholderX) {
+    const y = Number(placeholderX[2]);
+    return onWorkRowGrid(y) ? { text: placeholderX[1]!.trim(), y } : null;
+  }
+  const yOnly = /^(.*\S),(\d+)$/u.exec(trimmed);
+  // `1,211` is a number with a thousands separator, not a row and its y.
+  if (yOnly && /\d$/u.test(yOnly[1]!)) return null;
+  if (yOnly) {
+    const y = Number(yOnly[2]);
+    return onWorkRowGrid(y) ? { text: yOnly[1]!.trim(), y } : null;
+  }
+  // Any other trailing number or coordinate letter is ambiguous: refuse it.
+  if (/,\s*(?:-?\d+(?:\.\d+)?|[xy])\s*$/iu.test(trimmed)) return null;
+  // A labelled coordinate (`text, y=475`, `text:y=541`, `x=60, y=475`) would
+  // be written as row text, and `x = 3, y = 4` may be the row itself: refuse.
+  if (/(?:^|[\s,:;(])[xy]\s*=\s*-?\d+(?:\.\d+)?\s*\)?\s*$/iu.test(trimmed)) return null;
+  return { text: trimmed, y: WORK_ZONE.topY };
+}
+
+/**
+ * Index of the "]" that closes a WRITE body starting at `from`: the first one
+ * outside the body's own brackets, on the same line. -1 when the line ends first.
+ */
+function writeBodyClose(slice: string, from: number): number {
+  const brackets: string[] = [];
+  for (let index = from; index < slice.length; index += 1) {
+    const char = slice[index]!;
+    if (char === '\n' || char === '\r') return -1;
+    if (char === '[' || (char === '(' && brackets.length > 0)) brackets.push(char);
+    else if (char === ')') brackets.pop();
+    else if (char === ']') {
+      if (brackets.length === 0) return index;
+      brackets.pop();
+    }
+  }
+  return -1;
+}
+
+/**
+ * The coordinate-less WRITE at the start of `slice`, as the raw tag and the
+ * canonical tag it stands for, or null. The caller has already found that
+ * the tag cannot close the canonical way.
+ */
+export function matchCoordinateLessWriteTag(slice: string): { raw: string; canonical: string } | null {
+  const header = COORDINATE_LESS_WRITE_HEADER.exec(slice);
+  if (!header) return null;
+  const index = writeBodyClose(slice, header[0].length);
+  if (index < 0) return null;
+  const body = slice.slice(header[0].length, index);
+  if (WRITE_LABEL_BODY_BREAK_PATTERN.test(body)) return null;
+  // An evaluation bar (`x^3/3 ]_0^1 = 1/3]`) is not the end of the row:
+  // refuse when bounds follow the bracket, or another "]" closes later
+  // on the same line before any tag.
+  const after = slice.slice(index + 1);
+  if (/^\s*[_^]/u.test(after) || (after.split(/[[\r\n]/u, 1)[0] ?? '').includes(']')) return null;
+  const row = coordinateLessWriteRow(body);
+  if (!row) return null;
+  const canonical = `[WRITE:${row.text},${WORK_ZONE.marginX},${row.y}]`;
+  // The repaired tag must itself be one canonical row, or nothing changes.
+  if (matchWriteLabelTag(canonical) !== canonical) return null;
+  return { raw: slice.slice(0, index + 1), canonical };
+}
+
+/**
+ * A WRITE that can close neither the canonical way nor as a coordinate-less
+ * row (`[WRITE:w5]`, `[WRITE:y=277]`, `[WRITE:text, x=60, y=475]`). It is
+ * protocol, not speech and not ink: the span is the tag up to its own "]",
+ * plus an evaluation bar's bounds when they follow it. Recorded
+ * resumes sent these, and the stream used to hold the rest of the step behind
+ * them and then read it all aloud, tags included. Null when the WRITE may still
+ * close, or when no "]" closes it on the line.
+ */
+export function matchRefusedWriteTag(slice: string): string | null {
+  const header = COORDINATE_LESS_WRITE_HEADER.exec(slice);
+  if (!header) return null;
+  if (matchWriteLabelTag(slice) || matchCoordinateLessWriteTag(slice)) return null;
+  const close = writeBodyClose(slice, header[0].length);
+  if (close < 0 || WRITE_LABEL_BODY_BREAK_PATTERN.test(slice.slice(header[0].length, close))) return null;
+  // The span ends at the tag's own "]". Words after it are speech, even when
+  // they hold a bracket of their own ("Take x in (0, 1]."). Only an
+  // evaluation bar's bounds (`]_0^1 = 1/3]`) belong to the row.
+  let end = close;
+  const after = slice.slice(close + 1);
+  if (/^\s*[_^]/u.test(after)) {
+    const line = after.split(/[[\r\n]/u, 1)[0] ?? '';
+    const next = line.indexOf(']');
+    if (next >= 0) end = close + 1 + next;
+  }
+  return slice.slice(0, end + 1);
+}
+
+/**
+ * A row closed by a tag: `[WRITE]text[/WRITE]`, or a header that holds only a
+ * row id or coordinates (`[WRITE:w6:y475]text[/WRITE]`, `[WRITE:y=541]...`).
+ * The text between the tags is the row the model meant; production sent this
+ * in a fresh lesson (every row unwritten, "[/WRITE]" read aloud) and in
+ * resumes. The text is one line with no brackets, and it passes the same
+ * refusals as a coordinate-less row, so no coordinate, id or placeholder can
+ * become ink.
+ */
+const CLOSED_WRITE_ROW = /^\[WRITE(?::([^\]\r\n]*))?\]([^[\]\r\n]{1,200}?)\[\/WRITE\]/iu;
+const LABELLED_COORDINATES_ONLY = /^(?:x\s*=\s*-?\d+\s*,\s*)?y\s*=\s*-?\d+$/i;
+
+export function matchClosedWriteRow(slice: string): { raw: string; canonical: string } | null {
+  const match = CLOSED_WRITE_ROW.exec(slice);
+  if (!match) return null;
+  const head = (match[1] ?? '').trim();
+  if (head && !COORDINATE_ONLY_WRITE_BODY.test(head) && !LABELLED_COORDINATES_ONLY.test(head)) return null;
+  const row = coordinateLessWriteRow(match[2]!);
+  if (!row) return null;
+  const canonical = `[WRITE:${row.text},${WORK_ZONE.marginX},${row.y}]`;
+  if (matchWriteLabelTag(canonical) !== canonical) return null;
+  return { raw: match[0], canonical };
+}
+
+/** `[/WRITE]` closes nothing in this protocol; it is never spoken. */
+export const STRAY_WRITE_CLOSE = /\[\/WRITE\]/giu;
+
+/**
+ * The text left where protocol was dropped from speech: one space when a word
+ * ends right before it and a word, a number or "(" starts right after it,
+ * otherwise nothing. The streaming parser applies the same rule.
+ */
+export function separatorAfterDrop(before: string | undefined, after: string): string {
+  return before !== undefined && /\S/u.test(before) && SPOKEN_WORD_START.test(after) ? ' ' : '';
+}
+export const SPOKEN_WORD_START = /^[\p{L}\p{N}(]/u;
+
+/** Rewrite every coordinate-less or tag-closed WRITE that cannot close canonically. */
+export function repairCoordinateLessWriteTags(responseText: string): string {
+  // A stray [/WRITE] is dropped from speech only; a row may quote one. A
+  // dropped tag between two words leaves one space, so "x = 2[/WRITE]3" is
+  // never spoken as "x = 23".
+  let out = '';
+  const speech = (text: string) => text.replace(STRAY_WRITE_CLOSE, (_tag, offset: number, whole: string) =>
+    separatorAfterDrop(offset > 0 ? whole[offset - 1] : out.slice(-1), whole.slice(offset + _tag.length)));
+  let from = 0;
+  const opens = /\[WRITE[:\]]/giu;
+  for (;;) {
+    opens.lastIndex = from;
+    const found = opens.exec(responseText);
+    if (!found) break;
+    const open = found.index;
+    const slice = responseText.slice(open);
+    const canonical = matchWriteLabelTag(slice);
+    if (canonical) {
+      out += speech(responseText.slice(from, open)) + canonical;
+      from = open + canonical.length;
+      continue;
+    }
+    const closed = matchClosedWriteRow(slice);
+    if (closed) {
+      out += speech(responseText.slice(from, open)) + closed.canonical;
+      from = open + closed.raw.length;
+      continue;
+    }
+    const repaired = matchCoordinateLessWriteTag(slice);
+    if (repaired) {
+      out += speech(responseText.slice(from, open)) + repaired.canonical;
+      from = open + repaired.raw.length;
+      continue;
+    }
+    const refused = matchRefusedWriteTag(slice);
+    if (refused) {
+      out += speech(responseText.slice(from, open));
+      from = open + refused.length;
+      out += separatorAfterDrop(out.slice(-1), responseText.slice(from));
+      continue;
+    }
+    out += speech(responseText.slice(from, open + 1));
+    from = open + 1;
+  }
+  return out + speech(responseText.slice(from));
+}
+
+export function isCompleteDrawingTag(rawTag: string): boolean {
+  if (WRITE_LABEL_HEADER_PATTERN.test(rawTag)) {
+    return matchWriteLabelTag(rawTag) === rawTag;
+  }
+  return rawTag.startsWith('[') && rawTag.endsWith(']');
+}
+
+export interface DrawingTagMatch {
+  index: number;
+  fullTag: string;
+}
+
+function nextDrawingTag(
+  responseText: string,
+  fromIndex: number,
+): DrawingTagMatch | null {
+  const openIndex = responseText.indexOf('[', fromIndex);
+  if (openIndex < 0) {
+    return null;
+  }
+
+  const slice = responseText.slice(openIndex);
+  const writeTag = matchWriteLabelTag(slice);
+  if (writeTag) {
+    return { index: openIndex, fullTag: writeTag };
+  }
+  if (WRITE_LABEL_HEADER_PATTERN.test(slice)) {
+    // Do not reinterpret an incomplete text command's first row closure as
+    // a complete protocol tag through the generic bracket scanner.
+    return nextDrawingTag(responseText, openIndex + 1);
+  }
+
+  DRAWING_TAG_SCAN_PATTERN.lastIndex = openIndex;
+  const match = DRAWING_TAG_SCAN_PATTERN.exec(responseText);
+  if (!match || match.index !== openIndex) {
+    // Skip a stray "[" and keep scanning.
+    return nextDrawingTag(responseText, openIndex + 1);
+  }
+  return { index: match.index, fullTag: match[0] };
+}
+
+/** Scan complete protocol tags without treating math brackets inside WRITE/LABEL as terminators. */
+export function scanDrawingTags(responseText: string): DrawingTagMatch[] {
+  const matches: DrawingTagMatch[] = [];
+  let fromIndex = 0;
+  let next = nextDrawingTag(responseText, fromIndex);
+
+  while (next) {
+    matches.push(next);
+    fromIndex = next.index + next.fullTag.length;
+    next = nextDrawingTag(responseText, fromIndex);
+  }
+
+  return matches;
+}
+
+export function parseDrawingCommands(rawResponseText: string): ParsedResponse {
+  const responseText = repairCoordinateLessWriteTags(repairHeaderOnlyTextTags(rawResponseText));
+  const commands: DrawCommand[] = [];
+  const segments: { text: string; commandIndex: number }[] = [];
+  let narration = '';
+  let lastIndex = 0;
+  // Unknown bracketed text is carried into the next segment / trailing text so
+  // lesson execution (which consumes segments) does not drop it.
+  let carryText = '';
+
+  for (const { index, fullTag } of scanDrawingTags(responseText)) {
+    const parsedTag = parseDrawingTag(fullTag);
+    if (!parsedTag) {
+      // A bare `[WRITE]` carries no row, but it is still protocol, not speech.
+      // Carrying it into the narration like ordinary bracketed prose put the
+      // tag name into the spoken lesson and into the continuation history.
+      const headerOnly = HEADER_ONLY_TEXT_TAG_EXACT.test(fullTag);
+      const chunk = responseText.slice(lastIndex, headerOnly ? index : index + fullTag.length);
+      narration += chunk;
+      carryText += chunk;
+      lastIndex = index + fullTag.length;
+      continue;
+    }
+
+    const commandIndex = commands.length;
+    const textBeforeTag = carryText + responseText.slice(lastIndex, index);
+    carryText = '';
+
+    narration += responseText.slice(lastIndex, index);
+    segments.push({ text: textBeforeTag, commandIndex });
+
+    commands.push(
+      parseDrawCommandFromTag(parsedTag.type, parsedTag.rawParams, index, narration),
+    );
+
+    lastIndex = index + fullTag.length;
+  }
+
+  const trailingText = carryText + responseText.slice(lastIndex);
+  narration += responseText.slice(lastIndex);
+
+  if (trailingText.length > 0 || segments.length === 0) {
+    segments.push({ text: trailingText, commandIndex: commands.length });
+  }
+
+  return {
+    narration: normalizeNarration(narration),
+    commands,
+    segments,
+  };
+}

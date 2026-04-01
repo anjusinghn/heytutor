@@ -1,0 +1,1008 @@
+"use client";
+
+import { figureQuestionNote } from "@/lib/scene/figureQuestion";
+import { Highlighter, Settings } from "lucide-react";
+import { resolveApiUrl, type SubjectFamiliarity } from "@heytutor/tutor-core";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
+import { compressQuestionImage } from "@/features/tutor-session/lib/input/compressQuestionImage";
+import { fileFromClipboardData } from "@/features/tutor-session/lib/input/questionImageInput";
+import {
+  DOUBT_INTERRUPT_HINT,
+  DOUBT_PLACEHOLDER,
+  doubtTurnTitle,
+} from "@/features/tutor-session/lib/input/askDoubt";
+import {
+  MARK_MODE_PLACEHOLDER,
+  MARK_SUBMIT_LABEL,
+} from "@/features/tutor-session/lib/board/boardMarking";
+import { FamiliarityPicker } from "@/features/tutor-session/components/FamiliarityPicker";
+import { useVoiceInput } from "@/features/tutor-session/hooks/useVoiceInput";
+import { VoiceLevelBars } from "@/features/tutor-session/components/VoiceLevelBars";
+import { Spinner } from "@/components/ui/spinner";
+import { cn } from "@/lib/utils";
+import type { BillingFailure } from "@/lib/billing/billingClient";
+import { parseBillingFailureFromBody } from "@/lib/billing/billingClient";
+import {
+  OUT_OF_USAGE_TITLE,
+  UPGRADE_LABEL,
+  isOutOfUsageLock,
+  studentBillingMessage,
+} from "@/lib/billing/studentCopy";
+
+export type InputSubmitMode = "ask" | "doubt" | "follow-up";
+
+/** One-line composer height. A pasted problem grows from here, not sideways. */
+const QUESTION_LINE_HEIGHT_PX = 28;
+/** Tall enough for a typical LeetCode paste; longer problems scroll inside. */
+const QUESTION_FIELD_MAX_HEIGHT_PX = 480;
+
+export interface InputBarProps {
+  /** An async Ask settles when ownership/read admission succeeds, before teaching finishes. */
+  onSubmit: (question: string) => void | Promise<boolean>;
+  onAskDoubt?: (question: string) => void;
+  onImageSelect?: (file: File) => void;
+  disabled?: boolean;
+  submitMode?: InputSubmitMode;
+  /** Reads the lesson question a doubt is asked on: a doubt's figure counts it with the doubt. */
+  pageQuestion?: () => string;
+  isPaused?: boolean;
+  onPauseToggle?: (source?: "control" | "doubt-composer") => void;
+  onCancel?: () => void;
+  placeholder?: string;
+  autoFocus?: boolean;
+  onUserInteractionChange?: (hasInteracted: boolean) => void;
+  compact?: boolean;
+  prominent?: boolean;
+  onOpenSettings?: () => void;
+  /** There is board content worth marking, so offer the marker. */
+  canMark?: boolean;
+  /** The marker is out and the board is taking strokes. */
+  markingArmed?: boolean;
+  /** How many marks are held. A marked doubt may be sent with no typed text. */
+  markCount?: number;
+  onToggleMarking?: () => void;
+  /**
+   * How well the student says they know this topic, chosen per question.
+   * Settings only supplies the default. Omitting both props hides the picker,
+   * which is what the doubt and follow-up bars want — a doubt continues the
+   * lesson already running at its level.
+   */
+  familiarity?: SubjectFamiliarity;
+  onFamiliarityChange?: (level: SubjectFamiliarity) => void;
+  billingNotice?: BillingFailure | null;
+  onUpgrade?: () => void;
+  onBillingFailure?: (failure: BillingFailure) => void;
+  /**
+   * Put `text` in the composer without sending it, then focus it (Teach it
+   * again on an old board that kept only its title, decision 13). Each new
+   * `nonce` places the text again; the student edits and sends it.
+   */
+  prefill?: { text: string; nonce: number } | null;
+}
+
+type SpeechRecognitionResultList = {
+  length: number;
+  [index: number]: { 0: { transcript: string } };
+};
+
+type SpeechRecognitionResultEvent = {
+  resultIndex: number;
+  results: SpeechRecognitionResultList;
+};
+
+type SpeechRecognitionInstance = {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  onresult: ((event: SpeechRecognitionResultEvent) => void) | null;
+  onerror: (() => void) | null;
+  onend: (() => void) | null;
+  start: () => void;
+  stop: () => void;
+  abort: () => void;
+};
+
+function getSpeechRecognitionCtor():
+  | (new () => SpeechRecognitionInstance)
+  | undefined {
+  if (typeof window === "undefined") return undefined;
+  const w = window as Window & {
+    SpeechRecognition?: new () => SpeechRecognitionInstance;
+    webkitSpeechRecognition?: new () => SpeechRecognitionInstance;
+  };
+  return w.SpeechRecognition ?? w.webkitSpeechRecognition;
+}
+
+// Dictation is a Chromium/WebKit API; Firefox has no SpeechRecognition at all.
+// Resolved through an external-store read so SSR and hydration agree.
+const subscribeToNothing = () => () => {};
+const readSpeechSupport = () => getSpeechRecognitionCtor() !== undefined;
+const readServerSpeechSupport = () => false;
+
+function submitButtonLabel(mode: InputSubmitMode): string {
+  if (mode === "doubt" || mode === "follow-up") return "Ask Doubt";
+  return "Ask";
+}
+
+export function InputBar({
+  onSubmit,
+  onAskDoubt,
+  onImageSelect,
+  disabled = false,
+  submitMode = "ask",
+  pageQuestion,
+  isPaused = false,
+  onPauseToggle,
+  onCancel,
+  placeholder = "Ask a question or paste a photo",
+  autoFocus = false,
+  onUserInteractionChange,
+  compact = false,
+  prominent = false,
+  onOpenSettings,
+  canMark = false,
+  markingArmed = false,
+  markCount = 0,
+  onToggleMarking,
+  familiarity,
+  onFamiliarityChange,
+  billingNotice = null,
+  onUpgrade,
+  onBillingFailure,
+  prefill = null,
+}: InputBarProps) {
+  const [question, setQuestion] = useState("");
+  const questionInputRef = useRef<HTMLTextAreaElement>(null);
+  // Adjusted during render, not in an effect: the text is in the box on the
+  // very render that asked for it.
+  const [prefillNonce, setPrefillNonce] = useState<number | null>(null);
+  if (prefill && prefill.nonce !== prefillNonce) {
+    setPrefillNonce(prefill.nonce);
+    setQuestion(prefill.text);
+  }
+  useEffect(() => {
+    if (prefillNonce === null) return;
+    const field = questionInputRef.current;
+    if (!field || field.disabled) return;
+    field.focus();
+    field.setSelectionRange(field.value.length, field.value.length);
+  }, [prefillNonce]);
+  const isMultiline = question.includes("\n");
+  const speechSupported = useSyncExternalStore(
+    subscribeToNothing,
+    readSpeechSupport,
+    readServerSpeechSupport,
+  );
+  const [isListening, setIsListening] = useState(false);
+  const [isExtracting, setIsExtracting] = useState(false);
+  const [extractError, setExtractError] = useState<string | null>(null);
+  const [extractLatencyMs, setExtractLatencyMs] = useState<number | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const submitPendingRef = useRef(false);
+  const recognitionRef = useRef<SpeechRecognitionInstance | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const extractGenerationRef = useRef(0);
+
+  useEffect(() => {
+    return () => {
+      recognitionRef.current?.abort();
+    };
+  }, []);
+
+  const trimmed = question.trim();
+  const isFollowUp = submitMode === "follow-up";
+  const isDoubt = submitMode === "doubt" || isFollowUp;
+  const submitLabel = submitButtonLabel(submitMode);
+  const outOfCredits = Boolean(billingNotice && isOutOfUsageLock(billingNotice));
+  const billingPlaceholder = billingNotice
+    ? isOutOfUsageLock(billingNotice)
+      ? OUT_OF_USAGE_TITLE
+      : studentBillingMessage(billingNotice.code)
+    : null;
+  /** The tutor owns the board (teaching or replaying) and offers its own controls. */
+  const isLiveLesson = disabled && Boolean(onPauseToggle);
+  /**
+   * A live lesson keeps the composer open — the Ask Doubt button is worthless if
+   * the student cannot type the doubt while the lesson is on screen.
+   */
+  const canInterruptWithDoubt = isLiveLesson && Boolean(onAskDoubt);
+  const inputLocked = isExtracting || (disabled && !canInterruptWithDoubt);
+  const doubtPageQuestion = (isDoubt || canInterruptWithDoubt) && trimmed.length > 0 ? pageQuestion?.() ?? "" : "";
+  // A doubt's figure is planned on its title (`doubtTurnTitle`), so the note counts the same text.
+  const figureNote = doubtPageQuestion.trim() ? figureQuestionNote(doubtTurnTitle(trimmed), doubtPageQuestion) : figureQuestionNote(question);
+  /**
+   * A mark is a question on its own — "explain this again" is the commonest
+   * doubt a student has and the one they are least able to word. So the submit
+   * stays live with an empty box as long as something is marked.
+   */
+  const marksCarryTheQuestion = markingArmed && markCount > 0;
+  const buttonDisabled = inputLocked || isSubmitting || (trimmed.length === 0 && !marksCarryTheQuestion);
+  const nextQuestionDisabled = inputLocked || isSubmitting;
+
+  const finishInput = useCallback((submittedQuestion?: string) => {
+    onUserInteractionChange?.(true);
+    setQuestion((current) => submittedQuestion === undefined || current === submittedQuestion ? "" : current);
+    setExtractLatencyMs(null);
+    setExtractError(null);
+    setSubmitError(null);
+  }, [onUserInteractionChange]);
+
+  const runAsk = useCallback(() => {
+    if (submitPendingRef.current) return;
+    submitPendingRef.current = true;
+    setIsSubmitting(true);
+    setSubmitError(null);
+    const settle = (admitted: boolean) => {
+      submitPendingRef.current = false;
+      setIsSubmitting(false);
+      if (admitted) finishInput(question);
+      else setSubmitError("Your lesson could not start. Try again — your question is still here.");
+    };
+    try {
+      const admission = onSubmit(trimmed);
+      if (admission) void admission.then(settle, () => settle(false));
+      else settle(true); // Synchronous next-board navigation retains the question in its route.
+    } catch {
+      settle(false);
+    }
+  }, [finishInput, onSubmit, question, trimmed]);
+
+  const runSubmit = useCallback(() => {
+    if (isDoubt || canInterruptWithDoubt) {
+      onAskDoubt?.(trimmed);
+      finishInput();
+    } else {
+      runAsk();
+    }
+  }, [canInterruptWithDoubt, finishInput, isDoubt, onAskDoubt, runAsk, trimmed]);
+
+  const runNextQuestion = useCallback(() => {
+    if (nextQuestionDisabled) return;
+    runAsk();
+  }, [nextQuestionDisabled, runAsk]);
+
+  const submitQuestion = useCallback(() => {
+    if (buttonDisabled) return;
+    runSubmit();
+  }, [buttonDisabled, runSubmit]);
+
+  const handleSubmit = useCallback(
+    (event: React.FormEvent) => {
+      event.preventDefault();
+      if (outOfCredits) {
+        onUpgrade?.();
+        return;
+      }
+      submitQuestion();
+    },
+    [onUpgrade, outOfCredits, submitQuestion],
+  );
+
+  const handleQuestionKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
+      // A stacked paste is edited as a box: Enter inserts a line. A one-line
+      // question still sends on Enter. ⌘/Ctrl+Enter always sends.
+      if (event.metaKey || event.ctrlKey) {
+        event.preventDefault();
+        submitQuestion();
+        return;
+      }
+      if (event.shiftKey) return;
+      if (!question.includes("\n")) {
+        event.preventDefault();
+        submitQuestion();
+      }
+    },
+    [question, submitQuestion],
+  );
+
+  useLayoutEffect(() => {
+    const field = questionInputRef.current;
+    if (!field) return;
+    if (!question.includes("\n")) {
+      field.style.height = `${QUESTION_LINE_HEIGHT_PX}px`;
+      field.style.overflowY = "hidden";
+      return;
+    }
+    field.style.height = "auto";
+    field.style.height = `${Math.min(field.scrollHeight, QUESTION_FIELD_MAX_HEIGHT_PX)}px`;
+    field.style.overflowY =
+      field.scrollHeight > QUESTION_FIELD_MAX_HEIGHT_PX ? "auto" : "hidden";
+  }, [question]);
+
+  // Native `autoFocus` ships in the SSR HTML, so a phone would open the
+  // keyboard before React can read the viewport. Focus only after mount, and
+  // only when the layout is desktop-wide.
+  useLayoutEffect(() => {
+    if (!autoFocus) return;
+    if (window.matchMedia("(max-width: 767px)").matches) return;
+    questionInputRef.current?.focus();
+  }, [autoFocus]);
+
+  /** Composing a doubt stops the voice talking over the student. */
+  const pauseForDoubt = useCallback(() => {
+    if (canInterruptWithDoubt && !isPaused) {
+      onPauseToggle?.("doubt-composer");
+    }
+  }, [canInterruptWithDoubt, isPaused, onPauseToggle]);
+
+  const askDoubtFromButton = useCallback(() => {
+    if (inputLocked) return;
+    if (trimmed.length === 0 && !marksCarryTheQuestion) {
+      pauseForDoubt();
+      // Nothing typed and nothing marked: hand the student both ways in.
+      onToggleMarking?.();
+      questionInputRef.current?.focus();
+      return;
+    }
+    runSubmit();
+  }, [
+    inputLocked,
+    marksCarryTheQuestion,
+    onToggleMarking,
+    pauseForDoubt,
+    runSubmit,
+    trimmed.length,
+  ]);
+
+  const toggleListening = useCallback(() => {
+    if (inputLocked) return;
+
+    const SpeechRecognition = getSpeechRecognitionCtor();
+    if (!SpeechRecognition) return;
+
+    if (isListening) {
+      recognitionRef.current?.stop();
+      setIsListening(false);
+      return;
+    }
+
+    // Dictating over a talking tutor feeds the lesson audio straight back into
+    // the transcript, so a live lesson pauses before the mic opens.
+    pauseForDoubt();
+
+    const recognition = new SpeechRecognition();
+    recognition.continuous = false;
+    recognition.interimResults = true;
+    recognition.lang = "en-US";
+
+    recognition.onresult = (event: SpeechRecognitionResultEvent) => {
+      let transcript = "";
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        transcript += event.results[i][0].transcript;
+      }
+      setQuestion(transcript);
+    };
+
+    recognition.onerror = () => {
+      setIsListening(false);
+    };
+
+    recognition.onend = () => {
+      setIsListening(false);
+    };
+
+    recognitionRef.current = recognition;
+    recognition.start();
+    setIsListening(true);
+  }, [inputLocked, isListening, pauseForDoubt]);
+
+  /**
+   * Dictation lands after whatever is already typed rather than replacing it,
+   * so a student can type half a question, speak the rest, and keep both.
+   */
+  const appendTranscript = useCallback(
+    (text: string) => {
+      setExtractError(null);
+      setQuestion((current) => {
+        const base = current.trim();
+        return base ? `${base} ${text}` : text;
+      });
+      onUserInteractionChange?.(true);
+      questionInputRef.current?.focus();
+    },
+    [onUserInteractionChange],
+  );
+
+  const voice = useVoiceInput({
+    onTranscript: appendTranscript,
+    // Same reason the browser path pauses: a talking tutor is the loudest thing
+    // in the room and would be transcribed instead of the student.
+    onStart: pauseForDoubt,
+    disabled: inputLocked,
+  });
+  const {
+    toggle: toggleVoice,
+    clearError: clearVoiceError,
+    unavailable: voiceUnavailable,
+  } = voice;
+
+  // No STT key on the server is a deployment fact, not something to put in
+  // front of a student. Swallow it; the next press uses browser dictation.
+  useEffect(() => {
+    if (voiceUnavailable && speechSupported) clearVoiceError();
+  }, [clearVoiceError, speechSupported, voiceUnavailable]);
+
+  /** The selected speech provider handles the mic; the browser's own dictation is the safety net. */
+  const useBrowserDictation = !voice.supported || voiceUnavailable;
+  const micAvailable = voice.supported || speechSupported;
+  const micListening = useBrowserDictation ? isListening : voice.state === "listening";
+  const micTranscribing = voice.state === "transcribing";
+
+  const toggleMic = useCallback(() => {
+    if (inputLocked) return;
+    if (useBrowserDictation) {
+      toggleListening();
+      return;
+    }
+    toggleVoice();
+  }, [inputLocked, toggleListening, toggleVoice, useBrowserDictation]);
+
+  const handleImageClick = useCallback(() => {
+    if (inputLocked) return;
+    fileInputRef.current?.click();
+  }, [inputLocked]);
+
+  const extractQuestionFromImage = useCallback(
+    async (file: File) => {
+      const generation = extractGenerationRef.current + 1;
+      extractGenerationRef.current = generation;
+      setExtractError(null);
+      setExtractLatencyMs(null);
+      setIsExtracting(true);
+      const startedAt = performance.now();
+      try {
+        const image = await compressQuestionImage(file);
+        const response = await fetch(resolveApiUrl("/api/extract-question"), {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ image }),
+        });
+        const data = (await response.json().catch(() => ({}))) as {
+          question?: unknown;
+          error?: unknown;
+          latencyMs?: unknown;
+          code?: unknown;
+          remaining?: unknown;
+        };
+        if (extractGenerationRef.current !== generation) {
+          return;
+        }
+        if (!response.ok) {
+          const billing = parseBillingFailureFromBody(response.status, data);
+          if (billing) {
+            onBillingFailure?.(billing);
+            throw new Error(studentBillingMessage(billing.code));
+          }
+        }
+        if (!response.ok || typeof data.question !== "string") {
+          throw new Error(
+            typeof data.error === "string"
+              ? data.error
+              : "Could not read that image. Try a clearer photo.",
+          );
+        }
+        onImageSelect?.(file);
+        setQuestion(data.question);
+        setExtractLatencyMs(
+          typeof data.latencyMs === "number"
+            ? data.latencyMs
+            : Math.round(performance.now() - startedAt),
+        );
+      } catch (error) {
+        if (extractGenerationRef.current !== generation) {
+          return;
+        }
+        setExtractError(
+          error instanceof Error
+            ? error.message
+            : "Could not read that image. Try a clearer photo.",
+        );
+      } finally {
+        if (extractGenerationRef.current === generation) {
+          setIsExtracting(false);
+        }
+      }
+    },
+    [onBillingFailure, onImageSelect],
+  );
+
+  const handleFileChange = useCallback(
+    (event: React.ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0];
+      event.target.value = "";
+      if (file) {
+        void extractQuestionFromImage(file);
+      }
+    },
+    [extractQuestionFromImage],
+  );
+
+  const submitPastedImage = useCallback(
+    (event: { clipboardData: DataTransfer | null; preventDefault(): void }) => {
+      if (inputLocked) return;
+      const file = fileFromClipboardData(event.clipboardData);
+      if (!file) return;
+      event.preventDefault();
+      void extractQuestionFromImage(file);
+    },
+    [extractQuestionFromImage, inputLocked],
+  );
+
+  useEffect(() => {
+    if (inputLocked) return;
+    const onWindowPaste = (event: ClipboardEvent) => {
+      const target = event.target;
+      if (
+        target instanceof HTMLElement &&
+        target.closest(
+          '[role="dialog"], input[type="search"], textarea:not([data-question-field])',
+        )
+      ) {
+        return;
+      }
+      submitPastedImage(event);
+    };
+    window.addEventListener("paste", onWindowPaste);
+    return () => window.removeEventListener("paste", onWindowPaste);
+  }, [inputLocked, submitPastedImage]);
+
+  return (
+    <div className="flex w-full flex-col items-stretch gap-1.5">
+      {canInterruptWithDoubt && trimmed.length > 0 && (
+        <p className="px-3 text-center text-[0.8125rem]" style={{ color: "var(--text-soft)" }}>
+          {DOUBT_INTERRUPT_HINT}
+        </p>
+      )}
+      <form
+        onSubmit={handleSubmit}
+        onDragOver={(event) => {
+          if (inputLocked) return;
+          if ([...event.dataTransfer.types].includes("Files")) {
+            event.preventDefault();
+          }
+        }}
+        onDrop={(event) => {
+          if (inputLocked) return;
+          const file = fileFromClipboardData(event.dataTransfer);
+          if (!file) return;
+          event.preventDefault();
+          void extractQuestionFromImage(file);
+        }}
+        className={cn(
+          // Below sm the composer is a two-row card: photo/input/marker/mic on
+          // the first line, the control cluster wrapping full-width beneath.
+          // At sm+ a one-line question stays the pill row. A stacked paste
+          // opens into a rounded box and grows down, not sideways.
+          "wb-input-wrap flex min-w-0 flex-1 flex-wrap gap-1.5",
+          isMultiline
+            ? "wb-input-wrap--multiline items-end rounded-[1.5rem] px-3 pb-2.5 pt-3"
+            : cn(
+                "items-center rounded-[1.75rem] py-2 sm:rounded-[9999px]",
+                prominent ? "px-3" : "px-2.5",
+              ),
+        )}
+        // The composer is the one surface that has to be found instantly on an
+        // otherwise empty board, so it is a step lighter than the panels around
+        // it and nothing else: no inset gloss, no drop shadow. The lift used to
+        // do that job and it made the bar look like it was hovering over the
+        // page rather than being part of it.
+        style={{
+          minHeight: prominent ? "64px" : "52px",
+          backgroundColor: "var(--ink-750)",
+          border: "1px solid var(--stroke)",
+        }}
+      >
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          className="hidden"
+          onChange={handleFileChange}
+          disabled={inputLocked}
+          aria-hidden
+          tabIndex={-1}
+        />
+
+        {!(compact && disabled) && (
+          <button
+            type="button"
+            onClick={handleImageClick}
+            disabled={inputLocked}
+            aria-label="Add question photo"
+            title="Upload or paste a question photo"
+            className={cn(
+              "flex shrink-0 items-center justify-center rounded-full transition-colors disabled:opacity-40",
+              compact ? "h-11 w-11" : prominent ? "h-10 w-10" : "h-9 w-9",
+            )}
+            style={{ color: isExtracting ? "var(--sky-500)" : "var(--text-soft)" }}
+            onMouseEnter={(e) => {
+              if (!inputLocked) e.currentTarget.style.color = "var(--frost)";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.color = isExtracting ? "var(--sky-500)" : "var(--text-soft)";
+            }}
+          >
+            {isExtracting ? (
+              <Spinner size={prominent ? 18 : 16} label="Reading the question" />
+            ) : (
+              <svg
+                width={prominent ? 22 : 20}
+                height={prominent ? 22 : 20}
+                viewBox="0 0 24 24"
+                fill="none"
+                aria-hidden
+              >
+                <rect
+                  x="3.5"
+                  y="6"
+                  width="17"
+                  height="13"
+                  rx="2.25"
+                  stroke="currentColor"
+                  strokeWidth="1.75"
+                />
+                <circle cx="8.5" cy="10.25" r="1.35" fill="currentColor" />
+                <path
+                  d="M7 17.5l4.2-4.4a1.2 1.2 0 0 1 1.7 0L17.5 17.5"
+                  stroke="currentColor"
+                  strokeWidth="1.75"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            )}
+          </button>
+        )}
+
+        <textarea
+          ref={questionInputRef}
+          data-question-field
+          rows={1}
+          value={question}
+          onChange={(event) => {
+            setSubmitError(null);
+            setExtractError(null);
+            setExtractLatencyMs(null);
+            setQuestion(event.target.value);
+            if (event.target.value.trim().length > 0) {
+              pauseForDoubt();
+            }
+          }}
+          onKeyDown={handleQuestionKeyDown}
+          disabled={inputLocked}
+          aria-label="Question"
+          placeholder={
+            isExtracting
+              ? "Reading the question…"
+              : micListening
+                ? "Listening… press the mic again when you are done"
+                : micTranscribing
+                  ? "Writing down what you said…"
+                  : extractError ??
+                    voice.error ??
+                    billingPlaceholder ??
+                    (markingArmed
+                      ? MARK_MODE_PLACEHOLDER
+                      : canInterruptWithDoubt
+                        ? DOUBT_PLACEHOLDER
+                        : placeholder)
+          }
+          className={cn(
+            "min-w-0 resize-none bg-transparent px-2 py-1.5 focus:outline-none disabled:opacity-50 placeholder:text-faint",
+            // 16px below sm so iOS Safari does not zoom the field on focus.
+            prominent ? "text-base" : "text-base sm:text-[15px]",
+            isMultiline
+              ? "order-first w-full basis-full leading-relaxed"
+              : "flex-1 overflow-x-auto whitespace-nowrap",
+          )}
+          autoComplete="off"
+          spellCheck={false}
+          style={{
+            color: "var(--frost)",
+            minHeight: QUESTION_LINE_HEIGHT_PX,
+            whiteSpace: isMultiline ? "pre-wrap" : "nowrap",
+          }}
+        />
+
+        {canMark && onToggleMarking && (
+          <button
+            type="button"
+            onClick={() => {
+              if (inputLocked) return;
+              pauseForDoubt();
+              onToggleMarking();
+            }}
+            disabled={inputLocked}
+            aria-pressed={markingArmed}
+            aria-label={markingArmed ? "Put the marker away" : "Mark the board"}
+            title={
+              markingArmed
+                ? "Put the marker away (Esc)"
+                : "Mark what you did not follow, then ask (M)"
+            }
+            className={cn(
+              "flex shrink-0 items-center justify-center rounded-full transition-colors disabled:opacity-40",
+              compact ? "h-11 w-11" : prominent ? "h-10 w-10" : "h-9 w-9",
+            )}
+            style={{
+              color: markingArmed ? "var(--ink-950)" : "var(--text-soft)",
+              backgroundColor: markingArmed ? "var(--sky-500)" : "transparent",
+            }}
+            onMouseEnter={(event) => {
+              if (!inputLocked && !markingArmed) {
+                event.currentTarget.style.color = "var(--frost)";
+              }
+            }}
+            onMouseLeave={(event) => {
+              if (!markingArmed) {
+                event.currentTarget.style.color = "var(--text-soft)";
+              }
+            }}
+          >
+            <Highlighter
+              className={prominent ? "h-[18px] w-[18px]" : "h-4 w-4"}
+              strokeWidth={1.9}
+              aria-hidden
+            />
+          </button>
+        )}
+
+        {micAvailable && (
+          <button
+            type="button"
+            onClick={toggleMic}
+            disabled={inputLocked || micTranscribing}
+            aria-pressed={micListening}
+            aria-label={
+              micListening
+                ? "Stop recording and transcribe"
+                : micTranscribing
+                  ? "Transcribing what you said"
+                  : "Ask by voice"
+            }
+            title={
+              micListening
+                ? "Press again when you have finished speaking"
+                : "Ask by voice"
+            }
+            className={cn(
+              "relative flex shrink-0 items-center justify-center rounded-full transition-colors disabled:opacity-40",
+              compact ? "h-11 w-11" : prominent ? "h-10 w-10" : "h-9 w-9",
+            )}
+            style={{
+              color:
+                micListening || micTranscribing ? "var(--sky-500)" : "var(--text-soft)",
+            }}
+            onMouseEnter={(e) => {
+              if (!inputLocked && !micListening && !micTranscribing) {
+                e.currentTarget.style.color = "var(--frost)";
+              }
+            }}
+            onMouseLeave={(e) => {
+              if (!micListening && !micTranscribing) {
+                e.currentTarget.style.color = "var(--text-soft)";
+              }
+            }}
+          >
+            {/* Recording shows the student's own voice moving. A lit box would
+                only say "this button is on", which they can already see. */}
+            {micListening ? (
+              <VoiceLevelBars
+                analyserRef={voice.analyserRef}
+                bars={5}
+                barWidth={2}
+                height={prominent ? 18 : 16}
+              />
+            ) : micTranscribing ? (
+              <Spinner size={prominent ? 17 : 15} label="Writing down what you said" />
+            ) : (
+              <svg
+                width={prominent ? 20 : 18}
+                height={prominent ? 20 : 18}
+                viewBox="0 0 24 24"
+                fill="none"
+                aria-hidden
+              >
+                <rect
+                  x="9"
+                  y="2"
+                  width="6"
+                  height="11"
+                  rx="3"
+                  stroke="currentColor"
+                  strokeWidth="1.75"
+                />
+                <path
+                  d="M5 10a7 7 0 0 0 14 0M12 17v3"
+                  stroke="currentColor"
+                  strokeWidth="1.75"
+                  strokeLinecap="round"
+                />
+              </svg>
+            )}
+          </button>
+        )}
+
+        {disabled && onPauseToggle ? (
+          <div
+            className={cn(
+              "mr-0 flex w-full shrink-0 flex-wrap items-center justify-between gap-1.5 sm:mr-0.5 sm:w-auto sm:flex-nowrap",
+              isMultiline && "sm:ml-auto",
+            )}
+          >
+            <button
+              type="button"
+              onClick={() => onPauseToggle()}
+              aria-label={isPaused ? "Resume teaching" : "Pause teaching"}
+              className={cn("flex shrink-0 items-center justify-center rounded-full transition-colors", compact ? "h-11 w-11" : "h-9 w-9")}
+              style={{
+                backgroundColor: "var(--wb-accent-soft)",
+                color: "var(--frost)",
+              }}
+            >
+              {isPaused ? (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M8 5v14l11-7z" />
+                </svg>
+              ) : (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                  <rect x="6" y="5" width="4" height="14" rx="1" />
+                  <rect x="14" y="5" width="4" height="14" rx="1" />
+                </svg>
+              )}
+            </button>
+            {onCancel && (
+              <button
+                type="button"
+                onClick={onCancel}
+                aria-label="Cancel teaching"
+                className={cn("flex shrink-0 items-center justify-center rounded-full transition-colors", compact ? "h-11 w-11" : "h-9 w-9")}
+                style={{
+                  backgroundColor: "var(--stroke)",
+                  color: "var(--text-soft)",
+                }}
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+                  <path
+                    d="M6 6l12 12M18 6L6 18"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                  />
+                </svg>
+              </button>
+            )}
+            {onOpenSettings ? (
+              <InputSettingsButton onOpen={onOpenSettings} prominent={prominent} compact={compact} />
+            ) : null}
+            <button
+              type="button"
+              aria-label={marksCarryTheQuestion ? MARK_SUBMIT_LABEL : "Ask Doubt"}
+              title={
+                marksCarryTheQuestion
+                  ? "Teach the part you marked again, from there"
+                  : trimmed.length > 0
+                    ? DOUBT_INTERRUPT_HINT
+                    : "Pause, then mark or type a doubt about this lesson"
+              }
+              disabled={inputLocked}
+              className={cn(
+                "btn btn-sky btn-sm shrink-0",
+                compact && "min-h-11",
+              )}
+              onClick={askDoubtFromButton}
+            >
+              {marksCarryTheQuestion ? (
+                MARK_SUBMIT_LABEL
+              ) : (
+                "Ask Doubt"
+              )}
+            </button>
+          </div>
+        ) : (
+          <div
+            className={cn(
+              "mr-0 flex w-full shrink-0 flex-wrap items-center justify-between gap-1.5 sm:mr-0.5 sm:w-auto sm:flex-nowrap",
+              isMultiline && "sm:ml-auto",
+            )}
+          >
+            {familiarity && onFamiliarityChange ? (
+              <FamiliarityPicker
+                value={familiarity}
+                onChange={onFamiliarityChange}
+                disabled={inputLocked}
+                prominent={prominent}
+                compact={compact}
+              />
+            ) : null}
+            {onOpenSettings ? (
+              <InputSettingsButton onOpen={onOpenSettings} prominent={prominent} compact={compact} />
+            ) : null}
+            {/* Face and geometry both come from `.btn`. */}
+            {outOfCredits ? (
+              <button
+                type="button"
+                className={cn("btn btn-sky shrink-0", prominent ? "btn-md" : "btn-sm", compact && "min-h-11")}
+                onClick={() => onUpgrade?.()}
+              >
+                {UPGRADE_LABEL}
+              </button>
+            ) : (
+              <button
+                type="submit"
+                disabled={buttonDisabled}
+                className={cn("btn btn-sky shrink-0", prominent ? "btn-md" : "btn-sm", compact && "min-h-11")}
+              >
+                {marksCarryTheQuestion ? MARK_SUBMIT_LABEL : submitLabel}
+              </button>
+            )}
+            {isFollowUp && !outOfCredits && (
+              <button
+                type="button"
+                onClick={runNextQuestion}
+                disabled={nextQuestionDisabled}
+                title={
+                  trimmed.length > 0
+                    ? "Start this question on a new board"
+                    : "Open a new board for your next question"
+                }
+                className={cn("btn btn-ghost shrink-0", prominent ? "btn-md" : "btn-sm", compact && "min-h-11")}
+              >
+                Next question
+              </button>
+            )}
+          </div>
+        )}
+      </form>
+      {submitError && (
+        <p role="alert" className="px-3 text-center text-xs" style={{ color: "var(--text-soft)" }}>
+          {submitError}
+        </p>
+      )}
+      {!submitError && figureNote && (
+        <p role="status" className="px-3 text-center text-xs" style={{ color: "var(--text-soft)" }}>
+          {figureNote}
+        </p>
+      )}
+      {extractLatencyMs != null && !extractError && (
+        <p className="px-3 text-center text-[0.6875rem]" style={{ color: "var(--text-soft)" }}>
+          Read in {(extractLatencyMs / 1000).toFixed(1)}s. Press Ask to start teaching.
+        </p>
+      )}
+    </div>
+  );
+}
+
+function InputSettingsButton({
+  onOpen,
+  prominent,
+  compact,
+}: {
+  onOpen: () => void;
+  prominent: boolean;
+  compact: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      aria-label="Board settings"
+      className={cn(
+        "flex shrink-0 items-center justify-center rounded-full border border-stroke bg-ink-700 text-soft transition-colors hover:border-sky-500/35 hover:bg-ink-600 hover:text-sky-200",
+        compact ? "h-11 w-11" : prominent ? "h-10 w-10" : "h-9 w-9",
+      )}
+    >
+      <Settings className={prominent ? "h-[18px] w-[18px]" : "h-4 w-4"} strokeWidth={1.75} />
+    </button>
+  );
+}

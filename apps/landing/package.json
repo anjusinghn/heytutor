@@ -1,0 +1,47 @@
+{
+  "name": "@heytutor/landing",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc -b --noEmit",
+    "lint": "eslint .",
+    "clean": "rm -rf dist",
+    "verify": "node scripts/verify/verify-hero-localization.ts && node scripts/verify/verify-hero-voice-policy.ts && node scripts/verify/verify-hero-voice.ts && node scripts/verify/verify-hero-lesson.ts && node scripts/verify/verify-hero-audio-clock.ts && node scripts/verify/verify-seo.ts && node scripts/verify/verify-use-case-demo.ts && node scripts/generate-use-case-lesson.mjs --check && node scripts/verify/verify-region.ts",
+    "record:hero": "node scripts/record-hero-lesson.mjs",
+    "encode:hero": "node scripts/encode-hero-video.mjs",
+    "gen:share-assets": "node scripts/generate-share-assets.mjs",
+    "gen:hero-voice": "node scripts/generate-hero-voice.mjs",
+    "gen:use-case-lesson": "node scripts/generate-use-case-lesson.mjs"
+  },
+  "dependencies": {
+    "@heytutor/design-tokens": "workspace:*",
+    "@heytutor/drawing": "workspace:*",
+    "@heytutor/tutor-core": "workspace:*",
+    "@heytutor/whiteboard": "workspace:*",
+    "konva": "^10.3.0",
+    "lucide-react": "^1.21.0",
+    "motion": "^13.1.1",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "react-konva": "^19.2.5"
+  },
+  "devDependencies": {
+    "@heytutor/eslint-config": "workspace:*",
+    "@heytutor/scene-engine": "workspace:*",
+    "@heytutor/typescript-config": "workspace:*",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.5.0",
+    "eslint": "^9.39.4",
+    "postcss": "^8.5.15",
+    "tailwindcss": "^3.4.19",
+    "typescript": "^5.8.3",
+    "vite": "^6.4.5"
+  }
+}

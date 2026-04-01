@@ -1,0 +1,223 @@
+/**
+ * Every student-facing point on a compiled diagram must be marked and labeled.
+ * This pass infers compact labels from roles, conventional IDs, and the
+ * question, then keeps those points in the visible reveal contract.
+ */
+const ANGLE_MARK_OPERATORS = new Set(["angle_mark", "right_angle_mark", "space_angle_mark", "space_right_angle_mark"]);
+
+/** Only the new native incident-arm mode may retain an already declared
+ * vertex scope. A legacy mark sharing that vertex keeps its old promotion. */
+function ownedIncidentAngleVertices(raw: Record<string, unknown>): Set<string> {
+  const owned = new Set<string>((Array.isArray(raw.revealGroups) ? raw.revealGroups : []).flatMap(group =>
+    isRecord(group) && Array.isArray(group.entityIds)
+      ? group.entityIds.filter((id): id is string => typeof id === "string") : []));
+  const retained = new Set<string>(), legacy = new Set<string>();
+  for (const construction of Array.isArray(raw.constructions) ? raw.constructions : []) {
+    if (!isRecord(construction) || !ANGLE_MARK_OPERATORS.has(String(construction.operator)) ||
+        !isRecord(construction.inputs) || typeof construction.inputs.vertex !== "string") continue;
+    const vertex = construction.inputs.vertex;
+    if (construction.operator === "right_angle_mark" && construction.inputs.incidentLineArms === true && owned.has(vertex)) retained.add(vertex);
+    else legacy.add(vertex);
+  }
+  for (const vertex of legacy) retained.delete(vertex);
+  return retained;
+}
+
+/** Keep angle vertices visible before dead-entity pruning. */
+export function promoteAngleMarkVertices(raw: Record<string, unknown>): Record<string, unknown> {
+  if (!Array.isArray(raw.constructions) || !Array.isArray(raw.requiredEntityIds) || !Array.isArray(raw.revealGroups)) {
+    return raw;
+  }
+  const retainedVertices = ownedIncidentAngleVertices(raw);
+  const vertices = raw.constructions.flatMap((construction) => {
+    if (!isRecord(construction)) return [];
+    if (!ANGLE_MARK_OPERATORS.has(String(construction.operator))) return [];
+    if (!isRecord(construction.inputs) || typeof construction.inputs.vertex !== "string") return [];
+    return [construction.inputs.vertex];
+  });
+  if (vertices.length === 0) return raw;
+  const required = [...new Set([
+    ...raw.requiredEntityIds.filter((id): id is string => typeof id === "string"),
+    ...vertices,
+  ])];
+  const revealGroups = raw.revealGroups.map((group, index) => {
+    if (!isRecord(group) || !Array.isArray(group.entityIds) || index !== 0) return group;
+    return { ...group, entityIds: [...new Set([...group.entityIds.filter((id): id is string => typeof id === "string"), ...vertices.filter(vertex => !retainedVertices.has(vertex))])] };
+  });
+  return { ...raw, requiredEntityIds: required, revealGroups };
+}
+
+export function ensureStudentFacingPointMarks(raw: Record<string, unknown>): Record<string, unknown> {
+  if (!Array.isArray(raw.entities)) return raw;
+  const retainedVertices = ownedIncidentAngleVertices(raw);
+  const question = sourceQuestion(raw);
+  const usedLabels = new Set<string>();
+  // Verified-parts recovery may omit an inferred name it could not attach; it
+  // records those points so the name is not inferred again.
+  const source = isRecord(raw.source) ? raw.source : {};
+  const unlabelled = new Set(source.diagramYieldPolicy === "verified_parts" && Array.isArray(source.yieldUnlabelledPoints)
+    ? source.yieldUnlabelledPoints.filter((id): id is string => typeof id === "string") : []);
+  const entities = raw.entities.map((entity) => {
+    if (!isRecord(entity) || typeof entity.id !== "string") return entity;
+    if (typeof entity.label === "string" && entity.label.trim()) {
+      usedLabels.add(normalizeLabel(entity.label));
+      return entity;
+    }
+    if (String(entity.kind ?? "") !== "point" || unlabelled.has(entity.id)) return entity;
+    const label = inferPointLabel(entity.id, String(entity.role ?? ""), question, usedLabels);
+    if (!label) return entity;
+    usedLabels.add(normalizeLabel(label));
+    return { ...entity, label };
+  });
+  const constructed = new Set(
+    (Array.isArray(raw.constructions) ? raw.constructions : []).flatMap((construction) =>
+      isRecord(construction) && Array.isArray(construction.outputs)
+        ? construction.outputs.filter((id): id is string => typeof id === "string")
+        : []),
+  );
+  const labeledPointIds = entities.flatMap((entity) =>
+    isRecord(entity) &&
+    typeof entity.id === "string" &&
+    entity.kind === "point" &&
+    typeof entity.label === "string" &&
+    entity.label.trim() &&
+    constructed.has(entity.id)
+      ? [entity.id]
+      : []);
+  const angleVertices = (Array.isArray(raw.constructions) ? raw.constructions : []).flatMap((construction) => {
+    if (!isRecord(construction)) return [];
+    if (!ANGLE_MARK_OPERATORS.has(String(construction.operator))) return [];
+    if (!isRecord(construction.inputs) || typeof construction.inputs.vertex !== "string") return [];
+    return constructed.has(construction.inputs.vertex) ? [construction.inputs.vertex] : [];
+  });
+  const markedPointIds = [...new Set([...labeledPointIds, ...angleVertices])];
+  if (markedPointIds.length === 0) {
+    return entities === raw.entities ? raw : { ...raw, entities };
+  }
+  const required = new Set([
+    ...(Array.isArray(raw.requiredEntityIds) ? raw.requiredEntityIds : [])
+      .filter((id): id is string => typeof id === "string"),
+    ...markedPointIds,
+  ]);
+  const revealGroups = Array.isArray(raw.revealGroups) && raw.revealGroups.length > 0
+    ? raw.revealGroups.map((group, index) => {
+        if (!isRecord(group) || !Array.isArray(group.entityIds)) return group;
+        if (index !== 0) return group;
+        return { ...group, entityIds: [...new Set([...group.entityIds, ...markedPointIds.filter(id => !retainedVertices.has(id))])] };
+      })
+    : [{
+        id: "setup",
+        entityIds: [...required],
+        dependsOn: [],
+        narrationCue: "Mark the named points on the figure.",
+      }];
+
+  const assertionIds = new Set(
+    (Array.isArray(raw.assertions) ? raw.assertions : []).flatMap((assertion) =>
+      isRecord(assertion) && typeof assertion.id === "string" ? [assertion.id] : []),
+  );
+  const assertions = [
+    ...(Array.isArray(raw.assertions) ? raw.assertions : []),
+    ...labeledPointIds.flatMap((id) => {
+      const assertionId = `assert_label_${id}`;
+      if (assertionIds.has(assertionId)) return [];
+      assertionIds.add(assertionId);
+      return [{
+        id: assertionId,
+        predicate: "label_attached",
+        entities: [id],
+        expected: true,
+        severity: "fatal",
+        reason: "student-facing points must stay labeled",
+      }];
+    }),
+  ];
+
+  return {
+    ...raw,
+    entities,
+    requiredEntityIds: [...required],
+    revealGroups,
+    assertions,
+  };
+}
+
+function inferPointLabel(
+  id: string,
+  role: string,
+  question: string,
+  used: ReadonlySet<string>,
+): string | null {
+  const semantic = `${id} ${role}`.toLowerCase().replace(/[_-]+/g, " ");
+  for (const [pattern, label] of ROLE_LABELS) {
+    if (pattern.test(semantic) && !used.has(normalizeLabel(label))) return label;
+  }
+  const fromId = conventionalLabel(id);
+  const asked = askedPointLabels(question);
+  if (fromId && asked.includes(fromId) && !used.has(normalizeLabel(fromId))) return fromId;
+  return null;
+}
+
+const ROLE_LABELS: ReadonlyArray<readonly [RegExp, string]> = [
+  [/\bobject position\b|\bpoint object\b/, "O"],
+  [/\bintermediate(?: real)? image\b/, "I"],
+  [/\bfinal(?: virtual)? image\b/, "I'"],
+  [/\bimage position\b|\bparaxial image\b/, "I"],
+  [/\bfocal point\b|\bfocus\b/, "F"],
+  [/\bcenter of curvature\b|\bcentre of curvature\b/, "C"],
+  [/\b(?:lens|mirror|surface) vertex\b|\bpole\b/, "V"],
+  [/\bobjective lens center\b/, "L_o"],
+  [/\beyepiece lens center\b/, "L_e"],
+  [/\bhinge\b/, "H"],
+  [/\bapex\b/, "A"],
+  [/\bpoint of incidence\b|\bcontact point\b/, "P"],
+  [/\bcentre of mass\b|\bcenter of mass\b/, "G"],
+];
+
+function conventionalLabel(id: string): string | null {
+  const normalized = id.replace(/[_-]+/g, "");
+  if (/^iprime$/i.test(normalized) || /^ip$/i.test(normalized)) return "I'";
+  if (/^lo$/i.test(normalized)) return "L_o";
+  if (/^le$/i.test(normalized)) return "L_e";
+  if (/^fo$/i.test(normalized)) return "F_o";
+  if (/^fe$/i.test(normalized)) return "F_e";
+  if (/^[A-Z]$/i.test(id) || /^(?:O|I|C|F|V|P|H|G)$/i.test(normalized)) {
+    return normalized.toUpperCase();
+  }
+  return null;
+}
+
+function askedPointLabels(question: string): string[] {
+  const names: string[] = [];
+  const add = (name: string): void => {
+    if (name && !names.includes(name)) names.push(name);
+  };
+  for (const match of question.matchAll(/\bpoints?\s+([A-Z])(?:\s*(?:,|and|&)\s*([A-Z]))+/g)) {
+    for (const part of match.slice(1)) {
+      if (part) add(part);
+    }
+  }
+  for (const match of question.matchAll(/\b(?:mark|label|locate)\b[^.]{0,40}\b([A-Z])\b/g)) {
+    if (match[1]) add(match[1]);
+  }
+  for (const match of question.matchAll(
+    /\b(?:triangle|quadrilateral|parallelogram|rhombus|square|rectangle|polygon|angle)\s+([A-Z](?:'?[A-Z]){1,3})\b/gi,
+  )) {
+    for (const letter of (match[1] ?? "").replace(/'/g, "")) add(letter);
+  }
+  return names;
+}
+
+function sourceQuestion(raw: Record<string, unknown>): string {
+  if (typeof raw.source === "string") return raw.source;
+  if (isRecord(raw.source) && typeof raw.source.question === "string") return raw.source.question;
+  return "";
+}
+
+function normalizeLabel(value: string): string {
+  return value.trim().toLowerCase().replace(/\s+/g, "");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}

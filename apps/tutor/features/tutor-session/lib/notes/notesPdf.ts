@@ -1,0 +1,200 @@
+import type { NotesEpoch } from "@/lib/client/exportNotesPdf";
+import type { StoredTurn } from "@/lib/boards/boardsClient";
+import { formatPlanFact, notesFromStoredTurn, type LessonTurnNotes } from "./lessonNotes";
+import { toPlainMathText } from "./mathText";
+
+export interface NotesPdfSection {
+  question: string;
+  /** Board pages captured while this question was on the board, in order. */
+  images: string[];
+  workLines: string[];
+  narration: string;
+  /** Formatted `symbol = value unit` facts from the turn plan. */
+  planFacts: string[];
+  /** The lesson was stopped (a doubt or Stop) before it was saved. */
+  interrupted: boolean;
+}
+
+function sectionFromTurn(turn: LessonTurnNotes, images: string[]): NotesPdfSection {
+  return {
+    question: turn.question,
+    images,
+    workLines: [...turn.workLines],
+    narration: turn.narration,
+    planFacts: turn.planFacts.map(formatPlanFact),
+    interrupted: false,
+  };
+}
+
+function joinNarration(parts: readonly string[]): string {
+  return parts
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Pair board pages with the lesson that drew them, in teaching order.
+ *
+ * A page tags the question whose ink it shows. The PDF prints those pages
+ * only — work lines and narration stay on the section for pairing, not for
+ * export. A saved turn with no page at all contributes no slide.
+ */
+export function buildNotesPdfSections(
+  turns: readonly LessonTurnNotes[],
+  epochs: readonly NotesEpoch[],
+): NotesPdfSection[] {
+  const sections: NotesPdfSection[] = [];
+  let nextTurn = 0;
+  let index = 0;
+  while (index < epochs.length) {
+    const question = epochs[index]!.question.trim();
+    const pages: NotesEpoch[] = [];
+    while (index < epochs.length && epochs[index]!.question.trim() === question) {
+      pages.push(epochs[index]!);
+      index += 1;
+    }
+    const images = pages.map((page) => page.snapshotDataUrl);
+    const match = question
+      ? turns.findIndex((turn, turnIndex) => turnIndex >= nextTurn && turn.question === question)
+      : -1;
+    if (match === -1) {
+      sections.push({
+        question,
+        images,
+        workLines: [],
+        narration: joinNarration(pages.map((page) => page.narrationText)),
+        planFacts: [],
+        interrupted: true,
+      });
+      continue;
+    }
+    for (let skipped = nextTurn; skipped < match; skipped += 1) {
+      sections.push(sectionFromTurn(turns[skipped]!, []));
+    }
+    sections.push(sectionFromTurn(turns[match]!, images));
+    nextTurn = match + 1;
+  }
+  for (let rest = nextTurn; rest < turns.length; rest += 1) {
+    sections.push(sectionFromTurn(turns[rest]!, []));
+  }
+  return sections;
+}
+
+/** Epochs supply board images; stored turns keep teaching order. */
+export function notesPdfSectionsFromStoredTurns(
+  storedTurns: readonly StoredTurn[],
+  epochs: readonly NotesEpoch[],
+): NotesPdfSection[] {
+  return buildNotesPdfSections(storedTurns.map(notesFromStoredTurn), epochs);
+}
+
+/** Board (and code-panel) snapshots in teaching order. Text-only turns omit. */
+export function notesPdfSlideImages(sections: readonly NotesPdfSection[]): string[] {
+  return sections.flatMap((section) => section.images).filter((image) => image.length > 0);
+}
+
+/**
+ * Map board maths onto glyphs `notes-pdf.ttf` can draw. Keep those. Spell
+ * out only what the font still lacks, and mark unsupported scripts so the
+ * loss is visible.
+ */
+const NOTES_PDF_NATIVE = new Set([
+  "∫", "∑", "√", "∂", "∞", "π", "∆", "∏", "−", "∕", "∙", "≈", "≠", "≡", "≤", "≥",
+  "θ", "Δ", "δ", "α", "β", "γ", "ε", "ϵ", "η", "κ", "λ", "μ", "ν", "ξ", "ρ", "σ", "ς",
+  "τ", "φ", "χ", "ψ", "ω", "Ω",
+  "Α", "Β", "Γ", "Ε", "Ζ", "Η", "Θ", "Ι", "Κ", "Λ", "Μ", "Ν", "Ξ", "Ο", "Π", "Ρ",
+  "Σ", "Τ", "Υ", "Φ", "Χ", "Ψ",
+  "→", "←", "⇒", "∠", "∧", "∨", "∩", "∪", "∴", "∵", "≃", "≅", "≦", "≧",
+  "⊂", "⊃", "⊆", "⊇", "⋅",
+  "°", "±", "·", "×", "÷", "′", "″",
+  "⁰", "¹", "²", "³", "⁴", "⁵", "⁶", "⁷", "⁸", "⁹",
+  "₀", "₁", "₂", "₃", "₄", "₅", "₆", "₇", "₈", "₉",
+]);
+const PDF_GLYPHS: Readonly<Record<string, string>> = {
+  "∫": "int ",
+  "∑": "sum ",
+  "√": "sqrt",
+  "∂": "d",
+  "∞": "inf",
+  "θ": "theta",
+  "π": "pi",
+  "Δ": "delta",
+  "∆": "delta",
+  "δ": "delta",
+  "α": "alpha",
+  "β": "beta",
+  "γ": "gamma",
+  "ε": "epsilon",
+  "η": "eta",
+  "κ": "kappa",
+  "λ": "lambda",
+  "μ": "µ",
+  "ν": "nu",
+  "ξ": "xi",
+  "ρ": "rho",
+  "σ": "sigma",
+  "τ": "tau",
+  "φ": "phi",
+  "ϕ": "phi",
+  "χ": "chi",
+  "ψ": "psi",
+  "ω": "omega",
+  "Ω": "omega",
+  "−": "-",
+  "–": "-",
+  "—": "-",
+  "→": "->",
+  "←": "<-",
+  "⇒": "=>",
+  "≤": "<=",
+  "≥": ">=",
+  "≠": "!=",
+  "≈": "~",
+  "∙": "·",
+  "•": "·",
+  "…": "...",
+  "′": "'",
+  "″": '"',
+  "‘": "'",
+  "’": "'",
+  "“": '"',
+  "”": '"',
+  "⁰": "^0",
+  "⁴": "^4",
+  "⁵": "^5",
+  "⁶": "^6",
+  "⁷": "^7",
+  "⁸": "^8",
+  "⁹": "^9",
+  "₀": "_0",
+  "₁": "_1",
+  "₂": "_2",
+  "₃": "_3",
+  "₄": "_4",
+  "₅": "_5",
+  "₆": "_6",
+  "₇": "_7",
+  "₈": "_8",
+  "₉": "_9",
+};
+
+export function pdfSafeText(text: string): string {
+  const source = toPlainMathText(text);
+  let out = "";
+  for (const char of source) {
+    if (NOTES_PDF_NATIVE.has(char) || char.charCodeAt(0) <= 0xff) {
+      out += char;
+      continue;
+    }
+    const mapped = PDF_GLYPHS[char];
+    if (mapped !== undefined) {
+      out += mapped;
+      continue;
+    }
+    out += "?";
+  }
+  return out.replace(/\?{2,}/g, "?");
+}

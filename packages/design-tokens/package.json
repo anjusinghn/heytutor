@@ -1,0 +1,26 @@
+{
+  "name": "@heytutor/design-tokens",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --clean",
+    "dev": "tsup src/index.ts --format esm --dts --watch",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/",
+    "clean": "rm -rf dist"
+  },
+  "devDependencies": {
+    "@heytutor/eslint-config": "workspace:*",
+    "@heytutor/typescript-config": "workspace:*",
+    "eslint": "^9.39.4",
+    "tsup": "^8.5.0",
+    "typescript": "^5.8.3"
+  }
+}

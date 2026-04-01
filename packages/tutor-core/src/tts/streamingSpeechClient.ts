@@ -1,0 +1,2885 @@
+import { speechAudioMimeType, wavDurationSec } from "./audioFormat";
+import {
+  DEFAULT_VOICE_PREFERENCES,
+  TTS_LANG_QUERY,
+  TTS_LANG_HEADER,
+  type TutorVoiceKey,
+  type TutorVoicePreferences,
+} from "./voiceLanguage";
+import type {
+  AudioTimings,
+  FirstAudioByteInfo,
+  PlaybackStartSignal,
+  PrewarmOptions,
+  SpeakSegmentOptions,
+  TTSClient,
+} from "./speechClient";
+import {
+  SpeechSynthesisTTSClient,
+  mergeAudioTimingChunk,
+  mathToSpeech,
+  toSegmentRelativeAudioTimings,
+} from "./speechClient";
+import { tutorDebug } from "../tutorDebug";
+import {
+  resolveApiUrl,
+  resolveWebSocketUrl,
+} from "../publicOrigins";
+import {
+  canConcatAudioBuffers,
+  concatDecodedAudioBuffers,
+  nextScheduleStartSec,
+  playbackAudibleOriginSec,
+} from "./playbackSchedule";
+import { createLectureAudioContext, releaseLectureAudioContext, unlockTutorAudio } from "./audioContext";
+import { TUTOR_VOICE_SETTINGS, voiceSettingsKey } from "./voiceSettings";
+import {
+  applyBufferSourcePlaybackRate,
+  applyHtmlAudioMute,
+  applyHtmlAudioPlaybackRate,
+  browserFallbackPlaybackRate,
+  clampPlaybackRate,
+  createRateMediaClock,
+  mediaPositionSec,
+  remainingWallSec,
+  setRateMediaClockRate,
+  startRateMediaClock,
+  type RateMediaClock,
+} from "./playbackRate";
+import {
+  createHttpTtsGate,
+  MAX_HTTP_PREFETCH,
+  parseRetryAfterSec,
+  shouldRetryTtsTransport,
+  ttsHttpRetryDelayMs,
+} from "./httpTtsPolicy";
+
+interface TimestampChunkPayload {
+  audio?: string;
+  audio_base64?: string;
+  alignment?: {
+    character_start_times_seconds?: number[];
+    character_end_times_seconds?: number[];
+    charStartTimesMs?: number[];
+    charDurationsMs?: number[];
+  };
+  normalizedAlignment?: {
+    charStartTimesMs?: number[];
+    charDurationsMs?: number[];
+  };
+  isFinal?: boolean;
+  is_final?: boolean;
+  contextId?: string;
+  context_id?: string;
+}
+
+interface SegmentJob {
+  spokenText: string;
+  options: SpeakSegmentOptions;
+  /** Voice identity the job was generated with; a voice switch orphans it. */
+  voice: string;
+  /**
+   * Upstream context carrying this job's chunks. Bound on the first message
+   * that names a context id, in the order the texts were sent, so several
+   * sentences can generate at once without their audio getting crossed.
+   */
+  contextId?: string;
+  /**
+   * A prefetched sentence is generated ahead of the lesson and waits; only a
+   * job the segment runner has actually asked to speak may become current.
+   */
+  claimed: boolean;
+  resolve: () => void;
+  reject: (error: unknown) => void;
+  settled: boolean;
+  completing: boolean;
+  textSent: boolean;
+  playbackStarted: boolean;
+  /** One in-flight decode/start shared by final-packet and resume paths. */
+  playbackStartPromise?: Promise<void>;
+  /** ctx.currentTime (seconds) when this job's first audio source begins playing. */
+  audibleStartCtxTime?: number;
+  timingsEmitted: boolean;
+  contextFinal: boolean;
+  timings: AudioTimings;
+  capturedChunks: Uint8Array[];
+  capturedAudioEmitted?: boolean;
+  pendingAudioBuffers: AudioBuffer[];
+  sourceDonePromises: Promise<void>[];
+  pendingAudioIngestPromises: Promise<void>[];
+  started: boolean;
+  receivedAudio: boolean;
+  decodedAudio: boolean;
+  chunkOffsetSec: number;
+  startedAt: number;
+  /** performance.now() when this job's first audio bytes arrived; telemetry. */
+  firstAudioByteAt?: number;
+  firstAudioByteReported?: boolean;
+  /** Created by the lookahead, before the runner asked for it. */
+  lookahead?: boolean;
+  /** The relay said this sentence's complete audio is on its way. */
+  audioInTransit?: boolean;
+}
+
+/** Complete provider bytes exist, but the output clock stopped advancing. */
+class NativePlaybackError extends Error {}
+class NativePlaybackStalledError extends NativePlaybackError {
+  constructor(readonly positionSec: number) {
+    super("Native audio playback clock did not advance");
+  }
+}
+const NATIVE_PLAYBACK_STALL_MS = 1_500;
+
+/**
+ * Cache identity for one generated sentence.
+ *
+ * Both caches used to be keyed on the spoken text alone, which was true while
+ * every sentence in a lesson was generated with the same dials. An opening
+ * line is not: it asks for its own expression, and the lookahead reaches it
+ * one or two sentences before the runner does. Keyed on text alone, the
+ * lookahead's flat copy is the one that gets played and the opening sounds
+ * exactly like the body it was supposed to differ from.
+ */
+/**
+ * Which voice (and model lane) generated a sentence. The voice id is baked
+ * into the upstream connection, so a sentence generated before a voice switch
+ * must never be claimed after it: the student picked a new voice, and the
+ * next segment has to speak in it.
+ */
+function voiceIdentity(preferences: TutorVoicePreferences): string {
+  return `${preferences.voiceKey}\u0000${preferences.lowLatency ? "flash" : "natural"}`;
+}
+
+function prefetchKey(
+  spokenText: string,
+  options: SpeakSegmentOptions,
+  voice: string,
+): string {
+  return `${voice}\u0000${voiceSettingsKey(options.voiceSettings)}\u0000${spokenText}`;
+}
+
+function jobMatches(
+  job: SegmentJob,
+  spokenText: string,
+  options: SpeakSegmentOptions,
+  voice: string,
+): boolean {
+  return (
+    job.voice === voice &&
+    job.spokenText === spokenText &&
+    voiceSettingsKey(job.options.voiceSettings) === voiceSettingsKey(options.voiceSettings)
+  );
+}
+
+const HTTP_STREAM_URL = "/api/tts/stream";
+/**
+ * Relay control message sent just before a sentence's complete audio. Older
+ * clients ignore unknown control types, so the relay sends it unconditionally.
+ */
+export const TTS_AUDIO_IN_TRANSIT_TYPE = "audio-in-transit";
+const TTS_WS_NO_AUDIO_WATCHDOG_MS = 12_000;
+/** Runner in-transit grace (12 s) plus margin, so the runner decides first. */
+export const TTS_WS_IN_TRANSIT_WATCHDOG_MS = 16_000;
+const DEFAULT_VOICE_SETTINGS = TUTOR_VOICE_SETTINGS;
+/** Fail over to HTTP quickly; a 5s connect wait after every sentence stalls the teacher. */
+export const TTS_WS_CONNECT_TIMEOUT_MS = 1_200;
+/** After a connect failure, skip WebSocket for this long and use HTTP immediately. */
+export const TTS_WS_DISABLE_AFTER_FAIL_MS = 120_000;
+/**
+ * Sentences generated ahead of the one being spoken, each on its own context.
+ *
+ * One covers an ordinary beat, which runs for seconds against a sentence that
+ * generates in well under one. Two covers the short beats between them — a
+ * one-line emphasis, a five-word aside — where a single sentence of cover is
+ * not enough and the seam is audible. Past two, a cancelled turn starts
+ * throwing away work for no gain the student can hear.
+ */
+export const TTS_WS_LOOKAHEAD_SEGMENTS = 2;
+/** Finished context ids kept so their late chunks are dropped, not rerouted. */
+const FINISHED_CONTEXTS_REMEMBERED = 64;
+
+interface HttpPrefetch {
+  spokenText: string;
+  controller: AbortController;
+  done: Promise<void>;
+  buffers: AudioBuffer[];
+  chunks: Uint8Array[];
+  timings: AudioTimings;
+  error?: unknown;
+  /** True until the audio is in hand. Only these count against the cap. */
+  generating: boolean;
+  /** Request to first audio bytes; telemetry only. */
+  firstByteMs?: number;
+}
+
+function readAudioBase64(chunk: TimestampChunkPayload): string | undefined {
+  return chunk.audio_base64 ?? chunk.audio;
+}
+
+function mergeChunkTimings(timings: AudioTimings, chunk: TimestampChunkPayload, chunkOffsetSec: number): number {
+  const alignment = chunk.alignment;
+  const normalized = chunk.normalizedAlignment;
+
+  if (alignment?.character_start_times_seconds) {
+    return mergeAudioTimingChunk(timings, {
+      startTimesSec: alignment.character_start_times_seconds,
+      endTimesSec: alignment.character_end_times_seconds,
+    }, chunkOffsetSec);
+  }
+
+  return mergeAudioTimingChunk(timings, {
+    startTimesMs: normalized?.charStartTimesMs ?? alignment?.charStartTimesMs,
+    durationsMs: normalized?.charDurationsMs ?? alignment?.charDurationsMs,
+  }, chunkOffsetSec);
+}
+
+function base64ToUint8Array(base64: string): Uint8Array {
+  const binaryString = atob(base64);
+  const bytes = new Uint8Array(binaryString.length);
+
+  for (let i = 0; i < binaryString.length; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+
+  return bytes;
+}
+
+function concatUint8Arrays(chunks: Uint8Array[]): Uint8Array {
+  const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const merged = new Uint8Array(total);
+  let offset = 0;
+
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.length;
+  }
+
+  return merged;
+}
+
+function buildTtsHeaders(options: Pick<SpeakSegmentOptions, "traceId" | "sessionId">, voiceKey: TutorVoiceKey): Record<string, string> {
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    [TTS_LANG_HEADER]: voiceKey,
+  };
+
+  if (options.traceId) {
+    headers["x-heytutor-trace-id"] = options.traceId;
+  }
+
+  if (options.sessionId) {
+    headers["x-session-id"] = options.sessionId;
+  }
+
+  return headers;
+}
+
+function parseHttpTimestampPayload(line: string): TimestampChunkPayload | null {
+  const trimmed = line.trim();
+
+  if (!trimmed) {
+    return null;
+  }
+
+  const jsonString = trimmed.startsWith("data: ") ? trimmed.slice(6).trim() : trimmed;
+
+  if (!jsonString.startsWith("{")) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(jsonString) as TimestampChunkPayload;
+  } catch {
+    return null;
+  }
+}
+
+function getWebSocketUrl(
+  path: string,
+  traceId?: string,
+  sessionId?: string,
+  voiceSpeed?: number,
+  ticket?: string,
+  preferences: TutorVoicePreferences = DEFAULT_VOICE_PREFERENCES,
+): string {
+  const base = resolveWebSocketUrl(path, traceId, sessionId, ticket);
+  const params: string[] = [];
+  if (voiceSpeed && voiceSpeed !== 1) {
+    params.push(`speed=${voiceSpeed}`);
+  }
+  // The relay resolves the voice id from this key; ids never reach the browser.
+  params.push(`${TTS_LANG_QUERY}=${encodeURIComponent(preferences.voiceKey)}`);
+  if (preferences.lowLatency) {
+    params.push("model=flash");
+  }
+  if (params.length === 0) {
+    return base;
+  }
+  return `${base}${base.includes("?") ? "&" : "?"}${params.join("&")}`;
+}
+
+async function fetchWsAuthTicket(): Promise<string | undefined> {
+  // Same-origin production still needs a ticket: when the login gate is on the
+  // relay refuses htutor_uid and destroys the socket, which aborts the lecture.
+  try {
+    const response = await fetch(resolveApiUrl("/api/tts/ws-ticket"), {
+      credentials: "include",
+      // Cold dev compiles of this route have taken just over 4s. A shorter
+      // budget aborts a ticket the server then returns, and the lecture falls
+      // through to browser speech for the rest of the turn.
+      signal: typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(15_000) : undefined,
+    });
+    if (!response.ok) {
+      return undefined;
+    }
+    const data = (await response.json()) as { ticket?: string };
+    return typeof data.ticket === "string" && data.ticket.length > 0
+      ? data.ticket
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function wsTicketRequired(): boolean {
+  const disabled =
+    typeof process !== "undefined" ? process.env.NEXT_PUBLIC_AUTH_DISABLED : undefined;
+  return disabled !== "1" && disabled !== "true";
+}
+
+/**
+ * ElevenLabs generation speed. Lecture playback rate is separate: it retimes
+ * already-produced audio so a mid-lesson slider change takes effect now.
+ */
+function clampVoiceSpeed(rate: number): number {
+  return Math.min(Math.max(rate, 0.7), 1.2);
+}
+
+export function hasPlayableSegmentAudio(state: {
+  receivedAudio: boolean;
+  decodedAudio: boolean;
+  capturedChunkCount: number;
+}): boolean {
+  return state.receivedAudio && state.decodedAudio && state.capturedChunkCount > 0;
+}
+
+/**
+ * Never treat a short network silence as the end of a spoken segment.
+ * Complete only after the provider's context-final event, and only once
+ * the already-scheduled audio has finished playing.
+ */
+export function shouldCompleteTtsJobAfterSilence(options: {
+  contextFinal: boolean;
+  scheduledEnd: number;
+  currentTime: number;
+}): boolean {
+  return options.contextFinal && options.scheduledEnd <= options.currentTime + 0.1;
+}
+
+function parseWsPayload(data: string): TimestampChunkPayload | { type?: string; message?: string; reason?: string } | null {
+  try {
+    return JSON.parse(data) as TimestampChunkPayload | { type?: string; message?: string; reason?: string };
+  } catch {
+    return null;
+  }
+}
+
+function isTtsRelayControlPayload(
+  payload: TimestampChunkPayload | { type?: string; message?: string; reason?: string },
+): payload is { type: string; message?: string; reason?: string } {
+  return (
+    "type" in payload &&
+    typeof payload.type === "string" &&
+    payload.type.length > 0
+  );
+}
+
+/**
+ * A voice that sends no alignment (Sarvam) still has a known length: its WAV
+ * header. Only the duration is filled in. The character times stay empty, so
+ * the pen keeps its estimated schedule; the runner uses the duration to learn
+ * the speaking rate and to record how long the sentence lasted for replay.
+ */
+function fillDurationFromWav(timings: AudioTimings, chunks: readonly Uint8Array[]): void {
+  if (timings.totalDuration > 0 || timings.charStartTimes.length > 0) return;
+  let total = 0;
+  for (const chunk of chunks) {
+    const seconds = wavDurationSec(chunk);
+    if (seconds === null) return;
+    total += seconds;
+  }
+  if (total > 0) timings.totalDuration = total;
+}
+
+export class StreamingSpeechClient implements TTSClient {
+  private ws: WebSocket | null = null;
+  private audioContext: AudioContext | null = null;
+  private outputGain: GainNode | null = null;
+  private activeSources: AudioBufferSourceNode[] = [];
+  private playing = false;
+  private connectPromise: Promise<void> | null = null;
+  private scheduledEnd = 0;
+  private connectedTraceId?: string;
+  private connectedSessionId?: string;
+  /** Voice identity baked into the current socket's URL; a mismatch reconnects. */
+  private connectedVoice?: string;
+  private speechFallback = new SpeechSynthesisTTSClient();
+  private activeBrowserFallbackRate: number | null = null;
+  private paused = false;
+  /** Distinguishes a pause-interrupted play() rejection from a media failure. */
+  private pauseEpoch = 0;
+  private playbackRate = 1.0;
+  private mediaClock: RateMediaClock = createRateMediaClock(1);
+  private totalScheduledMediaSec = 0;
+  private currentHtmlAudio: HTMLAudioElement | null = null;
+  private currentHtmlOnStart: (() => void) | null = null;
+  private cancelHtmlAudio: (() => void) | null = null;
+  private failHtmlAudio: ((error: unknown) => void) | null = null;
+  /** A clip whose play() was refused until a user gesture. */
+  private blockedHtmlAudio: HTMLAudioElement | null = null;
+  private muted = false;
+  private playbackBlockedCallback: SpeakSegmentOptions["onPlaybackBlocked"];
+  private voicePreferences: TutorVoicePreferences = { ...DEFAULT_VOICE_PREFERENCES };
+
+  private jobs: SegmentJob[] = [];
+  private currentJob: SegmentJob | null = null;
+  /** Job currently receiving audio chunks from the WebSocket. */
+  private chunkTargetJob: SegmentJob | null = null;
+  /** Upstream context id -> the job whose sentence it is generating. */
+  private jobsByContext = new Map<string, SegmentJob>();
+  /** Fallback binding for a relay that numbers contexts itself, oldest first. */
+  private unboundJobs: SegmentJob[] = [];
+  /**
+   * Contexts whose job is done with them, so a chunk that arrives late is
+   * dropped instead of falling into the send-order fallback. A prefetch
+   * dropped for an opening line kept generating: its half alignment and its
+   * final landed on the opening, which then started with 25 of 49
+   * characters aligned. Bounded, and cleared with the maps on reconnect.
+   */
+  private finishedContexts = new Set<string>();
+  /** Context numbering for this socket; the relay echoes it back. */
+  private sentSegmentSequence = 0;
+  private streamHandler: ((event: MessageEvent) => void) | null = null;
+  /** Invalidates pumps awaiting the audio port when their generator fails. */
+  private streamGeneration = 0;
+  private idleCompleteTimer: number | null = null;
+  private watchdogTimer: number | null = null;
+  /** Bumped by abandonSpeaking() so in-flight speakSegment work can bail out. */
+  private speakGeneration = 0;
+  /**
+   * Set by stop() so an in-flight ensureAudioContext cannot mint a new graph
+   * after the student (or pagehide) already silenced the lecture.
+   */
+  private halted = false;
+  private httpStreamAbortController: AbortController | null = null;
+  private httpControllers = new Set<AbortController>();
+  private wsDisabledUntil = 0;
+  private lastSuccessfulTransport: "ws" | "http" | null = null;
+  private prefetches = new Map<string, HttpPrefetch>();
+  /** HTTP playback origin so getPlaybackPositionMs works without a WS job. */
+  private httpPlaybackOriginCtxTime: number | null = null;
+  private readonly httpGate = createHttpTtsGate();
+  /** What the latest onStart was based on; read by latency telemetry only. */
+  private lastPlaybackStart: PlaybackStartSignal | null = null;
+
+  async prewarm(options: PrewarmOptions = {}): Promise<void> {
+    this.halted = false;
+    await this.ensureAudioContext(typeof Audio !== "function");
+
+    const connectStart = performance.now();
+
+    try {
+      await this.ensureConnected(options.traceId, options.sessionId, (info) => {
+        options.onConnect?.(info);
+      });
+    } catch {
+      options.onConnect?.({
+        ms: performance.now() - connectStart,
+        ok: false,
+      });
+    }
+  }
+
+  async speak(options: { text: string } & SpeakSegmentOptions): Promise<void> {
+    return this.speakSegment(options.text, options);
+  }
+
+  prefetchSegment(text: string, options: SpeakSegmentOptions = {}): void {
+    const spokenText = mathToSpeech(text.trim());
+    const voice = voiceIdentity(this.voicePreferences);
+    if (!spokenText || this.paused || this.prefetches.has(prefetchKey(spokenText, options, voice))) {
+      return;
+    }
+    // On the socket the next sentence gets a context of its own and starts
+    // generating now, while this one is still being spoken.
+    if (this.ws?.readyState === WebSocket.OPEN && Date.now() >= this.wsDisabledUntil) {
+      this.prefetchOverWebSocket(spokenText, options);
+      return;
+    }
+    // The cap is an ElevenLabs concurrency cap, so it counts sentences still
+    // being generated. Counting a finished one too was refusing the lookahead
+    // exactly when it was needed — the sentence about to be spoken still held
+    // the only slot — and every second beat then waited ~2s in silence.
+    let generating = 0;
+    for (const entry of this.prefetches.values()) {
+      if (entry.generating) generating += 1;
+    }
+    if (generating >= MAX_HTTP_PREFETCH) {
+      return;
+    }
+    const controller = new AbortController();
+    this.httpControllers.add(controller);
+    const entry: HttpPrefetch = {
+      spokenText,
+      controller,
+      buffers: [],
+      chunks: [],
+      timings: { charStartTimes: [], charDurations: [], totalDuration: 0 },
+      done: Promise.resolve(),
+      generating: true,
+    };
+    this.prefetches.set(prefetchKey(spokenText, options, voice), entry);
+    entry.done = this.fillHttpPrefetch(entry, options).finally(() => {
+      entry.generating = false;
+      this.httpControllers.delete(controller);
+    });
+  }
+
+  /**
+   * Open a context for a sentence the lesson has not reached yet. The job sits
+   * unclaimed in the queue collecting its audio; `speakSegment` claims it when
+   * the runner gets there, and playback starts with no round trip at all.
+   */
+  private prefetchOverWebSocket(spokenText: string, options: SpeakSegmentOptions): void {
+    const voice = voiceIdentity(this.voicePreferences);
+    if (this.jobs.some((job) => !job.settled && jobMatches(job, spokenText, options, voice))) {
+      return;
+    }
+    // The head of the queue is the sentence being spoken, or the one the
+    // runner is a step away from claiming; only what sits past it is
+    // lookahead. Counting the head too refuses the request in exactly the
+    // moment it pays for itself, and every second beat goes silent again.
+    //
+    // A sentence marks itself settled when its context closes and then keeps
+    // playing for seconds, so it has to be counted while it drains — without
+    // that, a slot opens mid-sentence and a later segment takes the lookahead
+    // meant for the next one.
+    const queued = this.jobs.filter((job) => !job.settled).length;
+    const draining = this.currentJob && this.currentJob.settled ? 1 : 0;
+    if (Math.max(queued + draining - 1, 0) >= TTS_WS_LOOKAHEAD_SEGMENTS) {
+      return;
+    }
+    const job = this.createJob(spokenText, {
+      traceId: options.traceId,
+      sessionId: options.sessionId,
+      previousText: options.previousText,
+      nextText: options.nextText,
+      // Without this the sentence is generated in the teaching voice and then
+      // claimed by an opening that asked for an expressive one.
+      voiceSettings: options.voiceSettings,
+    });
+    job.claimed = false;
+    job.lookahead = true;
+    this.jobs.push(job);
+    void this.pumpJobQueue();
+  }
+
+  /**
+   * Complete alignment for a sentence the lookahead already generated, so
+   * the runner can schedule on it before the claim replays `onTimings`.
+   *
+   * Only a closed context counts. ElevenLabs sends alignment chunk by chunk,
+   * and a schedule built on a partial one ends mid-sentence; the final is
+   * the one signal that the whole sentence is in hand. A finished HTTP
+   * prefetch is the same case on the other transport. Live, 19 of 20 claims
+   * found the context already final (10 Sep 2026); the one that did not was
+   * the opening line, which the gate in the runner waits for instead.
+   */
+  peekSegmentTimings(text: string, options: SpeakSegmentOptions = {}): AudioTimings | null {
+    const spokenText = mathToSpeech(text.trim());
+    if (!spokenText) {
+      return null;
+    }
+    const voice = voiceIdentity(this.voicePreferences);
+    const job = this.jobs.find(
+      (candidate) =>
+        !candidate.settled &&
+        candidate.contextFinal &&
+        candidate.timings.totalDuration > 0 &&
+        candidate.timings.charStartTimes.length > 0 &&
+        jobMatches(candidate, spokenText, options, voice),
+    );
+    if (job) {
+      return toSegmentRelativeAudioTimings(job.timings);
+    }
+    const prefetch = this.prefetches.get(prefetchKey(spokenText, options, voice));
+    if (
+      prefetch &&
+      !prefetch.generating &&
+      !prefetch.error &&
+      prefetch.timings.totalDuration > 0 &&
+      prefetch.timings.charStartTimes.length > 0
+    ) {
+      return toSegmentRelativeAudioTimings(prefetch.timings);
+    }
+    return null;
+  }
+
+  /**
+   * Hand a pre-generated sentence its real callbacks and let it speak. Timings
+   * that arrived while it was still only a prefetch are replayed here, so the
+   * handwriting schedule sees them as it would on any other segment.
+   */
+  private claimPrefetchedJob(job: SegmentJob, options: SpeakSegmentOptions): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      job.claimed = true;
+      job.options = options;
+      job.resolve = resolve;
+      job.reject = reject;
+      job.timingsEmitted = false;
+      this.reportJobFirstAudioByte(job);
+      this.emitAudioInTransit(job);
+      this.emitAudioReady(job);
+      this.emitTimings(job);
+      tutorDebug("tts", "ws segment claimed from lookahead", {
+        spoken_chars: job.spokenText.length,
+        context_final: job.contextFinal,
+        buffered_chunks: job.capturedChunks.length,
+      });
+      void this.pumpJobQueue();
+    });
+  }
+
+  unlockAudio(): void {
+    this.halted = false;
+    this.paused = false;
+    this.audioContext = this.audioContext ?? createLectureAudioContext();
+    unlockTutorAudio();
+    if (this.audioContext.state === "suspended") {
+      void this.audioContext.resume().then(() => {
+        tutorDebug("tts", "audio unlocked", { state: this.audioContext?.state });
+      });
+    }
+  }
+
+  setMuted(muted: boolean): void {
+    this.muted = muted;
+    this.speechFallback.setMuted?.(muted);
+    if (this.outputGain) {
+      this.outputGain.gain.value = muted ? 0 : 1;
+    }
+    if (this.currentHtmlAudio) {
+      applyHtmlAudioMute(this.currentHtmlAudio, muted);
+      // Retry the retained clip after an external mute change. If the browser
+      // still requires a gesture, keep its recovery action; deliberate Pause
+      // and Stop still own whether output may run.
+      if (muted && !this.paused && !this.halted && this.currentHtmlAudio.paused) this.resume();
+    }
+  }
+
+  private stopActiveAudio(reason: string, options?: { preserveHttp?: boolean }): void {
+    this.playbackBlockedCallback?.(null);
+    if (!options?.preserveHttp) {
+      this.abortHttpStream(reason);
+    }
+    for (const source of this.activeSources) {
+      try {
+        source.stop();
+      } catch {
+        // already stopped
+      }
+    }
+    this.activeSources = [];
+    this.playing = false;
+    this.totalScheduledMediaSec = 0;
+    this.mediaClock = createRateMediaClock(this.playbackRate);
+    this.httpPlaybackOriginCtxTime = null;
+    this.stopHtmlAudio();
+    if (this.audioContext) {
+      this.scheduledEnd = this.audioContext.currentTime;
+    } else {
+      this.scheduledEnd = 0;
+    }
+    this.speechFallback.stop();
+    tutorDebug("tts", "stopActiveAudio", { reason });
+  }
+
+  private async speakWithBrowserFallback(
+    spokenText: string,
+    options: SpeakSegmentOptions,
+    generation = this.speakGeneration,
+  ): Promise<void> {
+    options.onPlaybackBlocked?.(null);
+    const rate = browserFallbackPlaybackRate(this.playbackRate);
+    this.activeBrowserFallbackRate = rate;
+    this.speechFallback.setPlaybackRate(rate);
+    let announced = false;
+    try {
+      while (await this.waitWhileUnpaused(generation)) {
+        const attemptPauseEpoch = this.pauseEpoch;
+        let ended = false;
+        let failed = false;
+        let failure: unknown;
+        try {
+          await this.speechFallback.speakSegment(spokenText, {
+            ...options,
+            onStart: () => {
+              if (attemptPauseEpoch !== this.pauseEpoch || this.speakGeneration !== generation) return;
+              if (!announced) {
+                announced = true;
+                this.notePlaybackStart("speech-synthesis-start", 0);
+                options.onStart?.();
+              }
+            },
+            onEnd: () => {
+              if (attemptPauseEpoch !== this.pauseEpoch || this.speakGeneration !== generation) return;
+              ended = true;
+              options.onEnd?.();
+            },
+            onError: (error) => {
+              failed = true;
+              failure = error;
+            },
+          });
+        } catch (error) {
+          // The browser client rejects genuine failures; pause/stop resolves.
+          // Still classify by generation/epoch so a late error from a cancelled
+          // utterance cannot fail a resumed sentence.
+          failed = true;
+          failure = error;
+        }
+        // SpeechSynthesis.cancel() on pause resolves without onEnd. Retry even
+        // if the user has already resumed; stopping must not report an error.
+        if (this.speakGeneration !== generation) return;
+        if (attemptPauseEpoch !== this.pauseEpoch) continue;
+        if (ended) return;
+        const error = failed ? failure : new Error("Browser speech did not complete");
+        const reportedError = announced
+          ? error
+          : new Error("The voice could not start. Please try the lesson again.", { cause: error });
+        options.onError?.(reportedError);
+        throw reportedError;
+      }
+    } finally {
+      this.activeBrowserFallbackRate = null;
+    }
+  }
+
+  private abortHttpStream(reason: string): void {
+    for (const controller of this.httpControllers) {
+      controller.abort();
+    }
+    this.httpControllers.clear();
+    this.httpStreamAbortController = null;
+    for (const prefetch of this.prefetches.values()) {
+      prefetch.controller.abort();
+    }
+    this.prefetches.clear();
+    tutorDebug("tts", "abortHttpStream", { reason });
+  }
+
+  async speakSegment(text: string, options: SpeakSegmentOptions = {}): Promise<void> {
+    this.halted = false;
+    // A start signal belongs to one segment; a fallback must not read the last.
+    this.lastPlaybackStart = null;
+    const spokenText = mathToSpeech(text.trim());
+    const generation = this.speakGeneration;
+    const callbacks = options;
+    let audioReady = false;
+    // Readiness can synchronously abandon/stop this generation. Every callback
+    // retained by a transport must honor that cancellation, even after a successor starts.
+    options = { ...options,
+      onAudioReady: () => {
+        if (audioReady || this.speakGeneration !== generation) return;
+        audioReady = true;
+        callbacks.onAudioReady?.();
+      },
+      onAudioInTransit: () => { if (this.speakGeneration === generation) callbacks.onAudioInTransit?.(); },
+      onStart: () => { if (this.speakGeneration === generation) callbacks.onStart?.(); },
+      onEnd: () => { if (this.speakGeneration === generation) callbacks.onEnd?.(); },
+      onError: (error) => { if (this.speakGeneration === generation) callbacks.onError?.(error); },
+      onTimings: (timings) => { if (this.speakGeneration === generation) callbacks.onTimings?.(timings); },
+      onAudioCaptured: (audio) => { if (this.speakGeneration === generation) callbacks.onAudioCaptured?.(audio); },
+      onFirstAudioByte: (info) => { if (this.speakGeneration === generation) callbacks.onFirstAudioByte?.(info); },
+      onPlaybackBlocked: callbacks.onPlaybackBlocked ? (blocked) => {
+        if (this.speakGeneration === generation && (!blocked || (!this.paused && !this.halted && (!this.muted || blocked.reason === "not-allowed")))) {
+          callbacks.onPlaybackBlocked?.(blocked);
+        }
+      } : undefined,
+    };
+    if (spokenText.length === 0) {
+      options.onEnd?.();
+      return;
+    }
+    this.playbackBlockedCallback = options.onPlaybackBlocked;
+
+    try {
+    // Pause must silence immediately and must not start a fallback voice.
+    if (!(await this.waitWhileUnpaused(generation))) {
+      options.onEnd?.();
+      return;
+    }
+
+    // Native media plays complete provider bytes independently of WebAudio.
+    const ctx = typeof Audio === "function" ? null : await this.ensureAudioContext();
+    if (ctx?.state === "suspended") {
+      // Intentional pause leaves the context suspended — wait, don't speak.
+      if (this.paused) {
+        if (!(await this.waitWhileUnpaused(generation))) {
+          options.onEnd?.();
+          return;
+        }
+      }
+
+      const resumed = await this.ensureAudioContext();
+      if (resumed.state === "suspended") {
+        // WebAudio blocked (no gesture / autoplay). Browser speech still works.
+        // Never use this path while paused — that would ignore the pause button.
+        if (this.paused || this.speakGeneration !== generation) {
+          options.onEnd?.();
+          return;
+        }
+        tutorDebug("tts", "AudioContext suspended — using speechSynthesis fallback");
+        this.stopActiveAudio("suspended-fallback");
+        await this.speakWithBrowserFallback(spokenText, options);
+        return;
+      }
+    }
+
+    const allowWebSocket = Date.now() >= this.wsDisabledUntil;
+    const voice = voiceIdentity(this.voicePreferences);
+    // A sentence already generating on its own context: no round trip left to
+    // pay, so it takes precedence over every other way of producing audio.
+    const lookaheadJob = allowWebSocket
+      ? this.jobs.find(
+          (job) => !job.claimed && !job.settled && jobMatches(job, spokenText, options, voice),
+        ) ?? null
+      : null;
+
+    if (!lookaheadJob) {
+      const prefetch = this.prefetches.get(prefetchKey(spokenText, options, voice));
+      if (prefetch) {
+        this.prefetches.delete(prefetchKey(spokenText, options, voice));
+        try {
+          await prefetch.done;
+          if (!prefetch.error && (prefetch.buffers.length > 0 || prefetch.chunks.length > 0)) {
+            await this.playPrefetchedHttp(prefetch, options, generation);
+            return;
+          }
+        } catch (error) {
+          prefetch.controller.abort();
+          if (error instanceof NativePlaybackError) throw error;
+        }
+      }
+    }
+
+    if (!lookaheadJob && allowWebSocket && this.shouldReconnect(options.traceId, options.sessionId)) {
+      this.resetConnection();
+    }
+
+    if (!lookaheadJob && allowWebSocket) {
+      try {
+        await this.ensureConnected(options.traceId, options.sessionId);
+      } catch {
+        this.wsDisabledUntil = Date.now() + TTS_WS_DISABLE_AFTER_FAIL_MS;
+        tutorDebug("tts", "websocket unavailable, using http for upcoming segments");
+      }
+    }
+
+    if (this.speakGeneration !== generation) {
+      return;
+    }
+
+    if (!(await this.waitWhileUnpaused(generation))) {
+      options.onEnd?.();
+      return;
+    }
+
+    let wsPlaybackStarted = false;
+    if (allowWebSocket && this.ws?.readyState === WebSocket.OPEN) {
+      const wsOptions: SpeakSegmentOptions = {
+        ...options,
+        onStart: () => {
+          this.lastSuccessfulTransport = "ws";
+          wsPlaybackStarted = true;
+          options.onStart?.();
+        },
+      };
+      try {
+        await (lookaheadJob && !lookaheadJob.settled
+          ? this.claimPrefetchedJob(lookaheadJob, wsOptions)
+          : this.enqueueWebSocketSegment(spokenText, wsOptions));
+        return;
+      } catch (error) {
+        if (this.speakGeneration !== generation) {
+          return;
+        }
+        // Always mute leftover WS buffers before any fallback — otherwise HTTP
+        // or speechSynthesis layers a second voice on top (user-reported echo).
+        this.stopActiveAudio("ws-segment-failed", { preserveHttp: true });
+        tutorDebug("tts", "websocket segment failed", {
+          error: error instanceof Error ? error.message : String(error),
+          playback_started: wsPlaybackStarted,
+        });
+        if (error instanceof NativePlaybackError) throw error;
+        if (wsPlaybackStarted) {
+          // A partially heard sentence is a failure, not a completed beat.
+          // Do not generate/replay it through another provider transport.
+          throw error;
+        }
+        // Empty/failed WS audio was retrying every sentence (~500–800ms pause).
+        this.wsDisabledUntil = Date.now() + TTS_WS_DISABLE_AFTER_FAIL_MS;
+        this.lastSuccessfulTransport = "http";
+        // Drop queued WS jobs so they cannot speak under HTTP fallback.
+        this.rejectAllJobs(new Error("superseded by http fallback"));
+        this.currentJob = null;
+        this.chunkTargetJob = null;
+        this.jobs = [];
+      }
+    }
+
+    if (this.speakGeneration !== generation) {
+      return;
+    }
+
+    if (!(await this.waitWhileUnpaused(generation))) {
+      options.onEnd?.();
+      return;
+    }
+
+    const speakOverHttp = () => this.streamHttpSegment(spokenText, options, generation);
+    try {
+      try {
+        await speakOverHttp();
+      } catch (error) {
+        if (!shouldRetryTtsTransport(error, 0) || this.speakGeneration !== generation) {
+          throw error;
+        }
+        tutorDebug("tts", "retrying http tts after network error", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        await speakOverHttp();
+      }
+    } catch (error) {
+      if (this.speakGeneration !== generation) {
+        return;
+      }
+      if (error instanceof DOMException && error.name === "AbortError") {
+        options.onEnd?.();
+        return;
+      }
+      this.stopActiveAudio("http-segment-failed");
+      if (error instanceof NativePlaybackError) throw error;
+      tutorDebug("tts", "HTTP segment failed, trying speechSynthesis", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      if (this.paused) {
+        options.onEnd?.();
+        return;
+      }
+      await this.speakWithBrowserFallback(spokenText, options);
+    }
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError" && this.speakGeneration !== generation) {
+        options.onEnd?.();
+        return;
+      }
+      throw error;
+    } finally {
+      if (this.playbackBlockedCallback === options.onPlaybackBlocked) {
+        options.onPlaybackBlocked?.(null);
+        this.playbackBlockedCallback = undefined;
+      }
+    }
+  }
+
+  /**
+   * Abort stuck speech without closing the WebSocket permanently.
+   *
+   * Only the sentence being spoken is abandoned. Audio generated ahead for
+   * the next sentences (an unclaimed HTTP prefetch, an unclaimed socket
+   * lookahead job) is kept, finished or still arriving, so the next segment
+   * claims it with no new request. Throwing it away made every later
+   * sentence fetch again behind the same congested link, and one missed
+   * sentence became a lesson of them (production, 20 to 23 Oct 2026).
+   * `stop()` and a connection reset still clear everything.
+   */
+  abandonSpeaking(): void {
+    this.playbackBlockedCallback?.(null);
+    this.playbackBlockedCallback = undefined;
+    this.speakGeneration += 1;
+    this.clearTimers();
+    const keepsLookahead = this.jobs.some((job) => !job.claimed && !job.settled);
+    // The handler routes the kept lookahead's audio; it is reattached on claim
+    // anyway, but chunks arriving in between would be lost without it.
+    if (!keepsLookahead) this.detachStreamHandler();
+    this.abortSpeakingHttp("abandonSpeaking");
+    this.stopActiveAudio("abandonSpeaking", { preserveHttp: true });
+
+    const error = new Error("tts segment abandoned");
+    const abandoned = this.currentJob;
+    if (abandoned && !abandoned.settled) {
+      abandoned.settled = true;
+      abandoned.reject(error);
+    }
+    if (abandoned) this.releaseJobContext(abandoned);
+    for (const job of this.jobs) {
+      if (job.settled || !job.claimed) continue;
+      job.settled = true;
+      job.reject(error);
+    }
+    for (const job of this.jobs) {
+      if (job.settled) this.releaseJobContext(job);
+    }
+    this.jobs = this.jobs.filter((job) => !job.settled);
+    this.currentJob = null;
+    this.chunkTargetJob = null;
+    tutorDebug("tts", "abandonSpeaking", {
+      kept_ws_lookahead: this.jobs.length,
+      kept_http_prefetch: this.prefetches.size,
+    });
+  }
+
+  /**
+   * Abort the HTTP work of the sentence being spoken: its live stream and a
+   * prefetch it already claimed (claiming removes it from `prefetches`).
+   * Unclaimed prefetches belong to later sentences and keep running.
+   */
+  private abortSpeakingHttp(reason: string): void {
+    const lookahead = new Set<AbortController>();
+    for (const prefetch of this.prefetches.values()) lookahead.add(prefetch.controller);
+    for (const controller of [...this.httpControllers]) {
+      if (lookahead.has(controller)) continue;
+      controller.abort();
+      this.httpControllers.delete(controller);
+    }
+    this.httpStreamAbortController = null;
+    tutorDebug("tts", "abortSpeakingHttp", { reason, kept_prefetches: lookahead.size });
+  }
+
+  /** The socket's baked-in voice still matches what the student selected. */
+  private socketVoiceMatches(): boolean {
+    return (
+      this.connectedVoice !== undefined &&
+      this.connectedVoice === voiceIdentity(this.voicePreferences)
+    );
+  }
+
+  private shouldReconnect(traceId?: string, _sessionId?: string): boolean {
+    // Reuse an in-flight CONNECTING socket / connectPromise instead of
+    // orphaning it with resetConnection (which only closes OPEN sockets).
+    if (this.connectPromise || this.ws?.readyState === WebSocket.CONNECTING) {
+      return false;
+    }
+    if (this.ws === null || this.ws.readyState !== WebSocket.OPEN) {
+      return true;
+    }
+    // A voice switch mid-sentence leaves the socket alone so the line
+    // finishes; the next segment reconnects so it speaks in the new voice.
+    if (!this.socketVoiceMatches()) {
+      return true;
+    }
+    // A leftover socket from the previous question would stamp this lesson's
+    // TTS onto the wrong Langfuse turn.
+    return Boolean(traceId && this.connectedTraceId !== traceId);
+  }
+
+  private resetConnection(): void {
+    this.clearTimers();
+    this.detachStreamHandler();
+    this.rejectAllJobs(new Error("websocket connection reset"));
+    this.currentJob = null;
+    this.chunkTargetJob = null;
+    this.jobs = [];
+
+    if (
+      this.ws &&
+      (this.ws.readyState === WebSocket.OPEN ||
+        this.ws.readyState === WebSocket.CONNECTING)
+    ) {
+      this.ws.close();
+    }
+
+    this.ws = null;
+    this.connectPromise = null;
+    this.connectedTraceId = undefined;
+    this.connectedSessionId = undefined;
+    this.connectedVoice = undefined;
+    this.sentSegmentSequence = 0;
+    this.finishedContexts.clear();
+  }
+
+  private async ensureConnected(
+    traceId?: string,
+    sessionId?: string,
+    onConnect?: (info: { ms: number; ok: boolean }) => void,
+  ): Promise<void> {
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      if (
+        (!traceId || this.connectedTraceId === traceId) &&
+        this.socketVoiceMatches()
+      ) {
+        onConnect?.({ ms: 0, ok: true });
+        return;
+      }
+      this.resetConnection();
+    }
+
+    if (this.connectPromise) {
+      await this.connectPromise;
+
+      if (this.ws?.readyState === WebSocket.OPEN) {
+        onConnect?.({ ms: 0, ok: true });
+      }
+
+      return;
+    }
+
+    const connectStart = performance.now();
+    let connectNotified = false;
+
+    const notifyConnect = (ok: boolean) => {
+      if (connectNotified || !onConnect) {
+        return;
+      }
+
+      connectNotified = true;
+      onConnect({ ms: performance.now() - connectStart, ok });
+    };
+
+    const voiceSpeed = clampVoiceSpeed(DEFAULT_VOICE_SETTINGS.speed ?? 1);
+    this.connectPromise = (async () => {
+      const ticket = await fetchWsAuthTicket();
+      if (wsTicketRequired() && !ticket) {
+        notifyConnect(false);
+        throw new Error("websocket ticket unavailable");
+      }
+      await new Promise<void>((resolve, reject) => {
+        const ws = new globalThis.WebSocket(
+          getWebSocketUrl(
+            "/api/tts/ws",
+            traceId,
+            sessionId,
+            voiceSpeed,
+            ticket,
+            this.voicePreferences,
+          ),
+        );
+        this.ws = ws;
+        this.connectedTraceId = traceId;
+        this.connectedSessionId = sessionId;
+        this.connectedVoice = voiceIdentity(this.voicePreferences);
+        // The relay counts contexts per connection, so this must too, and
+        // the ids a dead socket finished with are this socket's fresh ones.
+        this.sentSegmentSequence = 0;
+        this.finishedContexts.clear();
+
+        const timeout = window.setTimeout(() => {
+          notifyConnect(false);
+          reject(new Error("websocket connection timeout"));
+          ws.close();
+        }, TTS_WS_CONNECT_TIMEOUT_MS);
+
+        const onReady = (event: MessageEvent) => {
+          const payload = parseWsPayload(String(event.data));
+
+          if (payload && "type" in payload && payload.type === "ready") {
+            window.clearTimeout(timeout);
+            ws.removeEventListener("message", onReady);
+            notifyConnect(true);
+            resolve();
+          }
+
+          if (payload && "type" in payload && payload.type === "error") {
+            window.clearTimeout(timeout);
+            ws.removeEventListener("message", onReady);
+            notifyConnect(false);
+            reject(new Error(payload.message ?? "websocket tts error"));
+          }
+        };
+
+        ws.addEventListener("message", onReady);
+
+        ws.onerror = () => {
+          window.clearTimeout(timeout);
+          ws.removeEventListener("message", onReady);
+          notifyConnect(false);
+          reject(new Error("websocket connection failed"));
+        };
+
+        ws.onclose = () => {
+          if (this.ws !== ws) return;
+          this.detachStreamHandler();
+          this.ws = null;
+          this.connectPromise = null;
+          this.connectedTraceId = undefined;
+          this.connectedSessionId = undefined;
+          this.connectedVoice = undefined;
+          this.failStreamGeneration(new Error("websocket closed"));
+        };
+      });
+    })();
+
+    try {
+      await this.connectPromise;
+    } catch (error) {
+      this.connectPromise = null;
+      throw error;
+    }
+  }
+
+  private createJob(spokenText: string, options: SpeakSegmentOptions): SegmentJob {
+    return {
+      spokenText,
+      options,
+      voice: voiceIdentity(this.voicePreferences),
+      claimed: true,
+      resolve: () => {},
+      reject: () => {},
+      settled: false,
+      completing: false,
+      textSent: false,
+      playbackStarted: false,
+      timingsEmitted: false,
+      contextFinal: false,
+      timings: {
+        charStartTimes: [],
+        charDurations: [],
+        totalDuration: 0,
+      },
+      capturedChunks: [],
+      pendingAudioBuffers: [],
+      sourceDonePromises: [],
+      pendingAudioIngestPromises: [],
+      started: false,
+      receivedAudio: false,
+      decodedAudio: false,
+      chunkOffsetSec: 0,
+      startedAt: performance.now(),
+    };
+  }
+
+  /** Bytes still downloading are not a stall; only a claimed, unfinished job hears it. */
+  private emitAudioInTransit(job: SegmentJob): void {
+    if (job.claimed && !job.settled && job.audioInTransit && !job.contextFinal) {
+      job.options.onAudioInTransit?.();
+    }
+  }
+
+  private emitAudioReady(job: SegmentJob): void {
+    if (job.claimed && !job.settled && job.contextFinal && job.capturedChunks.some((chunk) => chunk.length > 0)) {
+      job.options.onAudioReady?.();
+    }
+  }
+
+  private emitCapturedAudio(job: SegmentJob): void {
+    if (!job.claimed || job.settled || !job.contextFinal || job.capturedAudioEmitted || job.capturedChunks.length === 0) return;
+    job.capturedAudioEmitted = true;
+    job.options.onAudioCaptured?.({
+      bytes: concatUint8Arrays(job.capturedChunks),
+      mimeType: speechAudioMimeType(job.capturedChunks[0]),
+    });
+  }
+
+  private emitTimings(job: SegmentJob): void {
+    if (job.timings.totalDuration <= 0) {
+      return;
+    }
+
+    job.options.onTimings?.(toSegmentRelativeAudioTimings(job.timings));
+
+    if (!job.timingsEmitted) {
+      job.timingsEmitted = true;
+    }
+  }
+
+  private finalizeJob(job: SegmentJob): void {
+    this.emitTimings(job);
+
+    tutorDebug("tts", "segment complete", {
+      duration_ms: Math.round(performance.now() - job.startedAt),
+      total_audio_sec: job.timings.totalDuration,
+    });
+    job.options.onEnd?.();
+    job.resolve();
+  }
+
+  private enqueueWebSocketSegment(
+    spokenText: string,
+    options: SpeakSegmentOptions,
+  ): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      // Reaching here means the lesson is speaking something other than what
+      // was generated ahead, so that guess is stale. Dropping it matters: an
+      // unclaimed job at the head of the queue is never promoted, and the
+      // sentence behind it would wait on it forever.
+      for (const stale of this.jobs.filter((queued) => !queued.claimed && !queued.settled)) {
+        stale.settled = true;
+        this.releaseJobContext(stale);
+        // A serial voice (Sarvam) generates one sentence at a time, so a stale
+        // guess still queued at the relay would delay this one by its whole
+        // length. Tell the relay; a parallel voice ignores the message.
+        const staleIndex = Number(stale.contextId?.replace(/^segment_/, ""));
+        if (Number.isSafeInteger(staleIndex) && this.ws?.readyState === WebSocket.OPEN) {
+          this.ws.send(JSON.stringify({ cancel_segment_index: staleIndex }));
+        }
+        tutorDebug("tts", "dropping unspoken lookahead", {
+          preview: stale.spokenText.slice(0, 60),
+        });
+      }
+      this.jobs = this.jobs.filter((queued) => !queued.settled);
+      const job = this.createJob(spokenText, options);
+      job.resolve = resolve;
+      job.reject = reject;
+      this.jobs.push(job);
+      void this.pumpJobQueue();
+    });
+  }
+
+  private async pumpJobQueue(): Promise<void> {
+    if (this.halted) {
+      return;
+    }
+
+    const ws = this.ws;
+    const streamGeneration = this.streamGeneration;
+    const speakGeneration = this.speakGeneration;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      const error = new Error("websocket not open for tts segment");
+      for (const job of this.jobs) {
+        if (!job.settled) {
+          job.settled = true;
+          job.reject(error);
+        }
+      }
+      this.jobs = [];
+      this.currentJob = null;
+      this.chunkTargetJob = null;
+      this.jobsByContext.clear();
+      this.unboundJobs = [];
+      this.finishedContexts.clear();
+      return;
+    }
+
+    while (this.jobs.length > 0 && this.jobs[0].settled) {
+      this.releaseJobContext(this.jobs.shift()!);
+    }
+
+    let ctx: AudioContext;
+    try {
+      ctx = await this.ensureAudioContext(typeof Audio !== "function");
+    } catch {
+      return;
+    }
+    if (this.halted || this.ws !== ws || ws.readyState !== WebSocket.OPEN ||
+      this.streamGeneration !== streamGeneration || this.speakGeneration !== speakGeneration) return;
+    this.attachStreamHandler(ws, ctx);
+
+    // Every queued sentence gets its text out now, each on a context of its
+    // own. Generation for the next beat then runs under the one being spoken
+    // instead of after it, which is the whole of the gap between sentences.
+    for (const job of this.jobs) {
+      if (job.settled || job.textSent) {
+        continue;
+      }
+      tutorDebug("tts", "ws segment send", {
+        spoken_chars: job.spokenText.length,
+        claimed: job.claimed,
+        preview: job.spokenText.slice(0, 80),
+      });
+      this.sendSegmentText(ws, job);
+      job.textSent = true;
+      job.startedAt = performance.now();
+      this.unboundJobs.push(job);
+    }
+
+    // Still set while a sentence drains its scheduled audio, so this is what
+    // keeps a pre-generated next sentence from speaking over the current one.
+    if (this.currentJob) {
+      return;
+    }
+
+    const nextJob = this.jobs[0];
+    if (!nextJob) {
+      this.currentJob = null;
+      this.chunkTargetJob = null;
+      this.detachStreamHandler();
+      return;
+    }
+
+    // The head is a sentence the lesson has not reached yet. It keeps
+    // generating; whether it speaks is `speakSegment`'s call, not the queue's.
+    if (!nextJob.claimed) {
+      this.currentJob = null;
+      return;
+    }
+
+    this.currentJob = nextJob;
+    // Advance chunk routing with the job queue — a settled prior target must
+    // not keep absorbing (and discarding) chunks meant for the next segment.
+    if (this.chunkTargetJob === null || this.chunkTargetJob.settled) {
+      this.chunkTargetJob = nextJob;
+    }
+    // No waitForTimelineReady here — completeCurrentJob already waits for
+    // all audio sources via sourceDonePromises before calling pumpJobQueue.
+    this.scheduledEnd = Math.max(this.scheduledEnd, ctx.currentTime);
+    this.totalScheduledMediaSec = 0;
+    this.mediaClock = createRateMediaClock(this.playbackRate);
+    // The previous sentence's HTML clip / HTTP origin must not answer
+    // getPlaybackPositionMs for this job. That leftover 8–40 s is what
+    // made catch-up dump the next row before its words.
+    this.stopHtmlAudio();
+    this.httpPlaybackOriginCtxTime = null;
+
+    // A sentence generated ahead already holds its audio, so this is where it
+    // starts speaking — with no round trip between it and the last one. Its
+    // context finished long ago, so closing it out is this path's job too.
+    if (!nextJob.playbackStarted) {
+      void this.tryStartJobPlayback(nextJob).then(() => {
+        if (nextJob.contextFinal && nextJob === this.currentJob && !nextJob.settled) {
+          void this.completeCurrentJob();
+        }
+      });
+    }
+
+    this.resetWatchdog(nextJob);
+  }
+
+  /** Stop routing upstream chunks to a job that is done with them. */
+  private releaseJobContext(job: SegmentJob): void {
+    for (const [contextId, bound] of this.jobsByContext) {
+      if (bound !== job) continue;
+      this.jobsByContext.delete(contextId);
+      this.finishedContexts.add(contextId);
+      if (this.finishedContexts.size > FINISHED_CONTEXTS_REMEMBERED) {
+        const oldest = this.finishedContexts.values().next().value;
+        if (oldest !== undefined) this.finishedContexts.delete(oldest);
+      }
+    }
+    const waiting = this.unboundJobs.indexOf(job);
+    if (waiting >= 0) {
+      this.unboundJobs.splice(waiting, 1);
+    }
+  }
+
+  /**
+   * Which job a message belongs to. Contexts are bound on first sight, in the
+   * order their texts were sent, so two sentences generating at once cannot
+   * pour their audio into each other.
+   */
+  private jobForPayload(contextId: string | undefined): SegmentJob | null {
+    if (!contextId) {
+      return this.chunkTargetJob ?? this.currentJob;
+    }
+    const bound = this.jobsByContext.get(contextId);
+    if (bound) {
+      return bound;
+    }
+    if (this.finishedContexts.has(contextId)) {
+      return null;
+    }
+    // A relay that numbers contexts itself instead of echoing ours: fall back
+    // to send order and remember what it actually called this one.
+    const job = this.unboundJobs.shift();
+    if (!job) {
+      return this.chunkTargetJob ?? this.currentJob;
+    }
+    this.jobsByContext.set(contextId, job);
+    return job;
+  }
+
+  private sendSegmentText(ws: WebSocket, job: SegmentJob): void {
+    // Generation stays at the tutor's natural pace. Lecture speed is playback
+    // rate on the already-produced audio so a mid-sentence change takes effect now.
+    const settings = job.options.voiceSettings ?? DEFAULT_VOICE_SETTINGS;
+    const speed = clampVoiceSpeed(settings.speed ?? 1);
+    // Name the context here rather than inferring it from the order replies
+    // come back in. Sentences generate concurrently and a short one finishes
+    // first, so arrival order is not send order — reading it as such handed a
+    // sentence the audio of its neighbour.
+    this.sentSegmentSequence += 1;
+    const contextId = `segment_${this.sentSegmentSequence}`;
+    job.contextId = contextId;
+    this.jobsByContext.set(contextId, job);
+    ws.send(
+      JSON.stringify({
+        text: job.spokenText,
+        segment_index: this.sentSegmentSequence,
+        previous_text: job.options.previousText,
+        next_text: job.options.nextText,
+        voice_settings: { ...settings, speed },
+      }),
+    );
+    ws.send(JSON.stringify({ text: "", flush: true }));
+  }
+
+  private attachStreamHandler(ws: WebSocket, ctx: AudioContext): void {
+    if (this.streamHandler) {
+      return;
+    }
+
+    this.streamHandler = async (event: MessageEvent) => {
+      let messageJob: SegmentJob | null = null;
+      try {
+        if (typeof event.data !== "string") {
+          const binaryJob = this.chunkTargetJob ?? this.currentJob;
+          if (!binaryJob || binaryJob.settled) {
+            return;
+          }
+          messageJob = binaryJob;
+          if (event.data instanceof ArrayBuffer || event.data instanceof Blob) {
+            await this.queueAudioIngest(ctx, binaryJob, event.data);
+          }
+
+          return;
+        }
+
+        const payload = parseWsPayload(event.data);
+        if (payload && isTtsRelayControlPayload(payload)) {
+          if (payload.type === TTS_AUDIO_IN_TRANSIT_TYPE) {
+            const contextId = (payload as { contextId?: unknown }).contextId;
+            const job = typeof contextId === "string" ? this.jobsByContext.get(contextId) : undefined;
+            if (job && !job.settled && !job.audioInTransit) {
+              job.audioInTransit = true;
+              // A whole-sentence message counts as received only once it has
+              // landed, so the no-audio watchdog must restart from here and
+              // outlast the runner's in-transit wait.
+              if (job === this.currentJob) this.resetWatchdog(job);
+              this.emitAudioInTransit(job);
+            }
+            return;
+          }
+          if (payload.type === "skip" || payload.type === "error") {
+            const error = new Error(
+              payload.type === "skip"
+                ? `tts skipped${payload.reason ? ` (${payload.reason})` : ""}`
+                : payload.message ?? "websocket tts error",
+            );
+            this.wsDisabledUntil = Date.now() + TTS_WS_DISABLE_AFTER_FAIL_MS;
+            this.failStreamGeneration(error);
+          }
+          return;
+        }
+        if (!payload) {
+          return;
+        }
+
+        const chunk = payload as TimestampChunkPayload;
+        // Several sentences may be generating at once, so the context the
+        // message names — not "the segment being spoken" — owns this audio.
+        const job = this.jobForPayload(chunk.contextId ?? chunk.context_id);
+        if (!job || job.settled) {
+          return;
+        }
+        messageJob = job;
+
+        // A provider may deliver its last audio and completion in the same packet.
+        // Ingest it before honoring final, or that sentence becomes silent.
+        const audioBase64 = readAudioBase64(chunk);
+        if (audioBase64) {
+          const bytes = base64ToUint8Array(audioBase64);
+          await this.queueAudioIngest(
+            ctx, job,
+            bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
+          );
+          if (job.settled) return;
+          job.chunkOffsetSec = mergeChunkTimings(job.timings, chunk, job.chunkOffsetSec);
+          if (!chunk.isFinal && !chunk.is_final && job.timings.totalDuration > 0) this.emitTimings(job);
+        }
+        if (chunk.isFinal || chunk.is_final) {
+          // Keep final false while preceding conversions ingest, so claim/resume
+          // cannot announce readiness or start a truncated clip in the meantime.
+          await Promise.all(job.pendingAudioIngestPromises);
+          if (job.settled || job.contextFinal) return;
+          job.contextFinal = true;
+          this.emitAudioReady(job);
+          if (job.settled) return;
+          fillDurationFromWav(job.timings, job.capturedChunks);
+          this.emitTimings(job);
+          this.emitCapturedAudio(job);
+          if (!job.playbackStarted) await this.tryStartJobPlayback(job);
+          if (job === this.currentJob) await this.completeCurrentJob();
+        }
+      } catch (error) {
+        if (messageJob && !messageJob.settled) {
+          if (this.currentJob === messageJob) this.failCurrentJob(error);
+          else {
+            messageJob.settled = true;
+            messageJob.reject(error);
+            this.releaseJobContext(messageJob);
+          }
+        }
+        tutorDebug("tts", "ws stream handler error", { error: String(error) });
+      }
+    };
+
+    ws.addEventListener("message", this.streamHandler);
+  }
+
+  private detachStreamHandler(): void {
+    if (this.streamHandler && this.ws) {
+      this.ws.removeEventListener("message", this.streamHandler);
+    }
+
+    this.streamHandler = null;
+  }
+
+  private canSchedulePlayback(job: SegmentJob): boolean {
+    return job === this.currentJob && !job.settled;
+  }
+
+  private async tryStartJobPlayback(job: SegmentJob): Promise<void> {
+    if (job.playbackStartPromise) return job.playbackStartPromise;
+    if (!this.canSchedulePlayback(job) || job.playbackStarted || this.paused || !job.contextFinal) return;
+    if (job.pendingAudioBuffers.length === 0 && job.capturedChunks.length === 0) return;
+
+    // Install the shared promise before native play can synchronously call
+    // onStart (and re-enter resume), not only before asynchronous decoding.
+    const starting = Promise.resolve().then(() => this.startJobPlayback(job));
+    job.playbackStartPromise = starting;
+    try {
+      await starting;
+    } finally {
+      if (job.playbackStartPromise === starting) job.playbackStartPromise = undefined;
+    }
+  }
+
+  private async startJobPlayback(job: SegmentJob): Promise<void> {
+    if (this.paused || !this.canSchedulePlayback(job) || job.playbackStarted) return;
+    this.emitCapturedAudio(job);
+    if (job.settled || !this.canSchedulePlayback(job)) return;
+    const notifyStart = () => {
+      if (job.started || job.settled || this.currentJob !== job) return;
+      job.started = true;
+      tutorDebug("tts", "ws playback start (buffered)", {
+        ttft_ms: Math.round(performance.now() - job.startedAt),
+        buffered_chunks: job.capturedChunks.length,
+      });
+      job.options.onStart?.();
+    };
+
+    const htmlDone = this.tryPlayHtmlAudio(job.capturedChunks, notifyStart);
+    if (htmlDone) {
+      job.playbackStarted = true;
+      job.sourceDonePromises.push(htmlDone);
+      return;
+    }
+
+    const ctx = await this.ensureAudioContext();
+    const playable = await this.buffersForSmoothPlayback(ctx, job.capturedChunks, job.pendingAudioBuffers);
+    if (playable.length === 0 || this.paused || !this.canSchedulePlayback(job)) return;
+    job.decodedAudio = true;
+    job.pendingAudioBuffers.length = 0;
+    job.playbackStarted = true;
+    this.playing = true;
+    for (const audioBuffer of playable) {
+      this.scheduleBufferSource(ctx, job, audioBuffer);
+    }
+    this.notePlaybackStart("audio-context-scheduled", (job.audibleStartCtxTime ?? ctx.currentTime) - ctx.currentTime);
+    notifyStart();
+  }
+
+  private queueAudioIngest(ctx: AudioContext, job: SegmentJob, data: ArrayBuffer | Blob): Promise<void> {
+    if (job.firstAudioByteAt === undefined && !job.settled) {
+      job.firstAudioByteAt = performance.now();
+      this.reportJobFirstAudioByte(job);
+    }
+    const preceding = job.pendingAudioIngestPromises.at(-1) ?? Promise.resolve();
+    // Register before conversion starts, and retain arrival order even if a
+    // later Blob's arrayBuffer promise resolves before an earlier one.
+    const ingestion = preceding.then(async () => {
+      if (job.settled) return;
+      const arrayBuffer = data instanceof Blob ? await data.arrayBuffer() : data;
+      if (job.settled) return;
+      await this.ingestAudioBuffer(ctx, job, arrayBuffer);
+    });
+    job.pendingAudioIngestPromises.push(ingestion);
+    return ingestion;
+  }
+
+  private async ingestAudioBuffer(
+    ctx: AudioContext,
+    job: SegmentJob,
+    arrayBuffer: ArrayBuffer,
+  ): Promise<void> {
+    job.receivedAudio = true;
+    if (job === this.currentJob) {
+      this.resetWatchdog(job);
+    }
+    job.capturedChunks.push(new Uint8Array(arrayBuffer));
+
+    if (!this.canSchedulePlayback(job) || !job.playbackStarted) {
+      if (this.canSchedulePlayback(job)) {
+        await this.tryStartJobPlayback(job);
+      }
+    }
+  }
+
+  private async buffersForSmoothPlayback(
+    ctx: AudioContext,
+    chunks: Uint8Array[],
+    decoded: AudioBuffer[],
+  ): Promise<AudioBuffer[]> {
+    if (chunks.length > 0) {
+      try {
+        const merged = concatUint8Arrays(chunks);
+        const audioBuffer = await ctx.decodeAudioData(
+          merged.buffer.slice(merged.byteOffset, merged.byteOffset + merged.byteLength) as ArrayBuffer,
+        );
+        return [audioBuffer];
+      } catch {
+        tutorDebug("tts", "concat mpeg decode failed, using decoded slices");
+      }
+    }
+    const slices = decoded.length > 0
+      ? decoded
+      : await this.decodeMpegSlices(ctx, chunks);
+    if (slices.length === 0) {
+      return [];
+    }
+    if (canConcatAudioBuffers(slices) && slices.length > 1) {
+      return [concatDecodedAudioBuffers(ctx, slices)];
+    }
+    return slices;
+  }
+
+  private async decodeMpegSlices(ctx: AudioContext, chunks: Uint8Array[]): Promise<AudioBuffer[]> {
+    const slices: AudioBuffer[] = [];
+    for (const chunk of chunks) {
+      try {
+        slices.push(await ctx.decodeAudioData(
+          chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength) as ArrayBuffer,
+        ));
+      } catch {
+        tutorDebug("tts", "mpeg slice decode failed");
+      }
+    }
+    return slices;
+  }
+
+  private scheduleBufferSource(
+    ctx: AudioContext,
+    job: SegmentJob,
+    audioBuffer: AudioBuffer,
+  ): void {
+    const startAt = nextScheduleStartSec({
+      currentTime: ctx.currentTime,
+      scheduledEnd: this.scheduledEnd,
+    });
+    if (job.audibleStartCtxTime === undefined) {
+      job.audibleStartCtxTime = startAt;
+    }
+    const source = ctx.createBufferSource();
+    source.buffer = audioBuffer;
+    applyBufferSourcePlaybackRate(source, this.playbackRate);
+    this.connectSource(source, ctx);
+
+    const donePromise = new Promise<void>((resolveSource) => {
+      source.onended = () => {
+        this.activeSources = this.activeSources.filter((node) => node !== source);
+
+        if (this.activeSources.length === 0) {
+          this.playing = false;
+        }
+
+        resolveSource();
+      };
+    });
+
+    this.activeSources.push(source);
+    source.start(startAt);
+    this.totalScheduledMediaSec += audioBuffer.duration;
+    this.scheduledEnd = startAt + remainingWallSec(audioBuffer.duration, this.playbackRate);
+    job.sourceDonePromises.push(donePromise);
+    this.scheduleIdleComplete(ctx, job);
+  }
+
+  private scheduleIdleComplete(ctx: AudioContext, job: SegmentJob): void {
+    if (this.idleCompleteTimer !== null) {
+      window.clearTimeout(this.idleCompleteTimer);
+    }
+
+    this.idleCompleteTimer = window.setTimeout(() => {
+      if (this.currentJob !== job || job.settled) {
+        return;
+      }
+
+      if (shouldCompleteTtsJobAfterSilence({
+        contextFinal: job.contextFinal,
+        scheduledEnd: this.scheduledEnd,
+        currentTime: ctx.currentTime,
+      })) {
+        void this.completeCurrentJob();
+      } else {
+        this.scheduleIdleComplete(ctx, job);
+      }
+    }, 350);
+  }
+
+  private resetWatchdog(job: SegmentJob): void {
+    if (this.watchdogTimer !== null) {
+      window.clearTimeout(this.watchdogTimer);
+    }
+    if (this.paused) return;
+
+    // Fail when ElevenLabs never returns audio; leave room for cold WS + first chunk.
+    // Audio the relay reported in transit gets longer than the runner waits
+    // for it (SPEECH_AUDIO_IN_TRANSIT_GRACE_MS, 12 s): firing first would drop
+    // the landing sentence, disable the socket and regenerate it over HTTP.
+    const watchdogMs = job.audioInTransit && !job.receivedAudio
+      ? TTS_WS_IN_TRANSIT_WATCHDOG_MS
+      : TTS_WS_NO_AUDIO_WATCHDOG_MS;
+    this.watchdogTimer = window.setTimeout(() => {
+      if (this.currentJob !== job || job.settled) {
+        return;
+      }
+
+      if (!job.receivedAudio) {
+        this.failCurrentJob(new Error("websocket tts timeout"));
+        return;
+      }
+
+      void this.completeCurrentJob();
+    }, watchdogMs);
+  }
+
+  private clearTimers(): void {
+    if (this.idleCompleteTimer !== null) {
+      window.clearTimeout(this.idleCompleteTimer);
+      this.idleCompleteTimer = null;
+    }
+
+    if (this.watchdogTimer !== null) {
+      window.clearTimeout(this.watchdogTimer);
+      this.watchdogTimer = null;
+    }
+  }
+
+  private async completeCurrentJob(): Promise<void> {
+    const job = this.currentJob;
+    if (!job || job.settled || job.completing) {
+      return;
+    }
+
+    await Promise.allSettled(job.pendingAudioIngestPromises);
+    if (this.currentJob !== job || job.settled || job.completing) return;
+    if (this.paused && !job.playbackStarted) return;
+
+    if (!hasPlayableSegmentAudio({
+      receivedAudio: job.receivedAudio,
+      decodedAudio: job.decodedAudio || job.sourceDonePromises.length > 0,
+      capturedChunkCount: job.capturedChunks.length,
+    })) {
+      this.failCurrentJob(new Error("websocket tts finalized without audio"));
+      return;
+    }
+
+    job.completing = true;
+    this.clearTimers();
+
+    try {
+      await Promise.all(job.sourceDonePromises);
+    } catch (error) {
+      if (this.currentJob === job && !job.settled) this.failCurrentJob(error);
+      return;
+    }
+    if (this.currentJob !== job || job.settled) return;
+    job.settled = true;
+    this.finalizeJob(job);
+
+    while (this.jobs.length > 0 && this.jobs[0].settled) {
+      this.releaseJobContext(this.jobs.shift()!);
+    }
+
+    this.currentJob = null;
+    if (this.chunkTargetJob === job) {
+      this.chunkTargetJob = null;
+    }
+    await this.pumpJobQueue();
+  }
+
+  private failCurrentJob(error: unknown): void {
+    const job = this.currentJob;
+    this.clearTimers();
+
+    // Mute any buffers already scheduled for this job so HTTP/speech fallback
+    // (or the next queue item) cannot overlap and echo.
+    this.stopActiveAudio("failCurrentJob", { preserveHttp: true });
+
+    if (job && !job.settled) {
+      job.settled = true;
+      job.reject(error);
+    }
+
+    // Drop only the failed job — keep the rest of the queue alive so later
+    // segments can still speak (HTTP fallback / next WS job).
+    if (job) {
+      const idx = this.jobs.indexOf(job);
+      if (idx >= 0) {
+        this.jobs.splice(idx, 1);
+      }
+      this.releaseJobContext(job);
+    }
+
+    this.currentJob = null;
+    this.chunkTargetJob = null;
+    this.detachStreamHandler();
+    void this.pumpJobQueue();
+  }
+
+  /** A failed generator cannot cancel a complete clip already owned by playback. */
+  private failStreamGeneration(error: unknown): void {
+    this.streamGeneration += 1;
+    const current = this.currentJob;
+    const keepCurrent = current && current.claimed && !current.settled && current.contextFinal &&
+      current.capturedChunks.some(chunk => chunk.length > 0);
+    if (!keepCurrent) {
+      this.rejectAllJobs(error);
+      this.currentJob = null;
+      this.chunkTargetJob = null;
+      return;
+    }
+
+    // Its native output, completion promise and progress watchdog retain their
+    // owner. Stop/reset still use rejectAllJobs and halt that output normally.
+    this.detachStreamHandler();
+    this.jobsByContext.clear();
+    this.unboundJobs = [];
+    this.finishedContexts.clear();
+    for (const job of this.jobs) {
+      if (job !== current && !job.settled) {
+        job.settled = true;
+        job.reject(error);
+      }
+    }
+    this.jobs = this.jobs.filter(job => job === current);
+    this.chunkTargetJob = current;
+  }
+
+  private rejectAllJobs(error: unknown): void {
+    this.jobsByContext.clear();
+    this.unboundJobs = [];
+    this.finishedContexts.clear();
+    for (const job of this.jobs) {
+      if (!job.settled) {
+        job.settled = true;
+        job.reject(error);
+      }
+    }
+    this.jobs = [];
+  }
+
+  private async waitForTimelineReady(ctx: AudioContext): Promise<void> {
+    // Never snap the playhead forward while buffers are still audible — that
+    // was a prime cause of overlapping voices on HTTP fallback.
+    const deadline = performance.now() + 8_000;
+    while (
+      (this.activeSources.length > 0 || this.scheduledEnd > ctx.currentTime + 0.05) &&
+      performance.now() < deadline
+    ) {
+      await new Promise<void>((resolve) => {
+        window.setTimeout(resolve, 32);
+      });
+    }
+    if (this.activeSources.length > 0 || this.scheduledEnd > ctx.currentTime + 0.05) {
+      this.stopActiveAudio("waitForTimelineReady-timeout");
+    }
+  }
+
+  private async fillHttpPrefetch(
+    entry: HttpPrefetch,
+    options: SpeakSegmentOptions,
+  ): Promise<void> {
+    try {
+      const ingested = await this.ingestHttpAudio(entry.spokenText, options, entry.controller);
+      entry.firstByteMs = ingested.firstByteMs;
+      entry.buffers = ingested.buffers;
+      entry.chunks = ingested.chunks;
+      entry.timings = ingested.timings;
+    } catch (error) {
+      entry.error = error;
+    }
+  }
+
+  private async playPrefetchedHttp(
+    entry: HttpPrefetch,
+    options: SpeakSegmentOptions,
+    generation: number,
+  ): Promise<void> {
+    if (this.speakGeneration !== generation) return;
+    if (entry.firstByteMs !== undefined) {
+      this.reportFirstAudioByte(options, { transport: "http", sinceRequestMs: entry.firstByteMs, prefetched: true });
+    }
+    if (entry.chunks.some((chunk) => chunk.length > 0)) options.onAudioReady?.();
+    if (!(await this.waitWhileUnpaused(generation))) return;
+    // HTTP has no WS job to reset the media clock. Start each sentence at zero.
+    this.mediaClock = createRateMediaClock(this.playbackRate);
+    this.httpPlaybackOriginCtxTime = null;
+    const sourceDonePromises: Promise<void>[] = [];
+    this.lastSuccessfulTransport = "http";
+    // The alignment is complete before a prefetch plays, so it goes out
+    // before `onStart`, the same order the socket keeps. The runner's first
+    // schedule is gated on whichever arrives first.
+    if (entry.timings.totalDuration > 0) {
+      options.onTimings?.(toSegmentRelativeAudioTimings(entry.timings));
+    }
+    if (entry.chunks.length > 0) {
+      options.onAudioCaptured?.({
+        bytes: concatUint8Arrays(entry.chunks),
+        mimeType: speechAudioMimeType(entry.chunks[0]),
+      });
+    }
+    // Complete synthesis belongs to the claimed row even if output fails.
+    // Callbacks may Stop/switch the lesson; recheck before creating output.
+    if (!(await this.waitWhileUnpaused(generation)) || this.halted) return;
+    const htmlDone = this.tryPlayHtmlAudio(entry.chunks, options.onStart);
+    if (htmlDone) {
+      sourceDonePromises.push(htmlDone);
+    } else {
+      const ctx = await this.ensureAudioContext();
+      const playable = await this.buffersForSmoothPlayback(ctx, entry.chunks, entry.buffers);
+      if (!(await this.waitWhileUnpaused(generation))) return;
+      if (playable.length === 0) throw new Error("TTS prefetch returned no playable audio");
+      this.scheduledEnd = Math.max(this.scheduledEnd, ctx.currentTime);
+      this.playing = true;
+      for (const audioBuffer of playable) {
+        if (this.speakGeneration !== generation) {
+          return;
+        }
+        sourceDonePromises.push(this.scheduleDecodedBuffer(ctx, audioBuffer));
+      }
+      this.notePlaybackStart("audio-context-scheduled", (this.httpPlaybackOriginCtxTime ?? ctx.currentTime) - ctx.currentTime);
+      options.onStart?.();
+    }
+    await Promise.all(sourceDonePromises);
+    if (this.speakGeneration === generation) {
+      options.onEnd?.();
+    }
+  }
+
+  private scheduleDecodedBuffer(ctx: AudioContext, audioBuffer: AudioBuffer): Promise<void> {
+    const startAt = nextScheduleStartSec({
+      currentTime: ctx.currentTime,
+      scheduledEnd: this.scheduledEnd,
+    });
+    if (this.httpPlaybackOriginCtxTime === null) {
+      this.httpPlaybackOriginCtxTime = startAt;
+    }
+    const source = ctx.createBufferSource();
+    source.buffer = audioBuffer;
+    applyBufferSourcePlaybackRate(source, this.playbackRate);
+    this.connectSource(source, ctx);
+    const donePromise = new Promise<void>((resolve) => {
+      source.onended = () => {
+        this.activeSources = this.activeSources.filter((node) => node !== source);
+        if (this.activeSources.length === 0) {
+          this.playing = false;
+        }
+        resolve();
+      };
+    });
+    this.activeSources.push(source);
+    source.start(startAt);
+    this.totalScheduledMediaSec += audioBuffer.duration;
+    this.scheduledEnd = startAt + remainingWallSec(audioBuffer.duration, this.playbackRate);
+    return donePromise;
+  }
+
+  private async fetchHttpTtsStream(
+    spokenText: string,
+    options: SpeakSegmentOptions,
+    signal: AbortSignal,
+  ): Promise<Response> {
+    const init: RequestInit = {
+      method: "POST",
+      signal,
+      headers: buildTtsHeaders(options, this.voicePreferences.voiceKey),
+      body: JSON.stringify({
+        text: spokenText,
+        low_latency: this.voicePreferences.lowLatency,
+        voice_settings: {
+          ...(options.voiceSettings ?? DEFAULT_VOICE_SETTINGS),
+          speed: clampVoiceSpeed(
+            (options.voiceSettings ?? DEFAULT_VOICE_SETTINGS).speed ?? 1,
+          ),
+        },
+        previous_text: options.previousText,
+        next_text: options.nextText,
+      }),
+    };
+    for (let attempt = 0; ; attempt++) {
+      const response = await fetch(resolveApiUrl(HTTP_STREAM_URL), init);
+      if (response.ok) return response;
+      const delay = ttsHttpRetryDelayMs(
+        response.status,
+        attempt,
+        parseRetryAfterSec(response.headers.get("retry-after")),
+      );
+      if (delay == null || signal.aborted) return response;
+      tutorDebug("tts", "retrying http tts", { status: response.status, attempt, delay });
+      void response.body?.cancel();
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+
+  private async ingestHttpAudio(
+    spokenText: string,
+    options: SpeakSegmentOptions,
+    controller: AbortController,
+  ): Promise<{ buffers: AudioBuffer[]; chunks: Uint8Array[]; timings: AudioTimings; firstByteMs?: number }> {
+    const requestedAt = performance.now();
+    let firstByteMs: number | undefined;
+    await this.httpGate.acquire(controller.signal);
+    try {
+      const response = await this.fetchHttpTtsStream(spokenText, options, controller.signal);
+      if (!response.ok) {
+        throw new Error(`TTS stream error ${response.status}`);
+      }
+      if (response.headers.get("x-heytutor-tts-skipped")) {
+        throw new Error("TTS skipped");
+      }
+      if (!response.body) {
+        throw new Error("TTS stream returned no body");
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let sseBuffer = "";
+      let chunkOffsetSec = 0;
+      const chunks: Uint8Array[] = [];
+      const timings: AudioTimings = {
+        charStartTimes: [],
+        charDurations: [],
+        totalDuration: 0,
+      };
+
+      const ingestLine = async (line: string) => {
+        const payload = parseHttpTimestampPayload(line);
+        const audioBase64 = payload ? readAudioBase64(payload) : undefined;
+        if (!audioBase64 || !payload) return;
+        firstByteMs ??= Math.round(performance.now() - requestedAt);
+        const bytes = base64ToUint8Array(audioBase64);
+        chunks.push(bytes);
+        chunkOffsetSec = mergeChunkTimings(timings, payload, chunkOffsetSec);
+      };
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        sseBuffer += decoder.decode(value, { stream: true });
+        const lines = sseBuffer.split(/\r?\n/);
+        sseBuffer = lines.pop() ?? "";
+        for (const line of lines) {
+          await ingestLine(line);
+        }
+      }
+      if (sseBuffer.trim()) {
+        await ingestLine(sseBuffer);
+      }
+      if (chunks.length === 0) {
+        throw new Error("TTS stream returned no audio");
+      }
+      return { buffers: [], chunks, timings, firstByteMs };
+    } finally {
+      this.httpGate.release();
+    }
+  }
+
+  private async streamHttpSegment(
+    spokenText: string,
+    options: SpeakSegmentOptions,
+    generation: number,
+  ): Promise<void> {
+    const controller = new AbortController();
+    this.httpControllers.add(controller);
+    this.httpStreamAbortController = controller;
+    const isCurrentSpeak = () =>
+      this.speakGeneration === generation &&
+      !controller.signal.aborted;
+    const throwIfStopped = () => {
+      if (!isCurrentSpeak()) {
+        throw new DOMException("tts stopped", "AbortError");
+      }
+    };
+
+    let httpSlotHeld = false;
+    const requestedAt = performance.now();
+    try {
+      throwIfStopped();
+      this.mediaClock = createRateMediaClock(this.playbackRate);
+      this.httpPlaybackOriginCtxTime = null;
+
+      await this.httpGate.acquire(controller.signal);
+      httpSlotHeld = true;
+      let response: Response;
+      try {
+        response = await this.fetchHttpTtsStream(spokenText, options, controller.signal);
+      } catch (error) {
+        // Firefox reports an aborted fetch as "NetworkError when attempting
+        // to fetch resource" instead of AbortError. The signal is the signal.
+        if (controller.signal.aborted) {
+          throw new DOMException("tts stopped", "AbortError");
+        }
+        throw error;
+      }
+      throwIfStopped();
+      if (!response.ok) throw new Error(`TTS stream error ${response.status}`);
+      if (response.headers.get("x-heytutor-tts-skipped")) {
+        throw new Error("TTS skipped");
+      }
+      if (!response.body) throw new Error("TTS stream returned no body");
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let sseBuffer = "";
+      let chunkOffsetSec = 0;
+      let started = false;
+      const sourceDonePromises: Promise<void>[] = [];
+      const capturedChunks: Uint8Array[] = [];
+      const timings: AudioTimings = {
+        charStartTimes: [],
+        charDurations: [],
+        totalDuration: 0,
+      };
+
+      const startPlayback = async () => {
+        if (started) {
+          return;
+        }
+        throwIfStopped();
+        if (capturedChunks.length === 0) return;
+        options.onAudioReady?.();
+        if (!(await this.waitWhileUnpaused(generation))) { throwIfStopped(); return; }
+        throwIfStopped();
+        const htmlDone = this.tryPlayHtmlAudio(capturedChunks, options.onStart);
+        if (htmlDone) {
+          started = true;
+          this.lastSuccessfulTransport = "http";
+          sourceDonePromises.push(htmlDone);
+          return;
+        }
+        const ctx = await this.ensureAudioContext();
+        const playable = await this.buffersForSmoothPlayback(ctx, capturedChunks, []);
+        if (!(await this.waitWhileUnpaused(generation))) { throwIfStopped(); return; }
+        throwIfStopped();
+        if (playable.length === 0) return;
+        started = true;
+        this.playing = true;
+        this.lastSuccessfulTransport = "http";
+        this.scheduledEnd = Math.max(this.scheduledEnd, ctx.currentTime);
+        for (const audioBuffer of playable) {
+          sourceDonePromises.push(this.scheduleDecodedBuffer(ctx, audioBuffer));
+        }
+        this.notePlaybackStart("audio-context-scheduled", (this.httpPlaybackOriginCtxTime ?? ctx.currentTime) - ctx.currentTime);
+        options.onStart?.();
+      };
+
+      const playLine = async (line: string) => {
+        const payload = parseHttpTimestampPayload(line);
+        const audioBase64 = payload ? readAudioBase64(payload) : undefined;
+        if (!audioBase64 || !payload) return;
+        throwIfStopped();
+        if (capturedChunks.length === 0) {
+          this.reportFirstAudioByte(options, {
+            transport: "http",
+            sinceRequestMs: Math.round(performance.now() - requestedAt),
+            prefetched: false,
+          });
+        }
+        const bytes = base64ToUint8Array(audioBase64);
+        capturedChunks.push(bytes);
+        chunkOffsetSec = mergeChunkTimings(timings, payload, chunkOffsetSec);
+        fillDurationFromWav(timings, capturedChunks);
+        if (timings.totalDuration > 0) {
+          options.onTimings?.(toSegmentRelativeAudioTimings(timings));
+        }
+      };
+
+      while (true) {
+        const { value, done } = await reader.read();
+        throwIfStopped();
+        if (done) break;
+        sseBuffer += decoder.decode(value, { stream: true });
+        const lines = sseBuffer.split(/\r?\n/);
+        sseBuffer = lines.pop() ?? "";
+        for (const line of lines) await playLine(line);
+      }
+      if (sseBuffer.trim()) await playLine(sseBuffer);
+      if (capturedChunks.length > 0 && isCurrentSpeak()) {
+        options.onAudioCaptured?.({
+          bytes: concatUint8Arrays(capturedChunks),
+          mimeType: speechAudioMimeType(capturedChunks[0]),
+        });
+      }
+      throwIfStopped();
+      await startPlayback();
+      if (!started) throw new Error("TTS stream returned no audio");
+      // The ElevenLabs request is done; do not hold the slot through playback.
+      this.httpGate.release();
+      httpSlotHeld = false;
+      await Promise.all(sourceDonePromises);
+      if (isCurrentSpeak()) options.onEnd?.();
+    } finally {
+      if (httpSlotHeld) {
+        this.httpGate.release();
+      }
+      this.httpControllers.delete(controller);
+      if (this.httpStreamAbortController === controller) {
+        this.httpStreamAbortController = null;
+      }
+    }
+  }
+
+  async playAudio(bytes: Uint8Array, options: { onStart?: () => void } = {}): Promise<void> {
+    this.halted = false;
+    const generation = this.speakGeneration;
+    if (!(await this.waitWhileUnpaused(generation)) || this.speakGeneration !== generation) return;
+    const htmlDone = this.tryPlayHtmlAudio([bytes], options.onStart);
+    if (htmlDone) {
+      await htmlDone;
+      return;
+    }
+    const ctx = await this.ensureAudioContext();
+    await this.waitForTimelineReady(ctx);
+    if (!(await this.waitWhileUnpaused(generation))) return;
+
+    const arrayBuffer = bytes.buffer.slice(
+      bytes.byteOffset,
+      bytes.byteOffset + bytes.byteLength,
+    ) as ArrayBuffer;
+    const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+    if (!(await this.waitWhileUnpaused(generation))) return;
+    const startAt = Math.max(ctx.currentTime + 0.05, this.scheduledEnd);
+
+    const source = ctx.createBufferSource();
+    source.buffer = audioBuffer;
+    applyBufferSourcePlaybackRate(source, this.playbackRate);
+    this.connectSource(source, ctx);
+
+    await new Promise<void>((resolve) => {
+      source.onended = () => {
+        this.activeSources = this.activeSources.filter((node) => node !== source);
+
+        if (this.activeSources.length === 0) {
+          this.playing = false;
+        }
+
+        resolve();
+      };
+
+      this.activeSources.push(source);
+      this.playing = true;
+      source.start(startAt);
+      this.notePlaybackStart("audio-context-scheduled", startAt - ctx.currentTime);
+      options.onStart?.();
+      this.totalScheduledMediaSec += audioBuffer.duration;
+      this.scheduledEnd = startAt + remainingWallSec(audioBuffer.duration, this.playbackRate);
+    });
+  }
+
+  private connectSource(source: AudioBufferSourceNode, ctx: AudioContext): void {
+    source.connect(this.ensureOutputGain(ctx));
+  }
+
+  private stopHtmlAudio(): void {
+    const audio = this.currentHtmlAudio;
+    if (!audio) {
+      return;
+    }
+    this.cancelHtmlAudio?.();
+    audio.onended = null;
+    audio.onerror = null;
+    audio.onplaying = null;
+    audio.pause();
+    audio.removeAttribute("src");
+    audio.load();
+    this.currentHtmlAudio = null;
+    this.currentHtmlOnStart = null;
+    this.failHtmlAudio = null;
+  }
+
+  private tryPlayHtmlAudio(chunks: Uint8Array[], onStart?: () => void): Promise<void> | null {
+    const generation = this.speakGeneration;
+    let announced = false;
+    const announce = () => { if (!announced) { announced = true; onStart?.(); } };
+    const first = this.tryPlayHtmlAudioOnce(chunks, announce);
+    if (!first) return null;
+    return first.catch(async (error: unknown) => {
+      if (!(error instanceof NativePlaybackStalledError) || this.speakGeneration !== generation || this.halted) throw error;
+      if (!(await this.waitWhileUnpaused(generation)) || this.speakGeneration !== generation || this.halted) {
+        throw new DOMException("audio stopped", "AbortError");
+      }
+      // Retry complete local bytes on a fresh output, not another synthesis
+      // request. A partially heard clip continues from its last media position.
+      const retry = this.tryPlayHtmlAudioOnce(chunks, announce, error.positionSec);
+      if (!retry) throw error;
+      await retry;
+    });
+  }
+
+  private tryPlayHtmlAudioOnce(chunks: Uint8Array[], onStart?: () => void, resumeAtSec = 0): Promise<void> | null {
+    if (typeof Audio !== "function" || typeof Blob === "undefined" || chunks.length === 0) {
+      return null;
+    }
+    let url: string;
+    let audio: HTMLAudioElement;
+    try {
+      const bytes = concatUint8Arrays(chunks);
+      const buffer = new ArrayBuffer(bytes.byteLength);
+      new Uint8Array(buffer).set(bytes);
+      const blob = new Blob([buffer], { type: speechAudioMimeType(bytes) });
+      url = URL.createObjectURL(blob);
+      audio = new Audio(url);
+    } catch {
+      return null;
+    }
+    applyHtmlAudioPlaybackRate(audio, this.playbackRate);
+    applyHtmlAudioMute(audio, this.muted);
+    this.stopHtmlAudio();
+    this.currentHtmlAudio = audio;
+    const playbackBlockedCallback = this.playbackBlockedCallback;
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      let announced = false;
+      let watching = false;
+      let lastPosition = resumeAtSec;
+      let lastProgressAt = performance.now();
+      let progressTimer: ReturnType<typeof setTimeout> | null = null;
+      let unexpectedPauseResumed = false;
+      const unload = () => {
+        audio.pause();
+        audio.removeAttribute("src");
+        audio.load();
+      };
+      const announceStart = () => {
+        if (settled || this.currentHtmlAudio !== audio) { unload(); return; }
+        if (this.paused) { audio.pause(); return; }
+        const position = audio.currentTime;
+        if (!Number.isFinite(position) || position <= resumeAtSec) return;
+        if (announced) return;
+        announced = true;
+        this.notePlaybackStart("html-audio-playing", 0);
+        onStart?.();
+        playbackBlockedCallback?.(null);
+      };
+      const finish = (error?: unknown) => {
+        if (settled) return;
+        settled = true;
+        if (progressTimer !== null) clearTimeout(progressTimer);
+        playbackBlockedCallback?.(null);
+        audio.onended = null;
+        audio.onerror = null;
+        audio.onplaying = null;
+        unload();
+        URL.revokeObjectURL(url);
+        if (this.blockedHtmlAudio === audio) this.blockedHtmlAudio = null;
+        if (this.currentHtmlAudio === audio) {
+          this.currentHtmlAudio = null;
+          this.currentHtmlOnStart = null;
+          this.cancelHtmlAudio = null;
+          this.failHtmlAudio = null;
+        }
+        if (this.activeSources.length === 0) {
+          this.playing = false;
+        }
+        if (error) reject(error);
+        else resolve();
+      };
+      this.cancelHtmlAudio = () => finish(new DOMException("audio stopped", "AbortError"));
+      this.failHtmlAudio = (error) => finish(error);
+      audio.onended = () => {
+        const position = audio.currentTime;
+        if (!Number.isFinite(position) || position <= resumeAtSec) {
+          finish(new NativePlaybackStalledError(Math.max(lastPosition, 0)));
+          return;
+        }
+        announceStart();
+        finish();
+      };
+      audio.onerror = () => finish(new NativePlaybackError("HTML audio playback failed"));
+      const checkProgress = () => {
+        if (settled || this.currentHtmlAudio !== audio) return;
+        const now = performance.now();
+        const position = audio.currentTime;
+        // Only our own pause, or a clip held for a user gesture, stops the
+        // clock. An element the browser paused by itself used to count as
+        // healthy forever: a fully local clip froze at 1.63 s of 8.7 s and
+        // only the runner's 25 s segment timeout ever noticed.
+        if (this.paused || this.blockedHtmlAudio === audio) lastProgressAt = now;
+        else if (Number.isFinite(position) && position > lastPosition + 0.005) {
+          lastPosition = position;
+          lastProgressAt = now;
+          unexpectedPauseResumed = false;
+          announceStart();
+        } else if (now - lastProgressAt >= NATIVE_PLAYBACK_STALL_MS) {
+          // Retried once from the last heard position on a fresh element.
+          finish(new NativePlaybackStalledError(Math.max(lastPosition, 0)));
+          return;
+        } else if (audio.paused && !audio.ended && !unexpectedPauseResumed) {
+          // Ask the same element to continue first. If it stays still, the
+          // deadline above retries the same bytes from the last position.
+          unexpectedPauseResumed = true;
+          const pauseEpoch = this.pauseEpoch;
+          void Promise.resolve().then(() => audio.play()).then(observePlaying, (error: unknown) => {
+            if (settled || this.currentHtmlAudio !== audio || this.pauseEpoch !== pauseEpoch) return;
+            this.holdBlockedHtmlAudio(error, audio);
+          });
+        }
+        progressTimer = setTimeout(checkProgress, 100);
+      };
+      const observePlaying = () => {
+        if (this.blockedHtmlAudio === audio) this.blockedHtmlAudio = null;
+        announceStart();
+        if (!watching && !settled) {
+          watching = true;
+          // A retained NotAllowedError clip may wait on a user gesture. Its
+          // progress allowance starts with actual play, not element creation;
+          // later playing events cannot renew a stalled clock's deadline.
+          lastProgressAt = performance.now();
+          progressTimer = setTimeout(checkProgress, 100);
+        }
+      };
+      this.currentHtmlOnStart = observePlaying;
+      audio.onplaying = observePlaying;
+      this.playing = true;
+      const playPauseEpoch = this.pauseEpoch;
+      try {
+        if (resumeAtSec > 0) audio.currentTime = resumeAtSec;
+        void audio.play().then(observePlaying, (error: unknown) => {
+          // A pause while the clip is still loading rejects play() with
+          // AbortError. The same clip is resumed later; it has not ended.
+          if (this.currentHtmlAudio === audio && this.pauseEpoch !== playPauseEpoch) return;
+          if (!settled && this.holdBlockedHtmlAudio(error, audio)) return;
+          finish(error instanceof Error ? error : new Error(String(error)));
+        });
+      } catch (error) {
+        if (this.holdBlockedHtmlAudio(error, audio)) return;
+        finish(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+  }
+
+  private retuneScheduledEnd(ctx: AudioContext): void {
+    const played = Math.max(mediaPositionSec(this.mediaClock, ctx.currentTime), 0);
+    const remaining = this.totalScheduledMediaSec - played;
+    this.scheduledEnd = ctx.currentTime + remainingWallSec(remaining, this.playbackRate);
+  }
+
+  private ensureOutputGain(ctx: AudioContext): GainNode {
+    if (!this.outputGain) {
+      this.outputGain = ctx.createGain();
+      this.outputGain.gain.value = this.muted ? 0 : 1;
+      this.outputGain.connect(ctx.destination);
+    }
+    return this.outputGain;
+  }
+
+  private async ensureAudioContext(resume = true): Promise<AudioContext> {
+    if (this.halted) {
+      throw new DOMException("tts stopped", "AbortError");
+    }
+    this.audioContext = this.audioContext ?? createLectureAudioContext();
+
+    if (resume && this.audioContext.state === "suspended" && !this.paused) {
+      const blockedCallback = this.playbackBlockedCallback;
+      const generation = this.speakGeneration;
+      const pauseEpoch = this.pauseEpoch;
+      try {
+        await this.audioContext.resume();
+      } catch (error) {
+        tutorDebug("tts", "AudioContext resume failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      const afterResume = this.getAudioContextState();
+      if (this.speakGeneration === generation && this.pauseEpoch === pauseEpoch && this.playbackBlockedCallback === blockedCallback &&
+        (afterResume === "suspended" || afterResume === "interrupted")) {
+        this.reportPlaybackBlocked(afterResume === "suspended" ? "context-suspended" : "context-interrupted");
+      }
+    }
+
+    if (this.halted) {
+      releaseLectureAudioContext(this.audioContext);
+      this.audioContext = null;
+      throw new DOMException("tts stopped", "AbortError");
+    }
+
+    if (this.audioContext.state === "suspended") {
+      tutorDebug("tts", "AudioContext still suspended", {
+        paused: this.paused,
+      });
+    }
+
+    return this.audioContext;
+  }
+
+  getAudioContextState(): AudioContextState | "interrupted" | null {
+    return this.audioContext?.state ?? null;
+  }
+
+  getLastPlaybackStart(): PlaybackStartSignal | null {
+    return this.lastPlaybackStart;
+  }
+
+  isMuted(): boolean {
+    return this.muted;
+  }
+
+  private notePlaybackStart(signal: PlaybackStartSignal["signal"], leadSec: number): void {
+    this.lastPlaybackStart = {
+      signal,
+      leadMs: Number.isFinite(leadSec) ? Math.max(0, Math.round(leadSec * 1000)) : 0,
+    };
+  }
+
+  /** Telemetry callback; a throwing listener must never break playback. */
+  private reportFirstAudioByte(options: SpeakSegmentOptions, info: FirstAudioByteInfo): void {
+    try {
+      options.onFirstAudioByte?.(info);
+    } catch {
+      // ignore
+    }
+  }
+
+  /** Reports a WS job's first bytes once it is claimed, now or on arrival. */
+  private reportJobFirstAudioByte(job: SegmentJob): void {
+    if (!job.claimed || job.firstAudioByteReported || job.firstAudioByteAt === undefined) return;
+    job.firstAudioByteReported = true;
+    this.reportFirstAudioByte(job.options, {
+      transport: "ws",
+      sinceRequestMs: Math.round(job.firstAudioByteAt - job.startedAt),
+      prefetched: job.lookahead === true,
+    });
+  }
+
+  private holdBlockedHtmlAudio(error: unknown, audio: HTMLAudioElement): boolean {
+    if (this.currentHtmlAudio !== audio || !this.playbackBlockedCallback || this.paused || this.halted ||
+      !(error instanceof Error) || error.name !== "NotAllowedError") return false;
+    // Waiting on a gesture is not a stalled clock.
+    this.blockedHtmlAudio = audio;
+    this.reportPlaybackBlocked("not-allowed");
+    return true;
+  }
+
+  private reportPlaybackBlocked(reason: "context-suspended" | "context-interrupted" | "not-allowed"): void {
+    if (this.paused || this.halted || (this.muted && reason !== "not-allowed")) return;
+    if (reason !== "not-allowed" && typeof Audio === "function" && this.activeSources.length === 0) return;
+    this.playbackBlockedCallback?.({ reason, audioContextState: this.getAudioContextState() });
+  }
+
+  pause(): void {
+    this.paused = true;
+    this.pauseEpoch += 1;
+    this.clearTimers();
+    this.currentHtmlAudio?.pause();
+    void this.audioContext?.suspend();
+    // Chromium often ignores speechSynthesis.pause(); cancel is the reliable mute.
+    this.speechFallback.pause();
+    tutorDebug("tts", "pause");
+  }
+
+  resume(): void {
+    this.paused = false;
+    const htmlAudio = this.currentHtmlAudio;
+    if (htmlAudio) {
+      const playPauseEpoch = this.pauseEpoch;
+      const generation = this.speakGeneration;
+      const onStart = this.currentHtmlOnStart;
+      const onFailure = this.failHtmlAudio;
+      void htmlAudio.play().then(
+        () => {
+          if (this.speakGeneration !== generation || this.currentHtmlAudio !== htmlAudio) {
+            htmlAudio.pause();
+            htmlAudio.removeAttribute("src");
+            htmlAudio.load();
+            return;
+          }
+          onStart?.();
+        },
+        (error: unknown) => {
+          if (this.speakGeneration === generation && this.currentHtmlAudio === htmlAudio && this.pauseEpoch === playPauseEpoch) {
+            if (this.holdBlockedHtmlAudio(error, htmlAudio)) return;
+            onFailure?.(error);
+          }
+        },
+      );
+    }
+    const ctx = this.audioContext;
+    const generation = this.speakGeneration;
+    const pauseEpoch = this.pauseEpoch;
+    const blockedCallback = this.playbackBlockedCallback;
+    if (ctx) {
+      const reportIfBlocked = () => {
+        if (this.audioContext !== ctx || this.speakGeneration !== generation || this.pauseEpoch !== pauseEpoch ||
+          this.playbackBlockedCallback !== blockedCallback) return;
+        const state = this.getAudioContextState();
+        if (state === "suspended" || state === "interrupted") {
+          this.reportPlaybackBlocked(state === "suspended" ? "context-suspended" : "context-interrupted");
+        }
+      };
+      void ctx.resume().then(reportIfBlocked, reportIfBlocked);
+    }
+    this.speechFallback.resume();
+    const job = this.currentJob;
+    if (job && !job.settled) {
+      if (job.contextFinal && !job.playbackStarted) {
+        void this.tryStartJobPlayback(job).then(() => {
+          if (this.currentJob === job && job.contextFinal && !job.settled) {
+            void this.completeCurrentJob();
+          }
+        });
+      } else {
+        this.resetWatchdog(job);
+      }
+    }
+    tutorDebug("tts", "resume");
+  }
+
+  /** Hold until the user resumes, or the speak generation is aborted. */
+  private async waitWhileUnpaused(generation: number): Promise<boolean> {
+    while (this.paused) {
+      if (this.speakGeneration !== generation) {
+        return false;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 80));
+    }
+    return this.speakGeneration === generation;
+  }
+
+  stop(): void {
+    this.playbackBlockedCallback?.(null);
+    this.playbackBlockedCallback = undefined;
+    this.halted = true;
+    this.speakGeneration += 1;
+    this.clearTimers();
+    this.detachStreamHandler();
+    this.abortHttpStream("stop");
+    this.rejectAllJobs(new Error("tts stopped"));
+    this.currentJob = null;
+    this.chunkTargetJob = null;
+    this.jobs = [];
+    for (const source of this.activeSources) {
+      try {
+        source.stop();
+      } catch {
+        // already stopped
+      }
+    }
+
+    this.activeSources = [];
+    this.playing = false;
+    this.scheduledEnd = 0;
+    this.totalScheduledMediaSec = 0;
+    this.mediaClock = createRateMediaClock(this.playbackRate);
+    this.httpPlaybackOriginCtxTime = null;
+    this.stopHtmlAudio();
+
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.close();
+    }
+
+    this.ws = null;
+    this.connectPromise = null;
+    this.connectedTraceId = undefined;
+    this.connectedSessionId = undefined;
+    this.connectedVoice = undefined;
+    this.sentSegmentSequence = 0;
+    this.finishedContexts.clear();
+    this.paused = false;
+    this.speechFallback.stop();
+    this.activeBrowserFallbackRate = null;
+    releaseLectureAudioContext(this.audioContext);
+    this.audioContext = null;
+    this.outputGain = null;
+  }
+
+  get isPlaying(): boolean {
+    return this.playing;
+  }
+
+  getPlaybackPositionMs(): number | null {
+    const html = this.currentHtmlAudio;
+    if (html) {
+      return Number.isFinite(html.currentTime) && html.currentTime > 0
+        ? html.currentTime * 1000
+        : null;
+    }
+    const ctx = this.audioContext;
+    if (!ctx) {
+      return null;
+    }
+    const job = this.currentJob;
+    const audibleAt = playbackAudibleOriginSec({
+      hasCurrentJob: Boolean(job),
+      jobAudibleStartCtxTime: job?.audibleStartCtxTime,
+      httpPlaybackOriginCtxTime: this.httpPlaybackOriginCtxTime,
+    });
+    if (audibleAt == null) {
+      return null;
+    }
+    // ctx.currentTime freezes while suspended (pause), so this is pause-aware.
+    // Negative until the scheduled audio actually becomes audible.
+    if (ctx.currentTime < audibleAt) {
+      return (ctx.currentTime - audibleAt) * 1000;
+    }
+    if (this.mediaClock.lastCtxTime === null) {
+      startRateMediaClock(this.mediaClock, audibleAt);
+      this.mediaClock.rate = this.playbackRate;
+    }
+    return mediaPositionSec(this.mediaClock, ctx.currentTime) * 1000;
+  }
+
+  /**
+   * The voice id is baked into the upstream socket, so a language or model
+   * change can only take effect on a fresh connection. Drop the idle socket
+   * here and let the next segment reconnect; a socket that is mid-sentence is
+   * left alone so the current line finishes in the old voice, and the next
+   * segment reconnects it (see `shouldReconnect`). Sentences already
+   * generated in the old voice are dropped, never played.
+   */
+  setVoicePreferences(preferences: TutorVoicePreferences): void {
+    const changed =
+      this.voicePreferences.voiceKey !== preferences.voiceKey ||
+      this.voicePreferences.lowLatency !== preferences.lowLatency;
+    this.voicePreferences = { ...preferences };
+    if (!changed) {
+      return;
+    }
+    // Old-voice audio must not leak into the next segment: the claim keys no
+    // longer match it, and dropping it here also stops paying for it.
+    // Already-claimed audio was deleted from the map at claim time, so the
+    // line being spoken is unaffected.
+    for (const prefetch of this.prefetches.values()) {
+      prefetch.controller.abort();
+    }
+    this.prefetches.clear();
+    if (!this.playing && this.ws && this.ws.readyState === WebSocket.OPEN) {
+      // Settle a sentence waiting for its first audio before the old socket's
+      // asynchronous close becomes stale. An audible line keeps its socket.
+      this.resetConnection();
+    }
+  }
+
+  setPlaybackRate(rate: number): void {
+    const safe = clampPlaybackRate(rate);
+    const ctx = this.audioContext;
+    if (ctx && this.mediaClock.lastCtxTime !== null) {
+      setRateMediaClockRate(this.mediaClock, ctx.currentTime, safe);
+      this.retuneScheduledEnd(ctx);
+    } else {
+      this.mediaClock.rate = safe;
+    }
+    this.playbackRate = safe;
+    for (const source of this.activeSources) {
+      applyBufferSourcePlaybackRate(source, safe);
+    }
+    if (this.currentHtmlAudio) {
+      applyHtmlAudioPlaybackRate(this.currentHtmlAudio, safe);
+    }
+    this.speechFallback.setPlaybackRate(browserFallbackPlaybackRate(safe));
+  }
+
+  getPlaybackRate(): number {
+    return this.activeBrowserFallbackRate ?? this.playbackRate;
+  }
+}

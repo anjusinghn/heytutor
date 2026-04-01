@@ -1,0 +1,195 @@
+import LegalDocument, { LegalSection } from './LegalDocument'
+
+export default function TermsPage() {
+  return (
+    <LegalDocument title="Terms of Service" updated="17 September 2026" path="/terms">
+      <LegalSection title="1. Agreement">
+        <p>
+          These Terms of Service (“Terms”) govern your use of Accelute, the
+          website at accelute.co, and the AI whiteboard tutor (together, the
+          “Service”). By using the Service, you agree to these Terms. If you
+          do not agree, do not use the Service.
+        </p>
+        <p>
+          The Service is operated by Accelute. Questions:{' '}
+          <a href="mailto:hi@accelute.co">hi@accelute.co</a>.
+        </p>
+      </LegalSection>
+
+      <LegalSection title="2. The Service">
+        <p>
+          Accelute is an AI tutor that teaches on a live whiteboard: it draws
+          diagrams, writes notes, and speaks through a lesson. You can type a
+          question, upload a photo of a problem, follow up mid-lesson, and keep
+          notes from a session.
+        </p>
+        <p>
+          The Service is provided for learning and practice. It is not a
+          substitute for a qualified teacher, examiner, or professional advice.
+          AI output can be incomplete or wrong. Check important results yourself.
+        </p>
+      </LegalSection>
+
+      <LegalSection title="3. Who may use it">
+        <p>
+          The tutor app is a student product. You must be 13 or older to create
+          an account. We refuse sign-up under 13. If you are 13–17, a parent or
+          guardian must give permission, and we collect a guardian email to send
+          a one-time notice that the account was created. If you are 18 or
+          older, you may continue. See the{' '}
+          <a href="/privacy">Privacy Policy</a> for how we handle data.
+        </p>
+      </LegalSection>
+
+      <LegalSection title="3a. Accounts">
+        <p>
+          Using the tutor requires an Accelute student account (Google or email
+          magic link). The marketing site stays public. A landing lesson demo
+          or <code className="text-ice">?embed=1</code> board can be watched
+          without signing in; that path cannot save work to a student account.
+        </p>
+        <p>
+          You can export your boards, notes, and profile, and you can delete
+          your account. Deletion removes the account and boards we hold for you.
+        </p>
+      </LegalSection>
+
+      <LegalSection title="4. Your use">
+        <p>You agree not to:</p>
+        <ul>
+          <li>use the Service to break the law or harm others</li>
+          <li>upload content you do not have the right to share</li>
+          <li>
+            try to disrupt, scrape, or reverse engineer the Service beyond
+            ordinary use
+          </li>
+          <li>
+            use Accelute to cheat on an exam or violate a school’s academic
+            rules
+          </li>
+          <li>
+            resell or wrap the Service as your own product without our written
+            consent
+          </li>
+        </ul>
+        <p>
+          We may suspend or limit access if we reasonably believe these Terms
+          have been broken.
+        </p>
+      </LegalSection>
+
+      <LegalSection title="5. Your content">
+        <p>
+          You keep whatever rights you already have in questions, photos, and
+          notes you submit. You grant Accelute a licence to use that material
+          solely to run the Service for you, for example to plan a lesson,
+          draw on the board, speak the explanation, and store a board you can
+          reopen.
+        </p>
+        <p>
+          Do not upload sensitive personal data about other people, or
+          anything you would not want processed by our infrastructure and
+          model providers.
+        </p>
+      </LegalSection>
+
+      <LegalSection title="6. Our rights">
+        <p>
+          Accelute, the site, the tutor interface, and related branding are
+          ours or our licensors’. These Terms do not give you ownership of the
+          Service. You may not copy, modify, or redistribute our software or
+          marks except as the Service itself allows.
+        </p>
+        <p>
+          Lesson diagrams and spoken explanations are generated for your
+          session. They are not guaranteed to be unique, exam-accurate, or
+          fit for publication as your own work.
+        </p>
+      </LegalSection>
+
+      <LegalSection title="7. Third-party services">
+        <p>
+          Teaching and voice depend on third-party model and speech providers,
+          and the site is hosted on infrastructure we do not control. Their
+          outages or limits can affect the Service. We are not responsible for
+          those providers’ sites or policies.
+        </p>
+      </LegalSection>
+
+      <LegalSection title="8. Plans and payment">
+        <p>
+          Students buy monthly usage on a plan, not model tokens or speech
+          minutes. Teaching, diagrams, voice, and follow-up doubts on a
+          question are included in that usage.
+        </p>
+        <p>Individual plans at standard US-dollar prices:</p>
+        <ul>
+          <li>Free: US$0, monthly included usage</li>
+          <li>Plus: US$29 per month</li>
+        </ul>
+        <p>
+          Customers in India are offered the INR equivalent using a recent
+          reference exchange rate. Customers elsewhere are offered USD.
+          The checkout shows the final price and currency before payment. A
+          Razorpay plan purchase provides one month of access and does not
+          renew automatically. Early renewals start after existing paid months;
+          Free included usage resets at the start of each calendar month.
+          Paid monthly included usage does not roll over.
+        </p>
+        <p>
+          You may add credits at the standard price of US$10, or its INR equivalent
+          in India. Extra usage
+          expires at the end of the usage period in which it was purchased.
+          An upgrade preserves unused extra usage until its original expiry.
+        </p>
+        <p>
+          Coaching centres and other teams are not self-serve. Contact us to
+          arrange pooled usage and invoicing.
+        </p>
+        <p>
+          Paid checkout is handled by our payment processor. If you are 13–17,
+          a parent or guardian must complete any paid purchase.
+        </p>
+      </LegalSection>
+
+      <LegalSection title="9. Disclaimer">
+        <p>
+          The Service is provided “as is” and “as available.” To the fullest
+          extent allowed by law, we disclaim warranties of merchantability,
+          fitness for a particular purpose, and non-infringement. We do not
+          warrant that lessons will be uninterrupted, error-free, or suitable
+          for any exam or course.
+        </p>
+      </LegalSection>
+
+      <LegalSection title="10. Liability">
+        <p>
+          To the fullest extent allowed by law, Accelute and its operators
+          will not be liable for indirect, incidental, special, consequential,
+          or punitive damages, or for lost marks, lost data, or lost profits,
+          arising from your use of the Service. Our total liability for any
+          claim relating to the Service will not exceed the amount you paid us
+          in the three months before the claim, or US$50 if you paid nothing.
+        </p>
+        <p>
+          Some places do not allow certain limits. In those places, our
+          liability is limited to the maximum extent permitted.
+        </p>
+      </LegalSection>
+
+      <LegalSection title="11. Changes and contact">
+        <p>
+          We may update these Terms. The “Last updated” date at the top will
+          change when we do. Continued use after an update means you accept
+          the new Terms.
+        </p>
+        <p>
+          Contact:{' '}
+          <a href="mailto:hi@accelute.co">hi@accelute.co</a>
+          . Related:{' '}
+          <a href="/privacy">Privacy Policy</a>.
+        </p>
+      </LegalSection>
+    </LegalDocument>
+  )
+}

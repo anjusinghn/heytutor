@@ -1,0 +1,473 @@
+/**
+ * Slot extraction — pulling the typed numbers and expressions a figure needs
+ * out of the turn plan first and the question text second.
+ *
+ * Plan givens are the authority (they are validated copies of the stem);
+ * stem numbers are used when the plan is absent or does not carry the slot.
+ * Every value remembers where it came from so the tier rule can tell a
+ * grounded figure from a display-scaled one.
+ */
+import type { SlotValue, Slots } from "./catalog";
+
+export type SlotSource = "plan" | "stem" | "default";
+
+export interface PlanQuantity {
+  id: string;
+  symbol: string;
+  value: number;
+  unit?: string;
+  sourceText?: string;
+  /** Which turn-plan list the row came from: a derived value is a claim, never a source. */
+  origin?: "given" | "derived";
+}
+
+export interface SlotBag {
+  values: Slots;
+  sources: Record<string, SlotSource>;
+}
+
+export function emptyBag(): SlotBag {
+  return { values: {}, sources: {} };
+}
+
+export function setSlot(bag: SlotBag, key: string, value: SlotValue | null | undefined, source: SlotSource): void {
+  if (value === null || value === undefined) return;
+  if (typeof value === "number" && !Number.isFinite(value)) return;
+  if (Array.isArray(value) && value.length === 0) return;
+  // Plan beats stem beats default; never downgrade a source.
+  const rank: Record<SlotSource, number> = { plan: 3, stem: 2, default: 1 };
+  const existing = bag.sources[key];
+  if (existing && rank[existing] >= rank[source]) return;
+  bag.values[key] = value;
+  bag.sources[key] = source;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Plan quantities                                                            */
+/* ------------------------------------------------------------------------- */
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+export function collectPlanQuantities(turnPlan: unknown): PlanQuantity[] {
+  if (!isRecord(turnPlan)) return [];
+  const rows = [
+    ...(Array.isArray(turnPlan.givens) ? turnPlan.givens : []).map((row: unknown) => ({ row, origin: "given" as const })),
+    ...(Array.isArray(turnPlan.derived) ? turnPlan.derived : []).map((row: unknown) => ({ row, origin: "derived" as const })),
+  ];
+  return rows.flatMap(({ row, origin }, index) => {
+    if (!isRecord(row) || typeof row.value !== "number" || !Number.isFinite(row.value)) return [];
+    const id = typeof row.id === "string" && row.id.trim() ? row.id : `q${index + 1}`;
+    const symbol = typeof row.symbol === "string" && row.symbol.trim() ? row.symbol : id;
+    return [{
+      id,
+      symbol,
+      value: row.value,
+      unit: typeof row.unit === "string" ? row.unit : undefined,
+      sourceText: typeof row.sourceText === "string" ? row.sourceText : undefined,
+      origin,
+    }];
+  });
+}
+
+function normalizeKey(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/\\(?:mathrm|text|operatorname)/g, "")
+    .replace(/[_{}\\^\s-]/g, "")
+    .replace(/[^a-z0-9]/g, "");
+}
+
+/** First plan quantity whose id or symbol normalizes to one of the aliases. */
+function planQuantity(quantities: readonly PlanQuantity[], aliases: readonly string[]): PlanQuantity | null {
+  const wanted = aliases.map(normalizeKey);
+  return quantities.find((quantity) =>
+    wanted.includes(normalizeKey(quantity.id)) || wanted.includes(normalizeKey(quantity.symbol))) ?? null;
+}
+
+export function planNumber(quantities: readonly PlanQuantity[], aliases: readonly string[]): number | null {
+  return planQuantity(quantities, aliases)?.value ?? null;
+}
+
+/** A value the plan lists as a given (never one it derived), by id or symbol. */
+export function planGivenNumber(quantities: readonly PlanQuantity[], aliases: readonly string[]): number | null {
+  return planQuantity(quantities.filter((quantity) => quantity.origin === "given"), aliases)?.value ?? null;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Stem numbers                                                               */
+/* ------------------------------------------------------------------------- */
+
+/**
+ * A stem number: a mixed number "1 1/2", a fraction "3/4", a vulgar fraction
+ * "½" or "2½", or a decimal with an optional power of ten.
+ *
+ * The lookbehind keeps a match from starting inside another token, so the
+ * denominator of "1/2 m/s^2" is never read as "2 m/s^2" and the exponent of
+ * "s^2" is never a value. The lookahead keeps a decimal or a fraction from
+ * being cut short, while a full stop after a number ("is 1.5.") still ends it.
+ *
+ * Thousands separators. A comma followed by exactly three digits, with no
+ * space and no further digit, groups a number: "1,000 m" is 1000 and
+ * "12,500.5 kg" is 12500.5. A bracket holding only numbers, with a comma
+ * directly between two digits ("(1,000)", "(1,500,2)", "(2,3)", "[2,000]"),
+ * is a coordinate or a tuple and reads nothing at all, never 1000 or 1500 or
+ * a stray part; a bracket that also holds a word or unit ("(1,000 m)") reads
+ * normally. Outside brackets, a comma before any other digit count ("2,3") or
+ * a comma and a space ("1, 000") is a list read part by part. Three or more
+ * digits after a comma never end a number early or start one of their own:
+ * a malformed "1,0000" reads nothing, neither 1 nor 0.
+ */
+const GROUPED = String.raw`\d{1,3}(?:,\d{3})+(?:\.\d+)?`;
+const NUMERIC_BRACKET = String.raw`(?<=[(\[{][-+\d.,\s]*)(?=[-+\d.,\s]*[)\]}])(?:(?<=[(\[{][-+\d.,\s]*\d,)|(?=[-+\d.\s]*?\d,\d)|(?<=[(\[{][-+\d.,\s]*\d,\d[-+\d.,\s]*))`;
+const NUMBER = String.raw`(?<![\w.\/^])(?!(?<=\d,)\d{3,}(?!\d))(?!${NUMERIC_BRACKET})(-?(?:${GROUPED}|\d+ \d+\s*\/\s*\d+|\d+\s*\/\s*\d+|\d*[½¼¾]|\d+(?:\.\d+)?(?:\s*[x×]\s*10\s*\^?\s*-?\d+|e-?\d+)?))(?![\d½¼¾]|\.\d|\s*\/\s*\d|,\d{3})`;
+
+const VULGAR_FRACTIONS: Record<string, number> = { "½": 0.5, "¼": 0.25, "¾": 0.75 };
+
+/**
+ * The one stem number grammar. A generator that reads its own role values
+ * builds its pattern from `STEM_NUMBER` (capture group 1) and parses the
+ * capture with `parseStemNumber`, instead of a private `\d+` pattern.
+ */
+export const STEM_NUMBER = NUMBER;
+
+/**
+ * One component of a coordinate pair or tuple, for readers that match the
+ * whole bracket themselves ("P = (2, 0) m"). `STEM_NUMBER` refuses numbers in
+ * a numeric bracket so a bare "(1,000)" or "(2,3)" is never a scalar; a tuple
+ * reader needs the components, and a component is never thousands grouped.
+ */
+export const TUPLE_COMPONENT_NUMBER = String.raw`(?<![\w.\/^])(-?(?:\d+\s*\/\s*\d+|\d*[½¼¾]|\d+(?:\.\d+)?(?:\s*[x×]\s*10\s*\^?\s*-?\d+|e-?\d+)?))(?![\d½¼¾]|\.\d|\s*\/\s*\d)`;
+export function parseStemNumber(raw: string): number | null {
+  return parseNumber(raw);
+}
+
+function parseNumber(raw: string): number | null {
+  const trimmed = raw.trim();
+  const sign = trimmed.startsWith("-") ? -1 : 1;
+  const body = trimmed.replace(/^-\s*/, "");
+  const fraction = /^(?:(\d+) )?(\d+)\s*\/\s*(\d+)$/.exec(body);
+  if (fraction) {
+    const denominator = Number(fraction[3]);
+    if (denominator === 0) return null;
+    return sign * (Number(fraction[1] ?? 0) + Number(fraction[2]) / denominator);
+  }
+  const vulgar = /^(\d*)([½¼¾])$/.exec(body);
+  if (vulgar) return sign * (Number(vulgar[1] || 0) + VULGAR_FRACTIONS[vulgar[2]!]!);
+  if (/^\d{1,3}(?:,\d{3})+(?:\.\d+)?$/.test(body)) return sign * Number(body.replace(/,/g, ""));
+  const cleaned = body.replace(/\s+/g, "").replace(/[x×]10\^?(-?\d+)/i, "e$1");
+  const value = sign * Number(cleaned);
+  return Number.isFinite(value) ? value : null;
+}
+
+/** Text prepared for numeric extraction: unicode operators and superscripts folded. */
+export function prepareStem(question: string): string {
+  return question
+    .replace(/[–—−]/g, "-")
+    .replace(/[⁻⁺⁰¹²³⁴⁵⁶⁷⁸⁹]+/g, (exponent) => `^${[...exponent].map((digit) => ({ "⁻": "-", "⁺": "+", "⁰": "0", "¹": "1", "²": "2", "³": "3", "⁴": "4", "⁵": "5", "⁶": "6", "⁷": "7", "⁸": "8", "⁹": "9" })[digit]).join("")}`)
+    .replace(/µ/g, "μ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Every number immediately followed by a unit that matches `unit`. The unit
+ * must end there: "m/s" is not the start of "m/s^2".
+ */
+export function numbersWithUnit(stem: string, unit: RegExp): number[] {
+  const pattern = new RegExp(`${NUMBER}\\s*(?:${unit.source})(?![a-z]|\\s*[\\^/])`, "gi");
+  const values: number[] = [];
+  for (const match of stem.matchAll(pattern)) {
+    const value = parseNumber(match[1]!);
+    if (value !== null) values.push(value);
+  }
+  return values;
+}
+
+export function firstNumberWithUnit(stem: string, unit: RegExp): number | null {
+  return numbersWithUnit(stem, unit)[0] ?? null;
+}
+
+/** A number introduced by a phrase, e.g. "focal length (of)? 10 cm" or "f = 10 cm". */
+export function numberAfter(stem: string, phrase: RegExp, unit?: RegExp): number | null {
+  const tail = unit ? `\\s*(?:${unit.source})?` : "";
+  const pattern = new RegExp(`(?:${phrase.source})[^0-9\\-]{0,24}${NUMBER}${tail}`, "i");
+  const match = pattern.exec(stem);
+  return match ? parseNumber(match[1]!) : null;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Lengths                                                                     */
+/* ------------------------------------------------------------------------- */
+
+/**
+ * Lengths are read in centimetres, and the unit is *required*.
+ *
+ * `numberAfter` leaves the unit optional, which suits a named phrase where the
+ * convention is unambiguous ("focal length 10"), but it silently reads "an
+ * object at 0.2 m" as 0.2 cm — the same digits, a figure two orders of
+ * magnitude out, and no signal that anything went wrong. These readers capture
+ * the unit and normalise it, so a metre stays a metre.
+ */
+const LENGTH_UNIT = String.raw`cm|mm|metres?|meters?|m`;
+
+function lengthToCm(raw: string, unit: string): number | null {
+  const value = parseNumber(raw);
+  if (value === null) return null;
+  const normalized = unit.toLowerCase();
+  if (normalized === "mm") return value / 10;
+  if (normalized === "cm") return value;
+  return value * 100;
+}
+
+/** "focal length of 15 cm", "object distance is 0.2 m". */
+export function lengthAfterInCm(stem: string, phrase: RegExp): number | null {
+  const pattern = new RegExp(
+    `(?:${phrase.source})[^0-9\\-]{0,24}${NUMBER}\\s*(${LENGTH_UNIT})\\b`,
+    "i",
+  );
+  const match = pattern.exec(stem);
+  return match ? lengthToCm(match[1]!, match[2]!) : null;
+}
+
+/** "30 cm from the mirror", "0.2 m in front of the lens". */
+export function lengthBeforeInCm(stem: string, phrase: RegExp): number | null {
+  const pattern = new RegExp(
+    `${NUMBER}\\s*(${LENGTH_UNIT})\\b\\s*(?:${phrase.source})`,
+    "i",
+  );
+  const match = pattern.exec(stem);
+  return match ? lengthToCm(match[1]!, match[2]!) : null;
+}
+
+/**
+ * A bare symbol carrying a length, e.g. "f = 15 cm".
+ *
+ * The unit is what makes a single letter safe to read: `f` is a focal length
+ * in this topic and a frequency two topics away, and only "cm" tells them
+ * apart. The leading `[^a-z]` keeps it from firing inside a word.
+ */
+export function symbolLengthInCm(stem: string, symbol: RegExp): number | null {
+  const pattern = new RegExp(
+    `(?:^|[^a-z])(?:${symbol.source})\\s*[=:]\\s*${NUMBER}\\s*(${LENGTH_UNIT})\\b`,
+    "i",
+  );
+  const match = pattern.exec(stem);
+  return match ? lengthToCm(match[1]!, match[2]!) : null;
+}
+
+/** A named length requires its unit and cannot cross another quantity or clause. */
+export function lengthAfterInMetres(stem: string, phrase: RegExp): number | null {
+  const pattern = new RegExp(`(?:${phrase.source})\\s*(?:(?:is|of|equals?|equal to|[=:])\\s*)?${NUMBER}\\s*(km|cm|mm|metres?|meters?|m)(?![a-z]|\\s*[\\^/])`, "gi");
+  const values = [...stem.matchAll(pattern)].flatMap((match) => {
+    const value = parseNumber(match[1]!);
+    const unit = match[2]!.toLowerCase();
+    return value === null ? [] : [value * (unit === "km" ? 1000 : unit === "cm" ? 0.01 : unit === "mm" ? 0.001 : 1)];
+  });
+  const first = values[0];
+  return first !== undefined && values.every((value) => value === first) ? first : null;
+}
+
+/** A role-bound energy must carry its unit and agree across all mentions. */
+export function readEnergyAfterInEv(stem: string, phrase: RegExp): { value: number | null; conflicting: boolean } {
+  const pattern = new RegExp(`(?:${phrase.source})\\s*(?:(?:is|of|equals?|equal to|[=:])\\s*)?${NUMBER}\\s*(eV|J|joules?|electron[- ]?volts?)\\b`, "gi");
+  const values = [...stem.matchAll(pattern)].flatMap((match) => {
+    const value = parseNumber(match[1]!);
+    return value === null ? [] : [/^(?:J|joules?)$/i.test(match[2]!) ? value / 1.602176634e-19 : value];
+  });
+  const first = values[0];
+  const conflicting = first !== undefined && values.some((value) => Math.abs(value - first) > 1e-9 * Math.max(1, Math.abs(first), Math.abs(value)));
+  return { value: conflicting ? null : first ?? null, conflicting };
+}
+
+/** Wavelength extraction carries its unit and declines conflicting source values. */
+export function wavelengthAfterInNm(stem: string, phrase: RegExp): number | null {
+  const pattern = new RegExp(`(?:${phrase.source})[^0-9\\-]{0,24}${NUMBER}\\s*(nm|pm|[μu]m|mm|cm|m|angstroms?|Å)(?![\\p{L}\\p{N}_])`, "giu");
+  const values: number[] = [];
+  for (const match of stem.matchAll(pattern)) {
+    const value = parseNumber(match[1]!);
+    if (value === null) continue;
+    const unit = match[2]!.toLowerCase();
+    const factor = ({ nm: 1, pm: 0.001, μm: 1000, um: 1000, mm: 1e6, cm: 1e7, m: 1e9 } as Record<string, number>)[unit] ?? 0.1;
+    values.push(value * factor);
+  }
+  const first = values[0];
+  return first !== undefined && values.every((value) => Math.abs(value - first) <= 1e-9 * Math.max(1, Math.abs(first))) ? first : null;
+}
+
+/** A number followed by a phrase, e.g. "30 cm from a concave mirror". */
+export function numberBefore(stem: string, phrase: RegExp, unit?: RegExp): number | null {
+  const tail = unit ? `\\s*(?:${unit.source})` : "";
+  const pattern = new RegExp(`${NUMBER}${tail}\\s*(?:${phrase.source})`, "i");
+  const match = pattern.exec(stem);
+  return match ? parseNumber(match[1]!) : null;
+}
+
+export const UNIT = {
+  speed: /m\s*\/\s*s|m\s*s\^-1|ms\^-1|km\s*\/\s*h|kmph|km\s*h\^-1/,
+  accel: /m\s*\/\s*s\^2|m\s*s\^-2|ms\^-2/,
+  metre: /m(?:etres?|eters?)?\b/,
+  centimetre: /cm\b/,
+  millimetre: /mm\b/,
+  kilometre: /km\b/,
+  kilogram: /kg\b/,
+  gram: /g\b|grams?\b/,
+  newton: /N\b|newtons?\b/,
+  ohm: /Ω|ohms?\b|kΩ|k\s*ohms?\b/,
+  kiloohm: /kΩ|k\s*ohms?\b/,
+  volt: /V\b|volts?\b/,
+  ampere: /A\b|amperes?\b|amp\b/,
+  farad: /μF|uF|microfarad|pF|nF|F\b/,
+  tesla: /T\b|tesla\b/,
+  second: /s\b|sec(?:onds?)?\b/,
+  degree: /°|deg(?:rees?)?\b/,
+  ev: /eV\b/,
+  nm: /nm\b/,
+  hz: /Hz\b/,
+  coulomb: /C\b|μC|uC|nC|coulombs?\b/,
+  springConstant: /N\s*\/\s*m|N\s*m\^-1|Nm\^-1/,
+};
+
+export function firstAngle(stem: string): number | null {
+  return firstNumberWithUnit(stem, UNIT.degree);
+}
+
+export function allAngles(stem: string): number[] {
+  return numbersWithUnit(stem, UNIT.degree);
+}
+
+/** "coefficient of friction 0.4", "μ = 0.4", "mu = 0.4", "coefficient of kinetic friction is 0.4". */
+export function frictionCoefficient(stem: string): number | null {
+  return numberAfter(stem, /coefficient of (?:kinetic |static |sliding |limiting )?friction(?: between [^0-9]{0,40})?(?: is| of| =|:)?|\bμ\s*[=:]|\bmu\s*[=:]|μ_?[ks]\s*[=:]/);
+}
+
+/** Refractive index as "refractive index (of) 1.5", "n = 1.5", "μ = 1.5", "√3", "1.5" after 'index'. */
+export function refractiveIndex(stem: string): number | null {
+  if (/refractive index[^0-9]{0,30}(?:√3|root ?3|sqrt\(?3\)?)/i.test(stem) || /(?:μ|n)\s*=\s*(?:√3|root ?3)/i.test(stem)) return Math.sqrt(3);
+  if (/refractive index[^0-9]{0,30}(?:√2|root ?2|sqrt\(?2\)?)/i.test(stem) || /(?:μ|n)\s*=\s*(?:√2|root ?2)/i.test(stem)) return Math.SQRT2;
+  const direct = numberAfter(stem, /refractive index(?: of (?:the )?(?:glass|prism|material|medium|water|liquid))?(?: is| of| =|:)?|\bn\s*=|\bμ\s*=|\bmu\s*=/);
+  if (direct !== null && direct >= 1 && direct < 4) return direct;
+  return null;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Expressions                                                                */
+/* ------------------------------------------------------------------------- */
+
+const EXPRESSION_CHARS = /[0-9xty+\-*/^().\s]|sin|cos|tan|sqrt|abs|ln|log|exp|pi|e/;
+
+/** Read a safe expression body starting at `start`, stopping at the first foreign token. */
+function readExpression(source: string, start = 0): string {
+  const allowed = new Set(["x", "t", "pi", "e", "sin", "cos", "tan", "sqrt", "abs", "ln", "log", "exp"]);
+  let index = start;
+  while (index < source.length) {
+    const character = source[index]!;
+    if (/[0-9.+\-*/^()\s]/.test(character)) { index += 1; continue; }
+    if (/[A-Za-z_]/.test(character)) {
+      const identifier = source.slice(index).match(/^[A-Za-z_][A-Za-z0-9_]*/)?.[0] ?? "";
+      if (!allowed.has(identifier.toLowerCase())) break;
+      index += identifier.length;
+      continue;
+    }
+    break;
+  }
+  return normalizeExpression(source.slice(start, index));
+}
+
+/** Exam-style notation on one complete clause: explicit `*`, `^`, no unicode.
+ * A dangling operator is preserved. Stripping it would turn an unfinished
+ * clause into the prefix recovered by the slot reader. */
+export function normalizeCompleteExpression(raw: string): string {
+  let source = raw
+    .replace(/[−–—]/g, "-")
+    .replace(/²/g, "^2")
+    .replace(/³/g, "^3")
+    .replace(/π/g, "pi")
+    .replace(/\s+/g, "");
+  source = source.replace(/\|([^|]+)\|/g, (_all, inner: string) => `abs(${inner})`);
+  source = source.replace(/\b(sin|cos|tan|sqrt|ln|log|exp)(\d+(?:\.\d+)?)([xt])\b/gi, (_, fn: string, n: string, v: string) => `${fn.toLowerCase()}(${n}*${v})`);
+  source = source.replace(/\b(sin|cos|tan|sqrt|ln|log|exp)([xt])\b/gi, (_, fn: string, v: string) => `${fn.toLowerCase()}(${v})`);
+  source = source.replace(/([xt])(\d+)\b/g, "$1^$2");
+  source = source.replace(/(\d)([xte(])/g, "$1*$2");
+  source = source.replace(/([xt])\(/g, "$1*(");
+  source = source.replace(/\)([xt0-9(])/g, ")*$1");
+  source = source.replace(/([xt])([xt])\b/g, "$1*$2");
+  return source.replace(/^\+/, "");
+}
+
+/** Slot recovery may stop on an unsupported tail and drop its dangling operator. */
+function normalizeExpression(raw: string): string {
+  return normalizeCompleteExpression(raw).replace(/[+\-*/^(.]+$/, "");
+}
+
+function isSafeExpression(expression: string, variable: "x" | "t" = "x"): boolean {
+  if (!expression) return false;
+  const other = variable === "x" ? "t" : "x";
+  if (new RegExp(`\\b${other}\\b`).test(expression)) return false;
+  return EXPRESSION_CHARS.test(expression) && !/[^0-9xte+\-*/^().a-z]/i.test(expression);
+}
+
+/** Right-hand sides of `y = …`, `f(x) = …`, `F = …`, and `… = y`. */
+export function explicitFunctions(question: string, lhs: RegExp = /\b(?:y|f\s*\(\s*x\s*\)|g\s*\(\s*x\s*\)|F|F\s*\(\s*x\s*\))\s*=\s*/g): string[] {
+  const stem = prepareStem(question);
+  const found: string[] = [];
+  for (const match of stem.matchAll(lhs)) {
+    const expression = readExpression(stem, (match.index ?? 0) + match[0].length);
+    if (expression && isSafeExpression(expression) && /x/.test(expression) && !found.includes(expression)) found.push(expression);
+  }
+  for (const match of stem.matchAll(/([0-9x^+\-*/().]+)\s*=\s*y\b/g)) {
+    const expression = normalizeExpression(match[1] ?? "");
+    if (expression && isSafeExpression(expression) && /x/.test(expression) && !found.includes(expression)) found.push(expression);
+  }
+  return found.slice(0, 3);
+}
+
+/** `x = f(t)` in a kinematics stem; returned with `t` renamed to `x` for the curve operators. */
+export function positionOfTime(question: string): string | null {
+  const stem = prepareStem(question);
+  const match = /(?:^|[^\w])(?:x|s)\s*=\s*/i.exec(stem);
+  if (!match) return null;
+  const expression = readExpression(stem, (match.index ?? 0) + match[0].length);
+  if (!expression || !/\bt\b/.test(expression) || !isSafeExpression(expression, "t")) return null;
+  return expression.replace(/\bt\b/g, "x");
+}
+
+/** Interval like "from x = 0 to x = 4", "between x = 1 and x = 3", "0 ≤ x ≤ 4", "[0, 4]". */
+export function xInterval(question: string): [number, number] | null {
+  const stem = prepareStem(question);
+  const patterns = [
+    /x\s*=\s*(-?\d+(?:\.\d+)?)\s*(?:m\b)?\s*(?:to|and|,)\s*x\s*=\s*(-?\d+(?:\.\d+)?)/i,
+    /(-?\d+(?:\.\d+)?)\s*(?:≤|<=|<)\s*x\s*(?:≤|<=|<)\s*(-?\d+(?:\.\d+)?)/i,
+    /\[\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\]/,
+  ];
+  for (const pattern of patterns) {
+    const match = pattern.exec(stem);
+    if (!match) continue;
+    const a = Number(match[1]);
+    const b = Number(match[2]);
+    if (Number.isFinite(a) && Number.isFinite(b) && a !== b) return a < b ? [a, b] : [b, a];
+  }
+  return null;
+}
+
+/** "at x = 2", "at the point where x = 1", "when x = 1", "at (1, 2)". */
+export function pointOfInterestX(question: string): number | null {
+  const stem = prepareStem(question);
+  const match = /(?:at|where|when)\s+(?:the\s+point\s+(?:where\s+)?)?x\s*=\s*(-?\d+(?:\.\d+)?)/i.exec(stem)
+    ?? /at\s*\(\s*(-?\d+(?:\.\d+)?)\s*,\s*-?\d+(?:\.\d+)?\s*\)/i.exec(stem);
+  if (!match) return null;
+  const value = Number(match[1]);
+  return Number.isFinite(value) ? value : null;
+}
+
+/** All (x, y) or (x, y, z) coordinate tuples in the stem. */
+export function coordinateTuples(question: string): number[][] {
+  const stem = prepareStem(question);
+  const tuples: number[][] = [];
+  for (const match of stem.matchAll(/\(\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)(?:\s*,\s*(-?\d+(?:\.\d+)?))?\s*\)/g)) {
+    const tuple = [match[1], match[2], match[3]].filter((item): item is string => item !== undefined).map(Number);
+    if (tuple.every(Number.isFinite)) tuples.push(tuple);
+  }
+  return tuples;
+}

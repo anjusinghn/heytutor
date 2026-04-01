@@ -1,0 +1,543 @@
+import { getSegmentCommands, type DrawCommand, type TutorSegment } from "./drawingProtocol";
+import { fitWorkTextCommand } from "../layout/lessonPlanner";
+import type { VerifiedDiagram, VerifiedDiagramAnchor } from "./verifiedDiagram";
+import { resolveVerifiedDiagramFocusTargets } from "./semanticGesture";
+import {
+  REFERENCE_PICTURE_ZONE,
+  isReferencePictureId,
+  parsePictureCommandParams,
+  type PicturePass,
+  type PicturePlacement,
+} from "./referencePicture";
+
+export { resolveVerifiedDiagramFocusTarget } from "./semanticGesture";
+
+const MARKER_ACTION_PATTERN =
+  /\b(?:let me draw|i(?:'|’)ll draw|i will draw|let(?:'|’)s draw|i will mark|let me mark|i will label|let me label|i(?:'|’)ll label|let(?:'|’)s label|let(?:'|’)s circle|i will circle|let me circle|now circle)\b/i;
+
+export interface BoardTextRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  text?: string;
+}
+
+export interface PreparedVerifiedSegments {
+  segments: TutorSegment[];
+  blockedCommandCount: number;
+  droppedSegmentCount: number;
+  /** Write-less FOCUS segments folded into the run they continue. */
+  foldedFocusSegmentCount: number;
+}
+
+function cleanMarkerActionNarration(narration: string): string {
+  if (!MARKER_ACTION_PATTERN.test(narration)) return narration;
+
+  const sentences = narration.match(/[^.!?]+[.!?]?/g) ?? [narration];
+  const kept = sentences
+    .filter((sentence) => !MARKER_ACTION_PATTERN.test(sentence))
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return kept;
+}
+
+export function anchorToTextRect(anchor: VerifiedDiagramAnchor): BoardTextRect {
+  return {
+    x: anchor.x,
+    y: anchor.y,
+    width: anchor.width,
+    height: anchor.height,
+    text: anchor.labels[0],
+  };
+}
+
+/** The one entity a reference picture command may name. */
+export const REFERENCE_PICTURE_ENTITY_ID = "reference_picture";
+/** Rounding slack on the zone edges; `fitPicture` rounds to whole px. */
+const REFERENCE_PICTURE_ZONE_SLACK_PX = 1;
+/** Below this a picture is a smudge, not a diagram anyone can read. */
+const REFERENCE_PICTURE_MIN_SIDE_PX = 16;
+
+export interface AdmittedReferencePictureCommand {
+  pictureId: string;
+  placement: PicturePlacement;
+  pass: PicturePass;
+  boardLengthPx: number;
+}
+
+/**
+ * A `DRAW_PICTURE` the board may execute, or null. The teaching stream cannot
+ * emit this type (it is not in `DRAW_COMMAND_TYPES`); this is the check for
+ * everything else that reaches the executor: a runtime command, a persisted
+ * lesson, or a replay. It must name a server-minted picture id, carry the
+ * picture's own entity, parse as `[x, y, w, h, pass, boardLengthPx]`, and sit
+ * inside `REFERENCE_PICTURE_ZONE`. Whether the id names a picture the server
+ * actually stored is settled by the asset fetch, which only succeeds for one.
+ */
+export function admitReferencePictureCommand(command: DrawCommand): AdmittedReferencePictureCommand | null {
+  if (command.type !== "DRAW_PICTURE") return null;
+  if (!isReferencePictureId(command.text)) return null;
+  if (command.semanticRef?.entityId !== REFERENCE_PICTURE_ENTITY_ID) return null;
+  const parsed = parsePictureCommandParams(command.params);
+  if (!parsed) return null;
+  const primitiveId = command.semanticRef.primitiveId;
+  if (primitiveId !== undefined && primitiveId !== `${REFERENCE_PICTURE_ENTITY_ID}.${parsed.pass}`) return null;
+  const { x, y, width, height } = parsed.placement;
+  const zone = REFERENCE_PICTURE_ZONE;
+  const slack = REFERENCE_PICTURE_ZONE_SLACK_PX;
+  const inside =
+    x >= zone.x - slack &&
+    y >= zone.y - slack &&
+    x + width <= zone.x + zone.width + slack &&
+    y + height <= zone.y + zone.height + slack;
+  if (!inside || width < REFERENCE_PICTURE_MIN_SIDE_PX || height < REFERENCE_PICTURE_MIN_SIDE_PX) return null;
+  return { pictureId: command.text, ...parsed };
+}
+
+/**
+ * The teaching model never owns structural ink. A verified scene may coexist
+ * only with equation writing in the work area, timing pauses, and semantic
+ * gestures that resolve to compiler-owned entities or work-area rows.
+ *
+ * `DRAW_PICTURE` is the reference picture tier's own authority, not scene
+ * geometry, and its answer does not depend on `diagram`: the executor asks
+ * with a null diagram too, so a runtime or persisted picture command passes
+ * the same check whether or not a figure is on the board.
+ */
+export function isBlockedVerifiedDiagramCommand(
+  command: DrawCommand,
+  diagram: VerifiedDiagram | null,
+): boolean {
+  if (command.type === "DRAW_PICTURE") return admitReferencePictureCommand(command) === null;
+  if (command.type === "PAUSE") return false;
+  if (command.type === "SUPERSEDE") return true;
+  if (command.type === "EMPHASIZE") return false;
+  if (command.type === "FOCUS") {
+    // On a code lesson a FOCUS names a frame of the worked example, not an
+    // entity of the figure currently drawn. The conductor advances the
+    // walk-through to that frame and retargets the spotlight onto whatever the
+    // new frame actually contains, so there is nothing to validate here.
+    //
+    // Validating it anyway is what froze the board: every figure beat the
+    // model narrated was dropped as an unverified marker before the conductor
+    // ever saw it, so the figure never advanced and the tutor talked over a
+    // still picture for the rest of the lesson.
+    if (diagram?.layout === "code_lesson") return false;
+    return resolveVerifiedDiagramFocusTargets(command, diagram).length === 0;
+  }
+  if (command.type === "POINT") {
+    // A POINT is a FOCUS that draws nothing: the marker stands at the named
+    // entities while the step is spoken. It had no case here and fell through
+    // to "blocked", so every pointing beat the code-lesson conductor issued
+    // was dropped before the pen saw it: 81.8 s of DSA speech with no ink,
+    // measured on the coupling audit. Same rule as FOCUS: a code lesson's
+    // beats pass, elsewhere it must name something on the figure.
+    if (diagram?.layout === "code_lesson") return false;
+    return resolveVerifiedDiagramFocusTargets({ ...command, type: "FOCUS" }, diagram).length === 0;
+  }
+  if (command.type === "ANNOTATE") {
+    const requested = (command.text ?? command.semanticRef?.entityId ?? "").trim().toLowerCase();
+    if (!requested || !diagram) return true;
+    return resolveVerifiedDiagramFocusTargets({ ...command, type: "FOCUS" }, diagram).length === 0 &&
+      !diagram.deferredAnnotations?.some((entry) =>
+        entry.entityId.split(",").some((id) => id.trim().toLowerCase() === requested));
+  }
+  // WRITE coordinates are only suggestions. The runtime fits and allocates
+  // symbolic work in the left column before execution.
+  if (command.type === "WRITE") return false;
+  // TYPE reveals one pre-committed code-lesson block; the code panel resolves
+  // the id against the committed plan and ignores unknown blocks.
+  if (command.type === "TYPE") return false;
+  // FRAME advances the worked example to its next pre-compiled figure. The
+  // runtime inserts it, not the model, so there is nothing here to validate.
+  if (command.type === "FRAME") return false;
+  return true;
+}
+
+/**
+ * Remove unverified marker commands before they reach the animation queue.
+ * Useful narration is retained even when its associated marker gesture is
+ * rejected, preventing diagram validation from interrupting speech.
+ */
+export function spokenFocusTarget(
+  narration: string,
+  diagram: VerifiedDiagram | null,
+): VerifiedDiagramAnchor | null {
+  return spokenFocusTargets(narration, diagram)[0] ?? null;
+}
+
+/**
+ * Every figure part the narration names explicitly, in the order it names
+ * them. One sentence often introduces several: "M is the mirror, C is the
+ * centre" names two, and each gets its own gesture when its name is spoken.
+ * The first name found wins ties for an anchor named twice.
+ */
+function spokenFocusTargets(
+  narration: string,
+  diagram: VerifiedDiagram | null,
+): VerifiedDiagramAnchor[] {
+  if (!diagram || diagram.anchors.length === 0) return [];
+  const text = narration.trim();
+  if (!text) return [];
+
+  const found = new Map<string, { anchor: VerifiedDiagramAnchor; at: number }>();
+  const note = (anchor: VerifiedDiagramAnchor, at: number) => {
+    const existing = found.get(anchor.id);
+    if (!existing || at < existing.at) found.set(anchor.id, { anchor, at });
+  };
+
+  for (const anchor of diagram.anchors) {
+    const names = uniqueNames([anchor.id, ...anchor.labels]).filter((name) => name.length <= 3);
+    for (const name of names) {
+      const at = spokenNameIndex(text, name);
+      if (at >= 0) note(anchor, at);
+    }
+  }
+
+  for (const rule of SPOKEN_ROLE_CUES) {
+    const cue = rule.cue.exec(text);
+    if (!cue) continue;
+    const matches = diagram.anchors.filter((anchor) =>
+      uniqueNames([anchor.id, ...anchor.labels]).some((name) => rule.name.test(name)));
+    matches.sort((first, second) => anchorArea(first) - anchorArea(second));
+    if (matches[0]) note(matches[0], cue.index);
+  }
+
+  const labeled = diagram.anchors
+    .map((anchor) => {
+      const positions = spokenDisplayLabels(anchor)
+        .map((name) => spokenNameIndex(text, name))
+        .filter((at) => at >= 0);
+      return positions.length > 0 ? { anchor, at: Math.min(...positions) } : null;
+    })
+    .filter((entry): entry is { anchor: VerifiedDiagramAnchor; at: number } => entry !== null);
+  // A display label can name a whole apparatus and one of its parts alike;
+  // the smaller part is the one a teacher points at.
+  labeled.sort((first, second) => anchorArea(first.anchor) - anchorArea(second.anchor));
+  for (const entry of labeled) note(entry.anchor, entry.at);
+
+  return [...found.values()]
+    .sort((first, second) => first.at - second.at)
+    .map((entry) => entry.anchor);
+}
+
+const DEVANAGARI = /\p{Script=Devanagari}/u;
+
+/**
+ * The board stays in English on a Hinglish lesson: only the voice mixes
+ * languages. The handwriting has no Devanagari glyphs, so a row the model
+ * wrote in Devanagari would draw as gaps. It is dropped; the narration plays.
+ */
+export function isDevanagariWrite(command: DrawCommand): boolean {
+  return command.type === "WRITE" && DEVANAGARI.test(command.text ?? "");
+}
+
+export function prepareVerifiedLessonSegments(
+  segments: TutorSegment[],
+  diagram: VerifiedDiagram | null,
+): PreparedVerifiedSegments {
+  let blockedCommandCount = 0;
+  let droppedSegmentCount = 0;
+  const prepared: TutorSegment[] = [];
+
+  for (const segment of segments) {
+    const commands = getSegmentCommands(segment);
+    const withSpokenFocus = attachSpokenFocusCommand(commands, segment.narration, diagram);
+    const narration = spokenFocusNarration(
+      cleanMarkerActionNarration(segment.narration),
+      withSpokenFocus,
+      diagram,
+    );
+    if (withSpokenFocus.length === 0) {
+      if (!narration) {
+        droppedSegmentCount += 1;
+        continue;
+      }
+      prepared.push({ ...segment, narration, command: null, commands: undefined });
+      continue;
+    }
+
+    const keptCommands = withSpokenFocus.flatMap((command) => {
+      const candidates = command.type === "WRITE" ? fitWorkTextCommand(command) : [command];
+      return candidates.filter((candidate) => {
+        if (!isBlockedVerifiedDiagramCommand(candidate, diagram) && !isDevanagariWrite(candidate)) return true;
+        blockedCommandCount += 1;
+        return false;
+      });
+    });
+
+    if (keptCommands.length === 0 && !narration) {
+      droppedSegmentCount += 1;
+      continue;
+    }
+
+    prepared.push({
+      ...segment,
+      narration,
+      command: keptCommands[0] ?? null,
+      commands: keptCommands.length > 0 ? keptCommands : undefined,
+    });
+  }
+
+  const folded = foldWritelessFocusRuns(prepared, diagram);
+  return {
+    segments: folded.segments,
+    blockedCommandCount,
+    droppedSegmentCount,
+    foldedFocusSegmentCount: folded.foldedFocusSegmentCount,
+  };
+}
+
+/**
+ * A teaching segment that points at the figure and writes nothing. Openings,
+ * figure intros and scene text are runtime beats, never folded.
+ */
+function isWritelessFocusSegment(segment: TutorSegment): boolean {
+  if (segment.verifiedDiagramIntro || segment.sceneText || segment.delivery !== undefined) return false;
+  const commands = getSegmentCommands(segment);
+  return commands.some((command) => command.type === "FOCUS") &&
+    !commands.some((command) => command.type === "WRITE" || command.type === "TYPE");
+}
+
+function isNarrationOnlySegment(segment: TutorSegment): boolean {
+  return getSegmentCommands(segment).length === 0 && !segment.verifiedDiagramIntro &&
+    !segment.sceneText && segment.delivery === undefined;
+}
+
+/**
+ * Speak a run of write-less segments as one.
+ *
+ * Narrations join in spoken order. Commands keep their own `charPosition`
+ * (an index into the whole response, not into a segment) and their own
+ * `narrationBefore` (the words since the previous tag), so each cue still
+ * names the same words. A FOCUS repeated on one target is kept once, at its
+ * first mention: the schedule anchors a FOCUS on the earliest time its name
+ * is spoken, so a second copy would only trace the same words again.
+ */
+function mergeWritelessRun(run: readonly TutorSegment[]): TutorSegment {
+  const narration = run.map((segment) => segment.narration.trim()).filter(Boolean).join(" ");
+  const seenFocus = new Set<string>();
+  const commands = run.flatMap(getSegmentCommands).filter((command) => {
+    if (command.type !== "FOCUS") return true;
+    const key = (command.text ?? command.semanticRef?.entityId ?? "").trim().toLowerCase();
+    if (!key) return true;
+    if (seenFocus.has(key)) return false;
+    seenFocus.add(key);
+    return true;
+  });
+  return { ...run[0]!, narration, command: commands[0] ?? null, commands };
+}
+
+/**
+ * The most words one folded run speaks as a single request. A run is
+ * released as its own segment once the next step would cross it, and a new
+ * run starts with that step. The recorded runs it was built for are 247 to
+ * 398 characters (v1 to v3 lessons), so they still fold whole; a long run
+ * pays one voice start per cap instead of one per step, and no request
+ * nears a provider's text limit (Sarvam takes 2,500 characters) or waits on
+ * the whole response before it is spoken.
+ */
+export const MAX_FOLDED_RUN_CHARS = 600;
+
+/**
+ * Streaming form of `foldWritelessFocusRuns`: push prepared segments in
+ * order, emit what `push` returns, and `flush` once the response ends. A
+ * write-less FOCUS segment is held until the next segment shows whether a
+ * run follows, or until the run reaches `MAX_FOLDED_RUN_CHARS`.
+ */
+export function createWritelessFocusFolder(diagram: VerifiedDiagram | null): {
+  push: (segment: TutorSegment) => TutorSegment[];
+  flush: () => TutorSegment[];
+  foldedFocusSegmentCount: () => number;
+} {
+  // A code lesson's FOCUS advances its worked example; it is not a gesture.
+  const enabled = diagram?.layout !== "code_lesson";
+  let held: TutorSegment[] = [];
+  let heldFocus = 0;
+  let heldChars = 0;
+  let folded = 0;
+  const release = (): TutorSegment[] => {
+    const run = held;
+    const focusCount = heldFocus;
+    held = [];
+    heldFocus = 0;
+    heldChars = 0;
+    if (focusCount < 2) return run;
+    folded += focusCount - 1;
+    return [mergeWritelessRun(run)];
+  };
+  const hold = (segment: TutorSegment, focus: boolean): TutorSegment[] => {
+    const words = segment.narration.trim().length;
+    // Joined with one space, as `mergeWritelessRun` joins them.
+    const joined = heldChars === 0 ? words : heldChars + (words > 0 ? 1 + words : 0);
+    const out = held.length > 0 && joined > MAX_FOLDED_RUN_CHARS ? release() : [];
+    // A spoken tail cut off by the cap is spoken on its own, never opens a run.
+    if (!focus && held.length === 0) return [...out, segment];
+    held.push(segment);
+    if (focus) heldFocus += 1;
+    if (words > 0) heldChars = heldChars === 0 ? words : heldChars + 1 + words;
+    return out;
+  };
+  return {
+    push: (segment) => {
+      if (!enabled) return [segment];
+      if (isWritelessFocusSegment(segment)) return hold(segment, true);
+      // A sentence's spoken tail stays with the words before it.
+      if (isNarrationOnlySegment(segment) && held.length > 0) return hold(segment, false);
+      return [...release(), segment];
+    },
+    flush: release,
+    foldedFocusSegmentCount: () => folded,
+  };
+}
+
+/**
+ * The teaching prompt allows one write-less FOCUS step in a row; the model
+ * still sends runs of them (v3 p3e2-t1 had three, p2e1-t1 two), and each
+ * one is its own segment with its own voice start. A run is spoken as one
+ * segment: the marker still reaches every part on its own words, and the
+ * board never waits through a chain of separately started pointing beats.
+ *
+ * The run is not folded into the WRITE after it. A row's cue is matched
+ * from the start of its segment's words, and pointing steps name the very
+ * quantities the next row writes ("v_air ... v_wind ... v_ground", then
+ * v_ground = v_air + v_wind), so the row would start on the pointing words.
+ */
+export function foldWritelessFocusRuns(
+  segments: readonly TutorSegment[],
+  diagram: VerifiedDiagram | null,
+): { segments: TutorSegment[]; foldedFocusSegmentCount: number } {
+  const folder = createWritelessFocusFolder(diagram);
+  const out = segments.flatMap((segment) => folder.push(segment));
+  out.push(...folder.flush());
+  return { segments: out, foldedFocusSegmentCount: folder.foldedFocusSegmentCount() };
+}
+
+/**
+ * Infer a FOCUS for each figure part the step names aloud when the model
+ * tagged none. The inference only fills a gap: a step that carries its own
+ * FOCUS, or still has one in its narration text, is the model's call and
+ * gets nothing added. Before that rule 4 of the 7 gestures on the mirror
+ * lesson were inferred, two of them wrong, and the point I was traced three
+ * times because the tag and the inference both fired.
+ */
+function attachSpokenFocusCommand(
+  commands: DrawCommand[],
+  narration: string,
+  diagram: VerifiedDiagram | null,
+): DrawCommand[] {
+  if (commands.some((command) => command.type === "FOCUS")) return commands;
+  if (/\[FOCUS\b/i.test(narration)) return commands;
+  // Never on a code lesson. There a FOCUS is a beat in the worked example, not
+  // a gesture, so one inferred from a number in the narration would advance
+  // the figure behind the tutor's back, and a step about a line of code would
+  // move the picture the previous step was still explaining.
+  if (diagram?.layout === "code_lesson") return commands;
+  const anchors = spokenFocusTargets(narration, diagram);
+  if (anchors.length === 0) return commands;
+  const inferred = anchors.map((anchor): DrawCommand => {
+    const emphasis = spokenFocusEmphasis(narration, anchor);
+    return {
+      type: "FOCUS",
+      params: [],
+      text: emphasis === "trace" ? anchor.id : `${anchor.id}|${emphasis}`,
+      charPosition: 0,
+      narrationBefore: narration,
+      semanticRef: { entityId: anchor.id },
+    };
+  });
+  return [...commands, ...inferred];
+}
+
+function spokenFocusEmphasis(
+  narration: string,
+  anchor: VerifiedDiagramAnchor,
+): "trace" | "spotlight" | "pulse" {
+  if (/\b(?:circle|encircle|ring)\b/i.test(narration) || isCompactAnchor(anchor)) return "pulse";
+  if (/\b(?:only this|just this|spotlight)\b/i.test(narration)) return "spotlight";
+  return "trace";
+}
+
+function isCompactAnchor(anchor: VerifiedDiagramAnchor): boolean {
+  return Math.max(anchor.width, anchor.height) <= 28;
+}
+
+function spokenFocusNarration(
+  cleaned: string,
+  commands: DrawCommand[],
+  diagram: VerifiedDiagram | null,
+): string {
+  if (cleaned) return cleaned;
+  const focus = commands.find((command) => command.type === "FOCUS");
+  if (!focus || !diagram) return cleaned;
+  const anchor = resolveVerifiedDiagramFocusTargets(focus, diagram)[0];
+  const name = anchor?.labels.find((label) => label.length <= 12 && label !== anchor.id) ?? anchor?.id;
+  return name ? `notice ${name}.` : cleaned;
+}
+
+const SPOKEN_ROLE_CUES: ReadonlyArray<{ cue: RegExp; name: RegExp }> = [
+  { cue: /\b(?:the |this )?(?:image point|paraxial image|image)\b/i, name: /^(?:I|image(?:[_\s-]?base)?)$/i },
+  { cue: /\b(?:the |this )?(?:object point|point object|object)\b/i, name: /^(?:O|object(?:[_\s-]?base)?)$/i },
+  { cue: /\b(?:the )?(?:focal point|focus)\b/i, name: /^(?:F|focus)$/i },
+  { cue: /\b(?:centre|center) of curvature\b/i, name: /^(?:C|center|centre)$/i },
+  { cue: /\b(?:the )?(?:pole|vertex)\b/i, name: /^(?:P|V|pole|vertex)$/i },
+];
+
+/**
+ * Where the narration names a figure part explicitly, or -1.
+ *
+ * Names of three characters or fewer must match the drawn case. The cue words
+ * around them stay case-blind, but "f is the focal length" is the quantity f,
+ * not the point F, and "m is positive" is the magnification, not the mirror M:
+ * both were traced on the mirror lesson when the letter alone decided.
+ */
+function spokenNameIndex(narration: string, name: string): number {
+  const trimmed = name.trim();
+  if (!trimmed) return -1;
+  const escaped = trimmed.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const short = trimmed.length <= 3;
+  const cues = trimmed.length === 1
+    ? "point|label|called"
+    : short
+      ? "point|label|called|notice|follow|look at"
+      : "called|notice|follow|look at";
+  const pattern = short
+    ? `(?:\\b(?:${cues})\\s+(${escaped})\\b|\\bthis is\\s+(${escaped})\\b|\\b(${escaped})\\s+is\\b)`
+    : `(?:\\b(?:${cues})\\s+(?:the\\s+)?(${escaped})\\b|\\b(?:the|this|that)\\s+(${escaped})\\b(?!\\s+[A-Za-z]{3,})|\\b(${escaped})\\s+is\\b)`;
+  const matcher = new RegExp(pattern, "gi");
+  for (let match = matcher.exec(narration); match; match = matcher.exec(narration)) {
+    const spoken = match[1] ?? match[2] ?? match[3] ?? "";
+    if (short && spoken !== trimmed) continue;
+    return match.index + match[0].indexOf(spoken);
+  }
+  return -1;
+}
+
+function uniqueNames(values: readonly (string | undefined)[]): string[] {
+  const names: string[] = [];
+  for (const value of values) {
+    const trimmed = value?.trim();
+    if (trimmed && !names.includes(trimmed)) names.push(trimmed);
+  }
+  return names;
+}
+
+const DISPLAY_LABEL_STOP = new Set([
+  "the", "and", "or", "of", "to", "a", "an", "is", "at", "on", "for", "from", "this", "that",
+]);
+
+function spokenDisplayLabels(anchor: VerifiedDiagramAnchor): string[] {
+  return uniqueNames([anchor.id, ...anchor.labels]).filter((name) => {
+    if (name.length < 4 || name.length > 24) return false;
+    if (/_/.test(name)) return false;
+    if (DISPLAY_LABEL_STOP.has(name.toLowerCase())) return false;
+    return true;
+  });
+}
+
+function anchorArea(anchor: VerifiedDiagramAnchor): number {
+  return Math.max(anchor.width, 1) * Math.max(anchor.height, 1);
+}

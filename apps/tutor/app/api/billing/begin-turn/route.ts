@@ -1,0 +1,52 @@
+import { beginTurnFromRequest } from "@/lib/billing/gate";
+import { billingResponse } from "@/lib/billing/errors";
+import { cacheUsageOnUser } from "@/lib/billing/ledger";
+import {
+  resolveDiagramStrictSubjects,
+  resolveDiagramYieldPolicy,
+  resolveDiagramCurveLabels,
+  resolveOpticsArchetypeInStrict,
+  resolveSolverDisagreementStops,
+  resolveReferencePictureEnabled,
+  resolveReferencePicturePartFocusEnabled,
+} from "@/lib/scene/diagramStrategy.server";
+import { resolveDoubtPointingEnabled } from "@/lib/scene/doubtPointingFlag";
+import { resolveDoubtFiguresEnabled } from "@/lib/boards/doubtFigure";
+import { resolveLessonFiguresEnabled } from "@/lib/boards/lessonFigures";
+
+export async function POST(request: Request): Promise<Response> {
+  const startedAt = Date.now();
+  const result = await beginTurnFromRequest(request);
+  if (result instanceof Response) {
+    console.error(`[billing] begin-turn denied ${result.status} ${Date.now() - startedAt}ms`);
+    return result;
+  }
+  if (!result.grant) {
+    return billingResponse("no_grant", result.remainingPct);
+  }
+  void cacheUsageOnUser({
+    userId: result.grant.userId,
+    planId: result.planId,
+    remainingPct: result.remainingPct,
+  }).catch((error) => {
+    console.error("[billing] cache update failed", error);
+  });
+  return Response.json({
+    remainingPct: result.remainingPct,
+    remaining: result.remainingPct,
+    planId: result.planId,
+    nextResetAt: result.nextResetAt,
+    ttsCharsRemaining: result.grant.ttsCharsRemaining,
+    diagramStrategy: result.diagramStrategy,
+    diagramStrictSubjects: resolveDiagramStrictSubjects(),
+    diagramYieldPolicy: resolveDiagramYieldPolicy(),
+    diagramCurveLabels: resolveDiagramCurveLabels(),
+    opticsArchetypeInStrict: resolveOpticsArchetypeInStrict(),
+    ...(resolveSolverDisagreementStops() ? { solverDisagreementStops: true } : {}),
+    referencePicture: resolveReferencePictureEnabled(),
+    referencePicturePartFocus: resolveReferencePicturePartFocusEnabled(),
+    doubtPointing: resolveDoubtPointingEnabled(),
+    doubtFigures: resolveDoubtFiguresEnabled(),
+    lessonFigures: resolveLessonFiguresEnabled(),
+  });
+}

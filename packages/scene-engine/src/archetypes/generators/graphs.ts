@@ -1,0 +1,415 @@
+/**
+ * Graph archetypes: motion graphs from the phases a stem names, F–x work
+ * areas, waves from their equation, and explicit function graphs with
+ * tangents and regions. P–V cycles always decline (see pvCycle).
+ *
+ * Graphs are display-scaled on the vertical axis when the value range is far
+ * from the domain range (a 4 s × 41 m plot would otherwise be a needle). The
+ * scaling is a declared affine factor: every assertion is written in the
+ * scaled space, every label reports the true value.
+ */
+import { parseMathExpression } from "../../math/expression";
+import { SceneBuilder, fmt, withUnit } from "../document";
+import { prepareStem, UNIT, firstNumberWithUnit, numbersWithUnit, explicitFunctions } from "../slots";
+import { FINAL_SPEED_BEFORE, normalized, STARTS_AT_REST, tokens } from "./constantAcceleration";
+import { grounded, maybeNum, num, text, type GeneratorContext, type GeneratorTable } from "./context";
+
+function evaluate(expression: string, x: number): number | null {
+  try {
+    const value = parseMathExpression(expression).evaluate(x);
+    return Number.isFinite(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function sampleRange(expressions: readonly string[], xMin: number, xMax: number, count = 33): { yMin: number; yMax: number } | null {
+  const samples = expressions.flatMap((expression) => Array.from({ length: count }, (_, index) => evaluate(expression, xMin + (index / (count - 1)) * (xMax - xMin)))).filter((value): value is number => value !== null);
+  if (samples.length < count / 2) return null;
+  return { yMin: Math.min(0, ...samples), yMax: Math.max(0, ...samples) };
+}
+
+/** Vertical display factor so the plot's aspect stays readable under uniform world scaling. */
+function displayFactor(xSpan: number, yMin: number, yMax: number): number {
+  const ySpan = Math.max(yMax - yMin, 1e-9);
+  const ratio = ySpan / Math.max(xSpan, 1e-9);
+  if (ratio > 1.4) return (xSpan * 0.7) / ySpan;
+  if (ratio < 0.3) return (xSpan * 0.45) / ySpan;
+  return 1;
+}
+
+const scaled = (expression: string, k: number): string => (k === 1 ? expression : `(${k})*(${expression})`);
+const compactExpression = (expression: string): string => expression.replace(/\*/g, "").slice(0, 14);
+
+/* ------------------------------------------------------------------------- */
+/* v–t from phases                                                            */
+/* ------------------------------------------------------------------------- */
+
+interface Phase { kind: "accelerate" | "cruise" | "decelerate"; duration: number; vEnd: number }
+
+const SPEED_UNIT = /m\s*\/\s*s(?![\^\d])|m\s*s\^-1|ms\^-1|km\s*\/\s*h|kmph|km\s*h\^-1/;
+
+function toMetresPerSecond(value: number, clause: string): number {
+  return /km\s*\/\s*h|kmph|km\s*h\^-1/i.test(clause) ? value / 3.6 : value;
+}
+
+/**
+ * The speed the first phase starts from: 0 when the stem says so, the stated
+ * initial speed when there is one, otherwise null (unstated).
+ */
+function statedStartSpeed(firstClause: string): number | null {
+  const text = normalized(firstClause);
+  if (STARTS_AT_REST.test(text) || /\bat rest\b/i.test(text)) return 0;
+  const initial = tokens(text).find((token) => token.dimension === "speed"
+    && !FINAL_SPEED_BEFORE.test(text.slice(Math.max(0, token.start - 40), token.start).trim()));
+  return initial ? initial.value : null;
+}
+
+function parseMotionPhases(question: string): { start: number; phases: Phase[] } {
+  const stem = prepareStem(question);
+  const clauses = stem.split(/(?:,|;|\.(?!\d)|\bthen\b|\band then\b|\bafter (?:that|which)\b|\bfinally\b|\bnext\b)/i).map((clause) => clause.trim()).filter(Boolean);
+  const phases: Phase[] = [];
+  // Never start from rest unless the question says so: a stated initial
+  // speed seeds the first phase, an unstated one declines unless the first
+  // phase is a cruise at a stated speed.
+  const start = statedStartSpeed(clauses.slice(0, 2).join(", "));
+  let v = start ?? 0;
+  for (const clause of clauses) {
+    const duration = firstNumberWithUnit(clause, UNIT.second);
+    const speeds = numbersWithUnit(clause, SPEED_UNIT).map((value) => toMetresPerSecond(value, clause));
+    const acceleration = firstNumberWithUnit(clause, UNIT.accel);
+    const accelerates = /\b(?:accelerat\w*|speeds? up|picks up speed|attains|reaches a (?:speed|velocity)|starts from rest)\b/i.test(clause);
+    const decelerates = /\b(?:decelerat\w*|retard\w*|brak\w*|slows?(?: down)?|comes to rest|stops|halts)\b/i.test(clause);
+    const cruises = /\b(?:constant (?:speed|velocity)|uniform (?:speed|velocity)|steady speed|same speed|this speed|moves uniformly|continues)\b/i.test(clause);
+    if (phases.length === 0 && start === null && !(cruises && duration !== null && !accelerates && speeds.some((speed) => speed > 0))) {
+      if (accelerates || decelerates || cruises) return { start: 0, phases: [] };
+    }
+    if (decelerates && (duration !== null || acceleration !== null)) {
+      const target = /\b(?:rest|stops|halts)\b/i.test(clause) ? 0 : speeds.find((speed) => speed < v) ?? 0;
+      const time = duration ?? (acceleration ? Math.abs(v - target) / acceleration : 0);
+      if (time > 0) { phases.push({ kind: "decelerate", duration: time, vEnd: target }); v = target; }
+      continue;
+    }
+    if (cruises && duration !== null && !accelerates) {
+      const target = speeds.find((speed) => speed > 0) ?? v;
+      if (phases.length === 0 && target > 0) v = target;
+      phases.push({ kind: "cruise", duration, vEnd: v });
+      continue;
+    }
+    if (accelerates && (duration !== null || acceleration !== null)) {
+      const target = acceleration !== null && duration !== null
+        ? v + acceleration * duration
+        : speeds.find((speed) => speed > v) ?? null;
+      if (target === null) continue;
+      const time = duration ?? (acceleration ? (target - v) / acceleration : 0);
+      if (time > 0) { phases.push({ kind: "accelerate", duration: time, vEnd: target }); v = target; }
+    }
+  }
+  return { start: start ?? (phases[0]?.kind === "cruise" ? phases[0].vEnd : 0), phases };
+}
+
+function vtGraph(context: GeneratorContext) {
+  const { start, phases } = parseMotionPhases(text(context, "phases", context.question));
+  if (phases.length === 0) return null;
+  const totalTime = phases.reduce((sum, phase) => sum + phase.duration, 0);
+  const vMax = Math.max(start, ...phases.map((phase) => phase.vEnd), 1e-9);
+  const k = displayFactor(totalTime, 0, vMax);
+  const scene = new SceneBuilder(context.question, `velocity–time graph with ${phases.length} phases read from the question`, "vt_graph");
+  scene.axes("axes", -0.05 * totalTime, 1.12 * totalTime, -0.08 * vMax * k, 1.25 * vMax * k, "v-t axes", "v-t");
+  const vertexIds: string[] = [];
+  let t = 0;
+  let v = start;
+  vertexIds.push(scene.point("p0", { x: 0, y: start * k }, "graph start", start > 1e-9 ? `(0 s, ${fmt(start)} m/s)` : "0"));
+  const phaseIds: string[] = [];
+  for (const [index, phase] of phases.entries()) {
+    t += phase.duration;
+    v = phase.vEnd;
+    const id = scene.point(`p${index + 1}`, { x: t, y: v * k }, `phase ${index + 1} end`, `(${fmt(t)} s, ${fmt(v)} m/s)`);
+    vertexIds.push(id);
+    const kind = phase.kind === "accelerate" ? "uniform acceleration" : phase.kind === "cruise" ? "constant velocity" : "uniform deceleration";
+    phaseIds.push(scene.segment(`phase${index + 1}`, vertexIds[index]!, id, `phase ${index + 1}: ${kind}`, kind));
+    scene.point(`foot${index + 1}`, { x: t, y: 0 }, `t=${fmt(t)} on the axis`, `t=${fmt(t)} s`);
+    if (v > 1e-9) scene.segment(`drop${index + 1}`, id, `foot${index + 1}`, "ordinate to the time axis");
+  }
+  const drops = phases.map((phase, index) => (phase.vEnd > 1e-9 ? `drop${index + 1}` : null)).filter((id): id is string => id !== null);
+  scene.point("origin_ref", { x: 0, y: 0 }, "origin reference");
+  scene.polygon("area", [...(start > 1e-9 ? ["origin_ref"] : []), ...vertexIds, `foot${phases.length}`], "area under the graph = distance");
+  scene.assert("time_ratio", "distance_ratio", ["origin_ref", "foot1", "origin_ref", `foot${phases.length}`], Number((phases[0]!.duration / totalTime).toFixed(6)));
+  if (phases.length > 1) {
+    scene.assert("ordered", "ordered_along", vertexIds, { axis: "x", direction: "increasing" });
+  }
+  scene.labelled("axes", "p1");
+  scene.group("axes_group", ["axes", "p0"], "velocity on the vertical axis, time on the horizontal");
+  scene.group("graph", [...vertexIds.slice(1), ...phaseIds, ...phases.map((_, index) => `foot${index + 1}`), ...drops], "each phase of the motion as one straight piece", ["axes_group"]);
+  scene.group("area_group", ["area", "origin_ref"], "the area under the graph is the distance travelled", ["graph"]);
+  return scene.build();
+}
+
+/* ------------------------------------------------------------------------- */
+
+function xtGraph(context: GeneratorContext) {
+  const expression = text(context, "expression");
+  if (!expression) return null;
+  const tMax = Math.max(num(context, "tMax", 4), 0.5);
+  const range = sampleRange([expression], 0, tMax, 41);
+  if (!range) return null;
+  const k = displayFactor(tMax, range.yMin, range.yMax);
+  const span = Math.max(range.yMax - range.yMin, 1e-6) * k;
+  const scene = new SceneBuilder(context.question, "position–time graph of the stated x(t)", "xt_graph");
+  scene.axes("axes", -0.06 * tMax, 1.12 * tMax, range.yMin * k - 0.12 * span, range.yMax * k + 0.18 * span, "x-t axes", "x-t");
+  scene.curve("graph", scaled(expression, k), 0, tMax, "x(t)", `x=${compactExpression(expression.replace(/\bx\b/g, "t"))}`, 65);
+  const askedT = /(?:at|when)\s+t\s*=\s*(\d+(?:\.\d+)?)/i.exec(prepareStem(context.question));
+  const t0 = askedT ? Number(askedT[1]) : tMax / 2;
+  const x0 = evaluate(expression, t0);
+  if (x0 !== null && t0 >= 0 && t0 <= tMax) {
+    scene.point("P", { x: t0, y: x0 * k }, "marked instant", askedT ? `t=${fmt(t0)} s, x=${fmt(x0)}` : "P");
+    if (Math.abs(x0) > 1e-9) {
+      scene.point("P_foot", { x: t0, y: 0 }, "instant on the axis");
+      scene.segment("P_drop", "P", "P_foot", "ordinate at the marked instant");
+    }
+    scene.assert("point_on_graph", "function_value", ["graph"], { x: Number(t0.toFixed(6)), y: Number((x0 * k).toFixed(6)) });
+    if (/\b(?:velocity|slope|speed)\b/i.test(context.question) && t0 > 0.02 * tMax && t0 < 0.98 * tMax) {
+      scene.tangent("slope", "graph", t0, "tangent at the instant: slope = velocity", "slope=v", Math.min(1.2, tMax / 3));
+    }
+  }
+  scene.labelled("axes", "graph");
+  return scene.build();
+}
+
+function fxGraphArea(context: GeneratorContext) {
+  const expression = text(context, "expression");
+  if (!expression) return null;
+  const from = maybeNum(context, "from");
+  const to = maybeNum(context, "to");
+  if (from === null || to === null || !grounded(context, "from") || !grounded(context, "to") || to <= from) return null;
+  const range = sampleRange([expression], from, to, 17);
+  if (!range) return null;
+  const k = displayFactor(to - from, range.yMin, range.yMax);
+  const span = Math.max(range.yMax - range.yMin, 1e-6) * k;
+  const pad = (to - from) * 0.25;
+  const fTo = evaluate(expression, to);
+  if (fTo === null) return null;
+  const scene = new SceneBuilder(context.question, "force–displacement graph; the work done is the area under it", "fx_graph_area");
+  scene.axes("axes", from - pad, to + pad, range.yMin * k - 0.15 * span, range.yMax * k + 0.2 * span, "F-x axes", "F-x");
+  scene.curve("force", scaled(expression, k), from - pad * 0.5, to + pad * 0.3, "F(x)", `F=${compactExpression(expression)}`, 65);
+  scene.curve("zero", "0", from, to, "x-axis under the region", undefined, 17);
+  scene.region("work", "force", "zero", "work done = area under F(x)", from, to);
+  scene.point("x_from", { x: from, y: 0 }, "lower limit", `x=${fmt(from)}`);
+  scene.point("x_to", { x: to, y: 0 }, "upper limit", `x=${fmt(to)}`);
+  scene.point("F_to", { x: to, y: fTo * k }, "force at the upper limit", `F=${fmt(fTo)}`);
+  scene.assert("f_at_upper", "function_value", ["force"], { x: Number(to.toFixed(6)), y: Number((fTo * k).toFixed(6)) });
+  scene.assert("limits_ordered", "ordered_along", ["x_from", "x_to"], { axis: "x", direction: "increasing" });
+  scene.labelled("axes", "force");
+  return scene.build();
+}
+
+function waveProfile(context: GeneratorContext) {
+  const equation = text(context, "expression");
+  let amplitude = maybeNum(context, "amplitude");
+  let wavelength = maybeNum(context, "wavelength");
+  let ampSource = context.sources.amplitude;
+  let lamSource = context.sources.wavelength;
+  if (equation) {
+    const match = /(\d+(?:\.\d+)?)\s*\*?\s*(?:sin|cos)\s*\(?\s*(\d+(?:\.\d+)?)\s*\*?\s*x/i.exec(equation.replace(/\s+/g, ""))
+      ?? /(\d+(?:\.\d+)?)\s*(?:sin|cos)\s*\(?\s*(\d+(?:\.\d+)?)\s*x/i.exec(equation);
+    if (match) {
+      amplitude = Number(match[1]);
+      wavelength = 2 * Math.PI / Number(match[2]);
+      ampSource = "stem";
+      lamSource = "stem";
+    }
+  }
+  const A = amplitude ?? 1;
+  const lambda = wavelength ?? 4;
+  const k = displayFactor(2 * lambda, -A, A);
+  const expression = scaled(`${A}*sin(${2 * Math.PI / lambda}*x)`, k);
+  const unit = /\bcm\b/.test(context.question) && A > 0.5 ? "cm" : "m";
+  const scene = new SceneBuilder(context.question, "one wavelength of the wave with amplitude and wavelength marked", "wave_profile");
+  scene.axes("axes", -0.1 * lambda, 2.15 * lambda, -1.6 * A * k, 1.6 * A * k, "displacement–position axes", "y-x");
+  scene.curve("wave", expression, 0, 2 * lambda, "wave profile", undefined, 97);
+  scene.point("crest", { x: lambda / 4, y: A * k }, "crest", "crest");
+  scene.point("crest_foot", { x: lambda / 4, y: 0 }, "crest foot");
+  scene.dimension("amp", "crest_foot", "crest", "amplitude", ampSource === "plan" || ampSource === "stem" ? `A=${withUnit(A, unit)}` : "A");
+  scene.point("lam_a", { x: 0, y: -1.3 * A * k }, "wavelength start");
+  scene.point("lam_b", { x: lambda, y: -1.3 * A * k }, "wavelength end");
+  scene.dimension("lam", "lam_a", "lam_b", "wavelength", lamSource === "plan" || lamSource === "stem" ? `λ=${withUnit(lambda, unit)}` : "λ");
+  scene.point("trough", { x: 3 * lambda / 4, y: -A * k }, "trough", "trough");
+  scene.assert("crest_on_wave", "function_value", ["wave"], { x: Number((lambda / 4).toFixed(6)), y: Number((A * k).toFixed(6)) });
+  scene.assert("trough_on_wave", "function_value", ["wave"], { x: Number((3 * lambda / 4).toFixed(6)), y: Number((-A * k).toFixed(6)) });
+  scene.labelled("amp", "lam");
+  return scene.build();
+}
+
+function standingWave(context: GeneratorContext) {
+  if (context.slots.harmonicUnresolved === "unread") return null;
+  // This also protects direct callers that did not run the source reader.
+  if (!grounded(context, "harmonic") && /\b(?:harmonics?|overtones?|modes?|loops?)\b|\bn\s*=/i.test(context.question)) return null;
+  const harmonic = num(context, "harmonic", 1);
+  if (!Number.isInteger(harmonic) || harmonic < 1 || harmonic > 6) return null;
+  const ends = text(context, "ends", "fixed");
+  if (!["fixed", "open", "closed_open"].includes(ends)) return null;
+  if (ends === "closed_open" && harmonic % 2 === 0) return null;
+  const L = 6;
+  const A = 1;
+  const factor = ends === "closed_open" ? harmonic / 2 : harmonic;
+  const phase = ends === "open" ? "cos" : "sin";
+  const expression = `${A}*${phase}(${(factor * Math.PI / L)}*x)`;
+  const mirrored = `-${A}*${phase}(${(factor * Math.PI / L)}*x)`;
+  const scene = new SceneBuilder(context.question, "standing wave with its nodes and antinodes", "standing_wave");
+  scene.axes("axes", -0.3, L + 0.5, -1.6, 1.6, "displacement axes", "y-x");
+  scene.curve("wave", expression, 0, L, "wave envelope", grounded(context, "harmonic") ? `n=${harmonic}` : "envelope", 97);
+  scene.curve("wave_mirror", mirrored, 0, L, "wave envelope (half period later)", undefined, 97);
+  const nodes: number[] = [];
+  const antinodes: number[] = [];
+  const step = L / factor;
+  for (let x = 0; x <= L + 1e-9; x += step / 2) {
+    const value = evaluate(expression, x) ?? 0;
+    if (Math.abs(value) < 1e-6) nodes.push(x); else antinodes.push(x);
+  }
+  nodes.forEach((x, index) => scene.point(`node${index}`, { x, y: 0 }, "node", index === 0 ? "N" : undefined));
+  antinodes.forEach((x, index) => scene.point(`antinode${index}`, { x, y: evaluate(expression, x) ?? A }, "antinode", index === 0 ? "A" : undefined));
+  scene.point("end_l", { x: 0, y: -1.3 }, "length start");
+  scene.point("end_r", { x: L, y: -1.3 }, "length end");
+  scene.dimension("length", "end_l", "end_r", "length", grounded(context, "length") ? `L=${withUnit(num(context, "length", 1), "m")}` : "L");
+  if (antinodes[0] !== undefined) {
+    scene.assert("antinode_on_wave", "function_value", ["wave"], { x: Number(antinodes[0].toFixed(6)), y: Number((evaluate(expression, antinodes[0]) ?? A).toFixed(6)) });
+  }
+  scene.labelled("wave", "length");
+  return scene.build();
+}
+
+/* ------------------------------------------------------------------------- */
+/* P–V cycles: always declined                                                */
+/* ------------------------------------------------------------------------- */
+
+/**
+ * pv_cycle draws nothing. It built a cycle at display values from the
+ * process kinds a stem names, and four review rounds of #290 kept finding
+ * ordinary wording it drew wrong: a direction read from the wrong quantity
+ * ("the pressure increases" drawn as an expansion with P falling), a
+ * direction word after the leg ignored ("an isobaric contraction" drawn as
+ * an expansion), and a return leg named without a kind word ("returns to A
+ * at constant T") silently dropped. Each was also drawn on main. Every
+ * heuristic round left another gap, so the archetype is matched but always
+ * declines; the lesson teaches without the figure.
+ */
+function pvCycle(_context: GeneratorContext): null {
+  return null;
+}
+
+/* ------------------------------------------------------------------------- */
+
+function functionGraph(context: GeneratorContext) {
+  const expressions = (context.slots.expressions as string[] | undefined) ?? explicitFunctions(context.question);
+  if (!expressions?.length) return null;
+  const xMin = num(context, "xMin", -3);
+  const xMax = num(context, "xMax", xMin + 6);
+  if (xMax <= xMin) return null;
+  const range = sampleRange(expressions, xMin, xMax, 25);
+  if (!range) return null;
+  const k = displayFactor(xMax - xMin, range.yMin, range.yMax);
+  const span = Math.max(range.yMax - range.yMin, 1e-6) * k;
+  const scene = new SceneBuilder(context.question, "graph of the stated function", "function_graph");
+  scene.axes("axes", xMin - 0.1 * (xMax - xMin), xMax + 0.1 * (xMax - xMin), range.yMin * k - 0.1 * span, range.yMax * k + 0.15 * span, "coordinate axes");
+  expressions.forEach((expression, index) => {
+    scene.curve(`curve${index + 1}`, scaled(expression, k), xMin, xMax, "curve", `y=${compactExpression(expression)}`, 65);
+    const x = xMin + (xMax - xMin) * (0.35 + 0.2 * index);
+    const y = evaluate(expression, x);
+    if (y !== null) scene.assert(`curve${index + 1}_value`, "function_value", [`curve${index + 1}`], { x: Number(x.toFixed(6)), y: Number((y * k).toFixed(6)) });
+  });
+  scene.labelled("curve1");
+  return scene.build();
+}
+
+function tangentToCurve(context: GeneratorContext) {
+  const expression = text(context, "expression");
+  const x0 = maybeNum(context, "x0");
+  if (!expression || x0 === null) return null;
+  const y0 = evaluate(expression, x0);
+  if (y0 === null) return null;
+  const half = 1.6;
+  const range = sampleRange([expression], x0 - half, x0 + half, 25);
+  if (!range) return null;
+  const k = displayFactor(2 * half, range.yMin, range.yMax);
+  const span = Math.max(range.yMax - range.yMin, 1e-6) * k;
+  const scene = new SceneBuilder(context.question, `curve with its tangent at x=${fmt(x0)}`, "tangent_to_curve");
+  scene.axes("axes", x0 - half - 0.5, x0 + half + 0.5, range.yMin * k - 0.1 * span, range.yMax * k + 0.15 * span, "coordinate axes");
+  scene.curve("curve", scaled(expression, k), x0 - half, x0 + half, "curve", `y=${compactExpression(expression)}`, 81);
+  scene.point("P", { x: x0, y: y0 * k }, "point of tangency", `(${fmt(x0)}, ${fmt(y0)})`);
+  scene.tangent("tangent", "curve", x0, "tangent at P", "tangent", Math.min(2.2, half * 0.7));
+  scene.assert("p_on_curve", "function_value", ["curve"], { x: Number(x0.toFixed(6)), y: Number((y0 * k).toFixed(6)) });
+  scene.assert("p_on_tangent", "on", ["P", "tangent"]);
+  scene.labelled("P", "tangent");
+  return scene.build();
+}
+
+function areaBetweenCurves(context: GeneratorContext) {
+  const expressions = ((context.slots.expressions as string[] | undefined) ?? explicitFunctions(context.question)).slice(0, 2);
+  if (expressions.length === 0) return null;
+  const [f, g = "0"] = expressions as [string, string?];
+  const difference = (x: number): number | null => {
+    const a = evaluate(f, x);
+    const b = evaluate(g, x);
+    return a === null || b === null ? null : a - b;
+  };
+  let xMin = maybeNum(context, "xMin");
+  let xMax = maybeNum(context, "xMax");
+  if (xMin === null || xMax === null) {
+    const roots: number[] = [];
+    let previous = difference(-6);
+    for (let x = -6 + 0.05; x <= 6 && roots.length < 4; x += 0.05) {
+      const current = difference(x);
+      if (previous !== null && current !== null && Math.sign(previous) !== Math.sign(current)) {
+        let lo = x - 0.05;
+        let hi = x;
+        for (let step = 0; step < 40; step += 1) {
+          const mid = (lo + hi) / 2;
+          const value = difference(mid);
+          if (value === null) break;
+          if (Math.sign(value) === Math.sign(previous)) lo = mid; else hi = mid;
+        }
+        roots.push((lo + hi) / 2);
+      }
+      previous = current;
+    }
+    if (roots.length < 2) return null;
+    xMin = roots[0]!;
+    xMax = roots[1]!;
+  }
+  if (xMax <= xMin) return null;
+  const mid = (xMin + xMax) / 2;
+  const upperIsF = (difference(mid) ?? 0) >= 0;
+  const upper = upperIsF ? f : g;
+  const lower = upperIsF ? g : f;
+  const pad = (xMax - xMin) * 0.35;
+  const range = sampleRange([f, g], xMin - pad * 0.8, xMax + pad * 0.8, 17);
+  if (!range) return null;
+  const k = displayFactor(xMax - xMin + 1.6 * pad, range.yMin, range.yMax);
+  const span = Math.max(range.yMax - range.yMin, 1e-6) * k;
+  const scene = new SceneBuilder(context.question, "region enclosed between the curves with its intersections", "area_between_curves");
+  scene.axes("axes", xMin - pad, xMax + pad, range.yMin * k - 0.1 * span, range.yMax * k + 0.15 * span, "coordinate axes");
+  scene.curve("upper", scaled(upper, k), xMin - pad * 0.8, xMax + pad * 0.8, "upper curve", `y=${compactExpression(upper)}`, 65);
+  scene.curve("lower", scaled(lower, k), xMin - pad * 0.8, xMax + pad * 0.8, "lower curve", `y=${compactExpression(lower)}`, 65);
+  scene.region("region", "upper", "lower", "enclosed region", xMin, xMax);
+  const yA = evaluate(f, xMin);
+  const yB = evaluate(f, xMax);
+  const near = (value: number): number => (Math.abs(value) < 1e-9 ? 0 : value);
+  if (yA !== null) scene.point("A", { x: xMin, y: yA * k }, "intersection", `(${fmt(near(xMin))}, ${fmt(near(yA))})`);
+  if (yB !== null) scene.point("B", { x: xMax, y: yB * k }, "intersection", `(${fmt(near(xMax))}, ${fmt(near(yB))})`);
+  if (yA !== null) scene.assert("a_on_upper", "function_value", ["upper"], { x: Number(xMin.toFixed(6)), y: Number(((evaluate(upper, xMin) ?? yA) * k).toFixed(6)) });
+  if (yB !== null) scene.assert("b_on_lower", "function_value", ["lower"], { x: Number(xMax.toFixed(6)), y: Number(((evaluate(lower, xMax) ?? yB) * k).toFixed(6)) });
+  scene.labelled("upper", "lower");
+  return scene.build();
+}
+
+export const GRAPH_GENERATORS: GeneratorTable = {
+  vt_graph: vtGraph,
+  xt_graph: xtGraph,
+  fx_graph_area: fxGraphArea,
+  wave_profile: waveProfile,
+  standing_wave: standingWave,
+  pv_cycle: pvCycle,
+  function_graph: functionGraph,
+  tangent_to_curve: tangentToCurve,
+  area_between_curves: areaBetweenCurves,
+};

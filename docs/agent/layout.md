@@ -1,0 +1,185 @@
+# Layout conventions
+
+Put new files next to the job they belong to. Do not add a topic template under
+`apps/`, a new root helper in `apps/tutor/lib/`, or a `*-vN.md` at `docs/` root.
+
+Public package imports stay `@heytutor/scene-engine`, `@heytutor/tutor-core`,
+`@heytutor/drawing`, and `@heytutor/whiteboard`. Apps import those barrels, not
+internal package paths. There are two exceptions, both Konva-free:
+`@heytutor/whiteboard/pen-spinner` (chrome spinner) and
+`@heytutor/whiteboard/marker-ink` (student highlighter stroke).
+
+This file is the live tree. Adding a folder means adding it here in the same PR.
+A new kind of file with no row in "Where new files go" gets its row first.
+
+## Do not
+
+- Do not add a package for a second consumer that does not exist.
+- Do not split `features/tutor-session` into many features. Home, `/c/[id]`,
+  notes, marking, and the code panel are one product surface
+  (`TutorSessionShell`). Cluster inside that feature when a folder is touched.
+- Do not add `features/landing` in the tutor app. Marketing is `apps/landing`.
+- Do not move DSA traces out of `scene-engine` or lesson plans out of
+  `tutor-core`.
+- Do not rename protocol types (`TurnPlanV3`, `SceneDocument/v2`,
+  `code-lesson/v1`) to drop the version.
+- Do not add a sibling at the `features/tutor-session/lib/` root. New helpers
+  go in `scene/`, `board/`, `turn/`, `notes/`, `input/`, `replay/`,
+  `code-lesson/`, or `download/` (download state and reducer).
+  `sessionCapabilities.ts` is the only file at that root.
+
+## Later, only if a second consumer appears
+
+- A shared Brand or dither package. Until then, two copies
+  (`apps/tutor/components/dither`, `apps/landing/src/components/dither`) are
+  cheaper than a shallow `@heytutor/ui`.
+- Grouping `packages/whiteboard/src/` (`pen/`, `cursor/`). Flat is still
+  smaller than 20 files.
+- Subfolders in `features/tutor-session/components/`. Do not pre-split; a
+  subfolder is allowed when a cluster already has four files and is being
+  edited. `hooks/turn/` is the model.
+
+## Where new files go
+
+- Scene operator, proof, compile, IR, solver, family synthesis, archetype, or
+  DSA-trace geometry → `packages/scene-engine/src/` in the matching folder
+  (`compile/`, `document/`, `ir/`, `capability/`, `contracts/`, `math/`,
+  `physics/`, `topology/`, `labels/`, `synthesize/`, `archetypes/`, `dsa/`,
+  `chemistry/`, `eval/`). Never a topic file under `apps/`.
+- Planner, TTS, speech-sync, teaching-LLM, or code-lesson *plan/teach* code →
+  `packages/tutor-core/src/{planners,tts,sync,llm,text,code}/`.
+- Canvas protocol, handwriting, board layout, stroke animation, or the write
+  clock the pen waits on →
+  `packages/drawing/src/{protocol,handwriting,layout,animation,sync}/`.
+- Konva renderer, cursor, pen pose, or capture clock →
+  `packages/whiteboard/src/` (keep the package root flat until a cluster has
+  four files of its own).
+- Session UI (home board, `/c/[id]`, landing overlay, notes, marking, code
+  panel) → `apps/tutor/features/tutor-session/`. Shared primitives only in
+  `apps/tutor/components/ui/`. Brand marks in `apps/tutor/components/brand/`.
+  Admin panel → `apps/tutor/features/admin/` (`nav/` shell nav, `analytics/`
+  overview, `users/` manage-users + drill-down, `turns/` logs + fails,
+  `ratings/` lecture ratings,
+  `shared/` kit; `AdminPlayground.tsx` is the full-bleed test playground at
+  `/admin/playground`, outside the `(panel)` route group). Admin server
+  queries and wire payloads → `apps/tutor/lib/admin/`. Account screens
+  (login, onboarding, library, profile, progress, settings, usage) →
+  `apps/tutor/features/account/`; the signed-in shell →
+  `apps/tutor/features/app-shell/`. Community (the public gallery, its
+  cards, and the read only lesson viewer at `/community/[boardId]`) →
+  `apps/tutor/features/community/`; its server reads, privacy filter and
+  remix → `apps/tutor/lib/community/`.
+- App helper → `apps/tutor/lib/<domain>/`, not `features/` and not a new file
+  at `lib/` root unless it is a tiny cross-cutting util (`auth.ts`,
+  `authDisabled.ts`, `utils.ts`, `site.ts`, `cookies.ts`). Domains already in
+  use: `account/`, `admin/`, `auth/`, `billing/`, `boards/`, `client/`,
+  `code-lesson/` (persist parse), `code-render/`, `community/`, `crypto/`, `db/`, `http/`,
+  `lecture-export/`, `lecture-rating/` (rating body and browser client), `llm/`, `object-store/`, `obs/`, `reference-picture/`
+  (find, judge, stroke plan and store a reference picture), `replay/`,
+  `scene/`, `tts/`.
+- Check → `scripts/verify/verify-<kebab-name>.ts` next to the package that
+  owns the code; wire it into that package’s `verify` script. Live/manual
+  probes go in `scripts/live/` or `scripts/measure/` and stay out of
+  `pnpm verify` unless they are meant to gate. Whole-lecture offline runs go
+  in `apps/tutor/scripts/lecture-lab/`. Existing mounted whiteboard gates use
+  `packages/whiteboard/scripts/verify-*.ts` beside `scripts/testing/`; keep
+  that established flat location when extending the renderer gates.
+- Architecture note → `docs/architecture/` (current) or `docs/plans/` (open
+  work). Agent maps stay in `docs/agent/`. Runbooks stay in `docs/ops/`.
+  Product-facing checklists stay in `docs/product/`.
+- Question-bank code → `tools/question-bank/` (`qbank.py`, `question_bank/`,
+  `importers/`, `tests/`); corpus → `data/question-bank/`. Syllabus / leetcode
+  probe JSON → `data/syllabus-probes/`, `data/leetcode-probes/`. Do not copy
+  JSONL into packages.
+- Marketing site → `apps/landing/src/`. Do not grow a third landing feature
+  inside the tutor app; the empty-board overlay lives in `tutor-session`.
+
+## Naming
+
+- New folders: kebab-case (`code-lesson`, `lecture-export`).
+- New source files: camelCase (`useBoardLayout.ts`); React components
+  PascalCase (`SessionHeader.tsx`).
+- Verify scripts: `verify-<kebab>.ts`.
+- Protocol versions live in types and constants (`TurnPlanV3`,
+  `code-lesson/v1`), not in new helper filenames. Do not add
+  `fooV5.ts` / `bar-v4.ts` for a rewrite of an existing helper.
+
+## Package source trees
+
+```text
+packages/scene-engine/src/
+  index.ts, types.ts
+  capability/   compile/   document/   contracts/
+  ir/           math/      physics/    topology/   labels/
+  synthesize/   archetypes/   dsa/     chemistry/  eval/
+
+packages/tutor-core/src/
+  index.ts, publicOrigins.ts, tutorDebug.ts
+  planners/   tts/   sync/   llm/   text/   code/
+
+packages/drawing/src/
+  index.ts
+  protocol/   handwriting/   layout/   animation/   sync/
+
+packages/whiteboard/src/
+  index.ts, Whiteboard.tsx, pen-spinner.ts, marker-ink.ts   (flat on purpose)
+```
+
+`drawing/src/sync` is the pen write-clock. `tutor-core/src/sync` is TTS /
+speech scheduling. Do not merge them.
+
+`scene-engine/src/dsa` owns algorithm traces and the figures compiled from
+them. `tutor-core/src/code` owns the lesson plan and teaching text. The tutor
+app owns the live panel and persistence parse.
+
+## App source tree
+
+```text
+apps/tutor/
+  app/                         Next routes only
+    (session)/                 home board + /c/[sessionId]
+    (account)/                 library, profile, progress, settings, usage
+    login/  onboarding/        sign-in and first-run pages
+    community/                 public gallery + /community/[boardId] viewer
+    admin/                     (panel)/ admin panel + playground/
+    api/                       route handlers (no business logic dumps)
+  components/
+    ui/                        shadcn primitives
+    brand/                     Logo, Brand
+    auth/                      Auth.js session provider
+    dither/                    session-home pixel field (not the marketing site)
+  features/tutor-session/      session page, hooks, presentation, chrome
+    components/  hooks/  hooks/turn/
+    components/download/        Download menu, status and progress chrome
+    lib/
+      scene/  board/  turn/  notes/  input/  replay/  code-lesson/  download/
+      sessionCapabilities.ts
+  features/account/            account screens
+  features/app-shell/          signed-in shell
+  features/community/          Community gallery, cards, read only viewer
+  features/admin/              admin panel + syllabus playground
+    nav/  analytics/  users/  turns/  community/  ratings/  shared/
+    AdminPlayground.tsx        full-bleed playground (/admin/playground)
+    components/  hooks/  lib/  playground internals
+  lib/                         app-wide helpers grouped by domain
+    account/  admin/  auth/  billing/  boards/  client/  code-lesson/
+    code-render/  community/  crypto/  db/  http/  lecture-export/  lecture-rating/  llm/  object-store/
+    obs/  replay/  scene/  tts/
+  scripts/
+    dev.ts
+    verify/                    wired into pnpm verify
+    live/                      optional / not in the default verify chain
+    lecture-lab/               offline whole-lecture runs
+  prisma/                      schema + migrations
+  server.ts                    custom server + TTS WebSocket relay
+```
+
+```text
+apps/landing/src/
+  pages/                       Privacy, Terms
+  components/                  marketing sections (hero-lesson, dither, …)
+  lib/                         cal/tutor hrefs, scroll helper
+```
+
+See [packages.md](packages.md) for per-file maps and [backend.md](backend.md)
+for API and `lib/` modules.

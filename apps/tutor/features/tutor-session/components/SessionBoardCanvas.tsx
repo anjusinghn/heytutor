@@ -1,0 +1,403 @@
+"use client";
+
+import { useCallback, useRef, useState, useSyncExternalStore, type PointerEvent, type ReactNode, type RefObject } from "react";
+import { ResponseBubble } from "@/features/tutor-session/components/ResponseBubble";
+import { getMarkerColorHex, type SettingsState } from "@/features/tutor-session/components/SettingsDrawer";
+import type { WhiteboardHandle, CursorState } from "@heytutor/whiteboard";
+import { hitTestVerifiedAnchor, type VerifiedDiagram } from "@heytutor/drawing";
+import { BOARD_WIDTH, BOARD_HEIGHT } from "../constants";
+import type { BoardViewport, TutorPhase } from "../types";
+import { DiagramLabelInspector } from "./DiagramLabelInspector";
+import { BoardMarkingLayer } from "./BoardMarkingLayer";
+import { Whiteboard } from "./WhiteboardLoader";
+import { BoardErrorBanner, SaveFailureBanner } from "./BoardErrorBanner";
+import type { BoardMarkingApi } from "../hooks/useBoardMarking";
+import type { BillingFailure } from "@/lib/billing/billingClient";
+import { isOutOfUsageLock } from "@/lib/billing/studentCopy";
+import type { CodeLessonController } from "../lib/code-lesson/codeLessonController";
+import type { LecturePlayerView } from "../hooks/useLecturePlayer";
+import type { LecturePlayerControls, LecturePlayerStore } from "@/lib/replay/lecturePlayer";
+import { LecturePlayerBar } from "./LecturePlayerBar";
+import { sessionCaption } from "../lib/board/sessionCaption";
+
+export interface SessionBoardCanvasProps {
+  boardViewport: BoardViewport;
+  whiteboardRef: RefObject<WhiteboardHandle | null>;
+  cursorState: CursorState;
+  settings: SettingsState;
+  phase: TutorPhase;
+  currentSegmentText: string;
+  lastError: { message: string; question: string; billing?: BillingFailure } | null;
+  /** A lesson that did not save: Try again resends it, it never asks again. */
+  saveFailure?: { message: string; onRetrySave: () => void; onDismiss: () => void } | null;
+  isReplaying: boolean;
+  /** Overlay board the past is drawn on while the live lecture stays frozen. */
+  rewindBoardRef: RefObject<WhiteboardHandle | null>;
+  /** Off-screen board used to re-render a finished question for MP4 export. */
+  exportBoardRef: RefObject<WhiteboardHandle | null>;
+  exportBoardMounted: boolean;
+  rewindActive: boolean;
+  rewindCursorState: CursorState;
+  rewindSegmentText: string;
+  /** A finished lecture's playback bar. Absent when the board has none. */
+  playerStore?: LecturePlayerStore | null;
+  playerControls?: LecturePlayerControls | null;
+  /** The board the finished lecture plays on, over this one, while active. */
+  playerView?: LecturePlayerView | null;
+  playerBoardRef?: RefObject<WhiteboardHandle | null>;
+  playerCodePanelRef?: RefObject<HTMLCanvasElement | null>;
+  playerFreezeRef?: RefObject<HTMLCanvasElement | null>;
+  playerFullscreen?: { active: boolean; toggle: () => void } | null;
+  /** Pointer movement over this wakes the playback bar. */
+  playerActivityRef?: RefObject<HTMLElement | null>;
+  /** A phone's transport is docked outside the scaled paper by its shell. */
+  showPlayerBar?: boolean;
+  /** A phone's caption is docked outside the paper by its shell. */
+  showCaption?: boolean;
+  /** A sentence is being taught without its voice: its words show regardless of subtitles. */
+  voiceDegraded?: boolean;
+  verifiedDiagram?: VerifiedDiagram | null;
+  /** DSA code-lesson overlay, rendered inside the scaled board box. */
+  codeLessonPanel?: ReactNode;
+  codeLessonController: CodeLessonController;
+  /** The student's marker. While armed it owns the board's pointer. */
+  marking?: BoardMarkingApi | null;
+  onRetraceEntity?: (entityId: string) => void;
+  onRetryError: (question: string) => void;
+  onDismissError: () => void;
+}
+
+function canvasPointFromPointer(
+  event: PointerEvent<HTMLDivElement>,
+): { x: number; y: number } {
+  const rect = event.currentTarget.getBoundingClientRect();
+  const width = Math.max(rect.width, 1);
+  const height = Math.max(rect.height, 1);
+  return {
+    x: ((event.clientX - rect.left) / width) * BOARD_WIDTH,
+    y: ((event.clientY - rect.top) / height) * BOARD_HEIGHT,
+  };
+}
+
+export function SessionBoardCanvas({
+  boardViewport,
+  whiteboardRef,
+  cursorState,
+  settings,
+  phase,
+  currentSegmentText,
+  lastError,
+  saveFailure = null,
+  isReplaying,
+  rewindBoardRef,
+  exportBoardRef,
+  exportBoardMounted,
+  rewindActive,
+  rewindCursorState,
+  rewindSegmentText,
+  playerStore,
+  playerControls,
+  playerView,
+  playerBoardRef,
+  playerCodePanelRef,
+  playerFreezeRef,
+  playerFullscreen,
+  playerActivityRef,
+  showPlayerBar = true,
+  showCaption = true,
+  voiceDegraded = false,
+  verifiedDiagram,
+  codeLessonPanel,
+  codeLessonController,
+  marking,
+  onRetraceEntity,
+  onRetryError,
+  onDismissError,
+}: SessionBoardCanvasProps) {
+  const codeLessonActive = useSyncExternalStore(
+    (listener) => codeLessonController.subscribe(listener),
+    () => Boolean(codeLessonController.getActivePlan()),
+    () => false,
+  );
+  const retraceBusyRef = useRef(false);
+  const [hoveringAnchor, setHoveringAnchor] = useState(false);
+  const playerActive = Boolean(playerView?.active);
+  const caption = sessionCaption({
+    enabled: settings.subtitlesEnabled || codeLessonActive,
+    phase,
+    currentSegmentText,
+    rewindActive,
+    rewindSegmentText,
+    playerView,
+    voiceDegraded,
+  });
+  const idle = phase === "idle" && !isReplaying && !rewindActive && !playerActive;
+  const markingArmed = Boolean(marking?.armed);
+  // The marker owns every pointer while it is out: a stroke must never also
+  // fire a retrace or open a label popover.
+  const canRetrace = idle && !markingArmed && Boolean(verifiedDiagram && onRetraceEntity);
+
+  const handlePointerMove = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    if (!canRetrace || !verifiedDiagram) {
+      setHoveringAnchor(false);
+      return;
+    }
+    const point = canvasPointFromPointer(event);
+    setHoveringAnchor(hitTestVerifiedAnchor(point.x, point.y, verifiedDiagram) !== null);
+  }, [canRetrace, verifiedDiagram]);
+
+  const handlePointerLeave = useCallback(() => {
+    setHoveringAnchor(false);
+  }, []);
+
+  const triggerRetrace = useCallback((entityId: string) => {
+    if (!onRetraceEntity || retraceBusyRef.current) return;
+    retraceBusyRef.current = true;
+    onRetraceEntity(entityId);
+    window.setTimeout(() => {
+      retraceBusyRef.current = false;
+    }, 900);
+  }, [onRetraceEntity]);
+
+  const handlePointerDown = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    if (!canRetrace || !verifiedDiagram) return;
+    const point = canvasPointFromPointer(event);
+    const hit = hitTestVerifiedAnchor(point.x, point.y, verifiedDiagram);
+    if (!hit) return;
+    event.preventDefault();
+    triggerRetrace(hit.id);
+  }, [canRetrace, triggerRetrace, verifiedDiagram]);
+
+  // Symbols become answerable once the figure has settled.
+  const labelsSettled = (phase === "idle" || phase === "speaking") && !markingArmed;
+
+  return (
+    <div
+      className="absolute inset-0 z-[1] overflow-hidden [isolation:isolate]"
+    >
+      <div
+        style={{
+          position: "absolute",
+          top: 0,
+          left: 0,
+          width: "100%",
+          height: "100%",
+          overflow: "hidden",
+          isolation: "isolate",
+          transform: "translateZ(0)",
+          borderRadius: 5,
+        }}
+      >
+        <div
+          style={{
+            position: "absolute",
+            top: 0,
+            left: 0,
+            width: BOARD_WIDTH,
+            height: BOARD_HEIGHT,
+            transform: `scale(${boardViewport.scale})`,
+            transformOrigin: "top left",
+          }}
+        >
+          <Whiteboard
+            ref={whiteboardRef}
+            width={BOARD_WIDTH}
+            height={BOARD_HEIGHT}
+            cursorState={cursorState}
+            inkColor={getMarkerColorHex(settings.markerColor)}
+            pencilColor={getMarkerColorHex(settings.pencilColor)}
+            markerThickness={settings.markerThickness}
+            pencilThickness={settings.pencilThickness}
+            markerStunts={settings.markerStunts}
+          />
+          {codeLessonPanel}
+          {marking ? (
+            <BoardMarkingLayer
+              armed={marking.armed}
+              marks={marking.marks}
+              draftPoints={marking.draftPoints}
+              atMarkLimit={marking.atMarkLimit}
+              onPointerDown={marking.onPointerDown}
+              onPointerMove={marking.onPointerMove}
+              onPointerUp={marking.onPointerUp}
+            />
+          ) : null}
+          {verifiedDiagram?.labelGlossary ? (
+            <DiagramLabelInspector
+              diagram={verifiedDiagram}
+              glossary={verifiedDiagram.labelGlossary}
+              scale={1}
+              enabled={labelsSettled}
+            />
+          ) : null}
+          {canRetrace ? (
+            <div
+              aria-hidden="true"
+              onPointerDown={handlePointerDown}
+              onPointerMove={handlePointerMove}
+              onPointerLeave={handlePointerLeave}
+              style={{
+                position: "absolute",
+                inset: 0,
+                zIndex: 2,
+                cursor: hoveringAnchor ? "pointer" : "default",
+              }}
+            />
+          ) : null}
+          {canRetrace && verifiedDiagram
+            ? verifiedDiagram.anchors.map((anchor) => (
+                // Keyboard path for the pointer hit layer above: Tab lands on
+                // each diagram part and Enter traces it.
+                <button
+                  key={anchor.id}
+                  type="button"
+                  onClick={() => triggerRetrace(anchor.id)}
+                  aria-label={`Trace ${
+                    anchor.labels.length > 0 ? anchor.labels.join(", ") : anchor.id
+                  } on the diagram`}
+                  className="absolute rounded-md border-0 bg-transparent p-0 opacity-0 outline-none focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-sky-500"
+                  style={{
+                    left: anchor.x - 4,
+                    top: anchor.y - 4,
+                    width: anchor.width + 8,
+                    height: anchor.height + 8,
+                    zIndex: 3,
+                    pointerEvents: "none",
+                  }}
+                />
+              ))
+            : null}
+
+          {rewindActive ? (
+            // A second board, opaque and on top. The live board keeps every
+            // stroke it had — including the half-drawn one the pause froze —
+            // so going live is just dropping this layer.
+            <div
+              className="absolute inset-0"
+              style={{ zIndex: 5 }}
+              aria-label="Earlier in this lecture"
+            >
+              <Whiteboard
+                ref={rewindBoardRef}
+                width={BOARD_WIDTH}
+                height={BOARD_HEIGHT}
+                cursorState={rewindCursorState}
+                inkColor={getMarkerColorHex(settings.markerColor)}
+                pencilColor={getMarkerColorHex(settings.pencilColor)}
+                markerThickness={settings.markerThickness}
+                pencilThickness={settings.pencilThickness}
+                markerStunts={settings.markerStunts}
+              />
+            </div>
+          ) : null}
+
+          {playerView?.active ? (
+            // The finished lecture replayed on its own board, over the
+            // finished one. Hidden until its first frame is built, so the
+            // board underneath is what shows while it catches up.
+            <div
+              className="absolute inset-0"
+              style={{ zIndex: 6, visibility: playerView.revealed ? "visible" : "hidden" }}
+              aria-label="Lecture playback"
+            >
+              <Whiteboard
+                ref={playerBoardRef}
+                width={BOARD_WIDTH}
+                height={BOARD_HEIGHT}
+                cursorState={playerView.cursorState}
+                inkColor={getMarkerColorHex(settings.markerColor)}
+                pencilColor={getMarkerColorHex(settings.pencilColor)}
+                markerThickness={settings.markerThickness}
+                pencilThickness={settings.pencilThickness}
+                markerStunts={settings.markerStunts}
+              />
+              <canvas
+                ref={playerCodePanelRef}
+                aria-hidden
+                className="pointer-events-none absolute left-0 top-0"
+                style={{ width: BOARD_WIDTH, height: BOARD_HEIGHT }}
+              />
+              <canvas
+                ref={playerFreezeRef}
+                aria-hidden
+                className="pointer-events-none absolute left-0 top-0"
+                style={{ width: BOARD_WIDTH, height: BOARD_HEIGHT, visibility: "hidden" }}
+              />
+            </div>
+          ) : null}
+        </div>
+
+        {showCaption && (playerView?.active ? (
+          // Lifted clear of the playback bar along the bottom edge.
+          <div className="pointer-events-none absolute inset-x-0 top-0" style={{ bottom: showPlayerBar ? 64 : 0 }}>
+            <ResponseBubble
+              text={caption.text}
+              visible={caption.visible}
+            />
+          </div>
+        ) : (
+          <ResponseBubble
+            text={caption.text}
+            visible={caption.visible}
+            notice={caption.notice}
+          />
+        ))}
+
+        {showPlayerBar && playerStore && playerControls ? (
+          <LecturePlayerBar
+            store={playerStore}
+            controls={playerControls}
+            fullscreen={playerFullscreen}
+            activityTargetRef={playerActivityRef}
+          />
+        ) : null}
+
+        <div className="pointer-events-none absolute bottom-20 left-1/2 z-30 flex w-[calc(100%-2rem)] max-w-xl -translate-x-1/2 flex-col items-center gap-3">
+          {saveFailure && (
+            <SaveFailureBanner
+              message={saveFailure.message}
+              onRetrySave={saveFailure.onRetrySave}
+              onDismiss={saveFailure.onDismiss}
+              className="relative bottom-auto left-auto max-w-full translate-x-0"
+            />
+          )}
+          {phase === "idle" && lastError && !(lastError.billing && isOutOfUsageLock(lastError.billing)) && (
+            <BoardErrorBanner
+              message={lastError.message}
+              onRetry={() => onRetryError(lastError.question)}
+              onDismiss={onDismissError}
+              className="relative bottom-auto left-auto max-w-full translate-x-0"
+            />
+          )}
+        </div>
+
+      </div>
+      {exportBoardMounted ? (
+        <div
+          aria-hidden
+          style={{
+            position: "fixed",
+            left: -10000,
+            top: 0,
+            width: BOARD_WIDTH,
+            height: BOARD_HEIGHT,
+            overflow: "hidden",
+            pointerEvents: "none",
+          }}
+        >
+          <Whiteboard
+            ref={exportBoardRef}
+            width={BOARD_WIDTH}
+            height={BOARD_HEIGHT}
+            cursorState="drawing"
+            inkColor={getMarkerColorHex(settings.markerColor)}
+            pencilColor={getMarkerColorHex(settings.pencilColor)}
+            markerThickness={settings.markerThickness}
+            pencilThickness={settings.pencilThickness}
+            thinkingMotion="none"
+          />
+        </div>
+      ) : null}
+    </div>
+  );
+}

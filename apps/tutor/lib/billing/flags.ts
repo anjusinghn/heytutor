@@ -1,0 +1,89 @@
+import { ttsConfig } from "../tts/providerConfig";
+import { timingSafeEqualText } from "@/lib/crypto/timingSafeEqualText";
+import { usesRazorpay } from "./razorpayConfig";
+import { resolveLlmEndpoint } from "../llm/llmProvider";
+
+const TRUTHY = new Set(["1", "true", "yes", "on"]);
+const FALSY = new Set(["0", "false", "no", "off"]);
+
+function autumnSecret(env: NodeJS.ProcessEnv): string | undefined {
+  return env.AUTUMN_SECRET_KEY?.trim() || undefined;
+}
+
+/**
+ * Autumn checkout is on in production unless AUTUMN_ENABLED=0.
+ * Local/dev stays off unless AUTUMN_ENABLED=1.
+ *
+ * A missing AUTUMN_SECRET_KEY cannot fail-close teaching: the USD ledger
+ * still meters spend. Checkout/portal stay unavailable until the key is set.
+ */
+export function isAutumnEnabled(
+  env: NodeJS.ProcessEnv = process.env,
+  nodeEnv = env.NODE_ENV,
+): boolean {
+  if (usesRazorpay(env)) return false;
+  if (!autumnSecret(env)) return false;
+  const raw = env.AUTUMN_ENABLED?.trim().toLowerCase();
+  if (raw && FALSY.has(raw)) return false;
+  if (raw && TRUTHY.has(raw)) return true;
+  return nodeEnv === "production";
+}
+
+/** No key for the provider that serves the LLM lanes (`LLM_PROVIDER`). */
+export function isProviderMockMode(env: NodeJS.ProcessEnv = process.env): boolean {
+  return !resolveLlmEndpoint(env).apiKey;
+}
+
+export function isTtsConfigured(env: NodeJS.ProcessEnv = process.env): boolean {
+  const config = ttsConfig("en-IN", false, env);
+  return Boolean(config.apiKey && config.voiceId);
+}
+
+export const LECTURE_LAB_HEADER = "x-heytutor-lecture-lab";
+export const LECTURE_LAB_ZERO_RETENTION_HEADER = "x-heytutor-lecture-lab-zero-retention";
+export const LECTURE_LAB_STANDARD_MODEL_HEADER = "x-heytutor-lecture-lab-standard-model";
+
+/**
+ * Lecture-lab spend bypass. The header value must match LECTURE_LAB_TOKEN
+ * (timing-safe). A missing token never opens the gate — including when
+ * Autumn is off and including NODE_ENV=production.
+ */
+export function isLectureLabRequest(request: Request, env: NodeJS.ProcessEnv = process.env): boolean {
+  const expected = env.LECTURE_LAB_TOKEN?.trim() ?? "";
+  const presented = request.headers.get(LECTURE_LAB_HEADER)?.trim() ?? "";
+  if (!expected || !presented) return false;
+  return timingSafeEqualText(presented, expected);
+}
+
+/**
+ * Evaluation corpora can contain private student questions. Only a request
+ * already authenticated as lecture-lab traffic may opt out of retained
+ * observability; ordinary product requests cannot suppress their trace.
+ */
+export function shouldSuppressLectureLabTrace(
+  request: Request,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return request.headers.get(LECTURE_LAB_ZERO_RETENTION_HEADER) === "1" &&
+    isLectureLabRequest(request, env);
+}
+
+/** Only authenticated evaluation traffic may force every paid lane to standard K3. */
+export function shouldUseLectureLabStandardModel(
+  request: Request,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return request.headers.get(LECTURE_LAB_STANDARD_MODEL_HEADER) === "1" &&
+    isLectureLabRequest(request, env);
+}
+
+/** Live planners stay at 60 s; authenticated standard-K3 scene evals may use 120 s. */
+export function lectureLabPlannerDeadlineCapMs(
+  request: Request,
+  env: NodeJS.ProcessEnv = process.env,
+): 60_000 | 120_000 {
+  return request.headers.get("x-scene-planner-version") === "2" &&
+      shouldUseLectureLabStandardModel(request, env)
+    ? 120_000
+    : 60_000;
+}

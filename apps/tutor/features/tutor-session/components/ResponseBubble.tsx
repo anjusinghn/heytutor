@@ -1,0 +1,73 @@
+"use client";
+
+import { formatLiveSubtitle } from "@/lib/client/subtitleText";
+import { MathText } from "@/features/tutor-session/components/MathText";
+
+const LIVE_SUBTITLE_MAX_CHARS = 140;
+
+function truncateSubtitle(text: string): string {
+  const cleaned = formatLiveSubtitle(text);
+
+  if (cleaned.length <= LIVE_SUBTITLE_MAX_CHARS) {
+    return cleaned;
+  }
+
+  const truncated = cleaned.slice(0, LIVE_SUBTITLE_MAX_CHARS).trimEnd();
+  const lastSpace = truncated.lastIndexOf(" ");
+
+  if (lastSpace > LIVE_SUBTITLE_MAX_CHARS * 0.6) {
+    return `${truncated.slice(0, lastSpace)}…`;
+  }
+
+  return `${truncated}…`;
+}
+
+export interface ResponseBubbleProps {
+  text: string;
+  visible: boolean;
+  placement?: "overlay" | "below";
+  /** A short line above the words, such as the voice being unavailable. */
+  notice?: string | null;
+}
+
+export function ResponseBubble({ text, visible, placement = "overlay", notice = null }: ResponseBubbleProps) {
+  if (!visible || !text) {
+    return null;
+  }
+
+  // With the voice gone the caption is the only way to receive the sentence:
+  // show it whole (the phone dock scrolls), never cut at an ellipsis.
+  const displayText = notice ? formatLiveSubtitle(text) : truncateSubtitle(text);
+
+  return (
+    <div
+      className={placement === "below"
+        ? "animate-wb-bubble-fade relative w-full px-4 py-3"
+        : "animate-wb-bubble-fade pointer-events-none absolute bottom-3 left-1/2 z-10 max-w-[calc(100%-2rem)] -translate-x-1/2 px-4 py-3 md:bottom-5 md:max-w-xl md:px-6"}
+      style={{
+        backgroundColor: "rgba(13, 34, 49, 0.94)",
+        color: "var(--frost)",
+        borderRadius: "12px",
+        boxShadow: "0 10px 30px -8px rgba(0, 0, 0, 0.55)",
+        border: "1px solid rgba(255, 255, 255, 0.08)",
+        backdropFilter: "blur(8px)",
+      }}
+    >
+      {notice ? (
+        <p role="status" className="mb-1 text-center text-xs font-medium" style={{ color: "var(--frost)", opacity: 0.7 }}>
+          {notice}
+        </p>
+      ) : null}
+      <p
+        className={placement === "below"
+          ? "text-center text-sm font-medium leading-relaxed"
+          : "text-center text-sm font-medium leading-relaxed md:text-base"}
+        style={{
+          color: "var(--frost)",
+        }}
+      >
+        <MathText>{displayText}</MathText>
+      </p>
+    </div>
+  );
+}

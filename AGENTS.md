@@ -1,0 +1,143 @@
+# HeyTutor
+
+AI whiteboard tutor with two coordinated streams and one authority boundary:
+
+1. **Verified diagram** — `@heytutor/scene-engine` commits exact, qualitative, or
+   question-representation geometry before narration.
+2. **Narrated work** — teaching LLM + ElevenLabs TTS write equations in the left
+   work area and reveal the already-verified scene in sync on Konva.
+
+## Quick Reference
+
+- **Package manager:** pnpm (`pnpm@10.32.0`)
+- **Monorepo:** Turborepo — `apps/*` + `packages/*`
+- **Dev (tutor):** `pnpm dev:tutor` → http://localhost:3000
+- **Dev (landing):** `pnpm dev:landing` → http://localhost:5173
+- **Check:** `pnpm typecheck && pnpm lint && pnpm build`
+- **Verify:** `pnpm --filter @heytutor/scene-engine verify && pnpm --filter @heytutor/tutor-core verify && pnpm --filter @heytutor/tutor verify`
+- **DB:** `pnpm db:up` then `pnpm --filter @heytutor/tutor db:migrate`
+
+Mock mode works without API keys (`FIREWORKS_API_KEY`, `ELEVENLABS_API_KEY`).
+
+## Turn Pipeline
+
+```text
+question
+  -> TurnPlanV3 (quantities, claims, laws, visualRequirement)
+  -> ProblemIR/v1 + SolverResult/v1 (source-grounded numeric authority)
+  -> scene-document/v2 candidates + constraint compilers
+  -> validate / proof / repair / compile / label layout
+  -> exact_verified | qualitative_verified | question_representation
+  -> atomic VerifiedDiagram commit + narrated reveal
+  -> teaching [STEP] narration + work-area WRITE
+```
+
+Required visuals that fail both exact and source-grounded representation skip
+the canvas and still teach. Every rendered part passes the authority boundary
+described in rule 5.
+
+## Where to Start
+
+| Task | Start here |
+|------|------------|
+| Live teaching loop | `apps/tutor/features/tutor-session/hooks/turn/useQuestionHandler.ts` |
+| Scene engine authority | `packages/scene-engine/` |
+| Scene presentation / reveal | `apps/tutor/features/tutor-session/lib/scene/verifiedScenePresentation.ts` |
+| Representation fallback | `apps/tutor/features/tutor-session/lib/scene/representationFallback.ts` |
+| Voice + handwriting sync | [docs/architecture/tutor-sync-architecture.md](docs/architecture/tutor-sync-architecture.md) |
+| LLM / planner proxy | `apps/tutor/app/api/chat/route.ts` |
+| Drawing protocol | `packages/drawing/src/protocol/drawingProtocol.ts` |
+| Canvas rendering | `packages/whiteboard/src/Whiteboard.tsx` |
+| Full screen board | `apps/tutor/features/tutor-session/lib/board/boardFullscreen.ts` + `hooks/useBoardFullscreen.ts` |
+| Turn persistence trust | `apps/tutor/lib/scene/turnScenePersistence.ts` |
+| Syllabus capability coverage | `packages/scene-engine/scripts/verify/verify-syllabus-corpus.ts` |
+| Bank family compile (live ink) | `packages/scene-engine/scripts/verify/verify-bank-family-compile.ts` |
+| Question bank pipeline | `tools/question-bank/` + `data/question-bank/` |
+| DSA worked examples (LeetCode) | `packages/scene-engine/src/dsa/` — simulators, `traceToScene`, `familyTeaching` |
+| DSA lesson bench | `apps/tutor/scripts/lecture-lab/dsa-run.ts` + `data/leetcode-probes/` |
+| Admin panel (overview / users / logs / fails / community) | `apps/tutor/app/admin/(panel)/` + `features/admin/{nav,analytics,users,turns,shared}/` + `lib/admin/` |
+| Test playground (syllabus lectures) | `apps/tutor/app/admin/playground/page.tsx` + `features/admin/AdminPlayground.tsx` |
+| Finished-lecture playback bar (seek, speed, chapters) | `apps/tutor/features/tutor-session/hooks/useLecturePlayer.ts` + `components/LecturePlayerBar.tsx` + `lib/replay/lecturePlayer.ts` |
+| Community (public boards, remix) | `apps/tutor/lib/community/` (`publicBoard.ts` privacy whitelist, `queries.ts`, `remix.ts`) + `features/community/`; moderation in `/admin/community`; gate `verify-community-privacy.ts` |
+| Chemistry figures (formula to figure) | `packages/scene-engine/src/chemistry/` — families, `classify.ts`, `router.ts`; bench in `scripts/chemistry-lab/` |
+| Lecture ratings (stars + note, during and after each lecture) | `apps/tutor/features/tutor-session/hooks/useLectureRating.ts` + `components/LectureRating.tsx` + `lib/turn/lectureRatingPrompt.ts`; route `app/api/boards/[boardId]/turns/[turnId]/rating/`; admin `/admin/ratings`; [plan](docs/plans/lecture-ratings.md) |
+| Reference pictures (judged Commons diagram, pencil reveal; off by default) | `apps/tutor/lib/reference-picture/` + `app/api/reference-picture/` + `packages/drawing/src/protocol/referencePicture.ts` |
+
+## Agent Guidelines
+
+- **Diagram coverage work or completion logging:** resumed 3 November 2026 by general causes with a measured chapter table, no packets and no row claims. Read [the coverage plan](DIAGRAM_ENGINE_COVERAGE_PLAN.md), [topic matrix](docs/plans/diagram-topic-matrix/index.md) and [progress contract](docs/plans/diagram-topic-matrix/progress.md) before reporting completion. The integration owner updates accepted topic counts, only with evidence.
+- [Session handoff](docs/agent/session-handoff.md) — compact seed; Physics certified, Maths operators in (2 OCR leftovers)
+- [Session ownership](docs/agent/session-ownership.md) — announce before editing scene-engine synthesize/document/capability/verify; do not load another session's gate
+- [Diagram engine priority](docs/plans/diagram-engine-priority.md) — ranked issues; live-check patches first, then honest families, then persist
+- [DSA lessons](docs/agent/dsa-lessons.md) — the LeetCode lane: simulators, what a frame may draw, lesson shape, and the gates
+- [Chemistry lessons](docs/agent/chemistry-lessons.md) — the chemistry lane: 13 figure families computed from the formula, the subject test, the board notation, and the gates
+- [LLM provider](docs/agent/llm-provider.md): `LLM_PROVIDER=azure` (gpt-6.1-sol on Foundry), `openai_compat` (a relay, gpt-6-sol, with a Fireworks circuit breaker) or `fireworks` (Kimi K3); what each accepts and same-harness numbers
+- [Lecture lab](docs/agent/lecture-lab.md) — run whole lectures offline against the dev server, grade them, and diff rounds; the DSA lane replays a LeetCode turn and renders every board frame
+- [Wrong figures: causes and ranked fixes](docs/plans/figure-relevance-fixes.md) — 87 wrong figures traced to the probe cue and the family layer, with counts per fix
+- [Start — architecture map](start.md)
+- [Folder layout](docs/agent/layout.md) — where new files go; cleanup backlog in [folder-structure.md](docs/plans/folder-structure.md)
+- [Architecture & data flow](docs/agent/architecture.md)
+- [Backend API & lib modules](docs/agent/backend.md)
+- [Shared packages](docs/agent/packages.md)
+- [Sync / voice / writing](docs/architecture/tutor-sync-architecture.md)
+- [Verified scene debug](docs/agent/geometry-debug.md)
+- [Universal illustration engine v4](docs/architecture/universal-illustration-engine-v4.md)
+- [Verified diagram architecture](docs/architecture/diagram-accuracy-architecture.md)
+- [Syllabus capability plan v5](docs/architecture/universal-syllabus-capability-plan-v5.md)
+- [Deploy runbook](docs/ops/ci-cd.md) (push to `main` deploys the tutor; no required checks)
+
+## Git authorship
+
+Never add Cursor / `cursoragent` as a commit co-author. Never commit `.cursor/` or Cursor IDE lockfiles. Author commits as the user only.
+
+## Critical Rules
+
+1. **Canvas is 1200×700**, origin top-left. Diagram zone: x 400–1160.
+2. **`@heytutor/scene-engine` owns every diagram mark** — geometry, topology,
+   labels, dimensions, layout, and reveal order. No topic templates, chapter
+   registries, regex routers, fixed-pixel plugins, or model-authored diagram ink.
+   One owner-approved exception (26 Oct 2026), off by default
+   (`DIAGRAM_REFERENCE_PICTURE=on`): when no verified figure is drawn, the
+   server may show a **reference picture**, a free licence Commons diagram
+   that a vision judge accepted, revealed by the pencil from a stored stroke
+   plan. It is never presented as verified geometry; its authority is the
+   stored record. See
+   [docs/architecture/reference-pictures.md](docs/architecture/reference-pictures.md).
+3. **Teaching stream owns narration and work-area `WRITE` only** — never draw,
+   label, annotate, erase, circle, or supply focus coordinates. `[FOCUS:id]` may
+   trace existing verified geometry, or (with `REFERENCE_PICTURE_PART_FOCUS=on`)
+   ring a label the server located on a stored reference picture. Filters and `useCommandExecution()` enforce
+   ownership. One owner-approved exception (28 Oct 2026): `[FOCUS:id|keep]`
+   leaves a ring on a verified scene part until the work column turns its page
+   or the figure leaves the zone. The ring's geometry comes only from the scene
+   entity's verified anchor, never from the model. With `DIAGRAM_LESSON_FIGURES=on`,
+   `[FOCUS:figure_2]` or `[FOCUS:figure_3]` may move the zone forward to a later
+   lesson figure the engine already verified; the executor draws that figure, and
+   the teaching stream supplies only the id, never geometry.
+4. **Numeric authority is deterministic** — `TurnPlanV3` is scene-facing;
+   `ProblemIR` + solver recompute supported values. Stale planner scalars cannot
+   pair with a correct diagram.
+5. **Never render anything false; render every verified part.** With
+   `DIAGRAM_YIELD_POLICY=verified_parts` (off by default), omit localized
+   unprovable labels, record each demotion, and recompile the remaining figure
+   through all source, numeric and geometry guards. Core truth failures still
+   block the figure; repairs preserve required geometry. Verified answer labels
+   wait until teaching finishes. Independently compiled fallbacks retain their
+   existing authority boundary.
+6. **Coverage grows via reusable operators/assertions**, never per-question
+   templates or validator bypasses. Corpus fixtures are oracles only.
+7. **Live writing uses estimated schedules first** — never block on late TTS
+   timings. See sync doc.
+8. **Packages must be built** before the tutor app picks up changes
+   (`turbo run dev` handles this).
+9. **Tutor accounts are Auth.js** — Google or email magic link when the gate
+   is on. Landing stays public. `?embed=1` / the landing lesson showcase is
+   the anonymous exception. **Auth is on** unless `AUTH_DISABLED=1` and
+   `NEXT_PUBLIC_AUTH_DISABLED=1` (`htutor_uid` is the device identity again).
+   The hatch is ignored when `NODE_ENV=production`.
+10. **Production tutor is one EC2 process** (`tsx server.ts`: UI + API +
+    WebSocket TTS). Landing production stays on Vercel (`accelute.co`).
+    GitHub deploys to Cloudflare Pages **dev** (`dev.accelute.co`) first,
+    then promotes the same commit to `main`. Leave `BACKEND_ORIGIN` unset.
+    Postgres is hosted (`DATABASE_URL`); lecture MP3s and question photos
+    are private S3. Runbook: [docs/ops/ci-cd.md](docs/ops/ci-cd.md).

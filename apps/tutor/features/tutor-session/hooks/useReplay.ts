@@ -1,0 +1,1103 @@
+import { useCallback, useEffect, type Dispatch, type RefObject, type SetStateAction } from "react";
+import {
+  applyReplayPlaybackRate,
+  applyReplaySpeed,
+  createAccumulatingMediaClock,
+  playReplayAudio,
+  remainingReplaySpeech,
+  speedAwareDelay,
+  stopReplayAudio,
+} from "@/lib/replay/replayAudio";
+import {
+  buildReplayTimeline,
+  findCueAtTime,
+  getPartialCommandCount,
+  type ReplayCue,
+} from "@/lib/replay/replayTimeline";
+import { exportNotesPdf, type NotesEpoch } from "@/lib/client/exportNotesPdf";
+import { pageTurnsEndingAt, storedTurnContinuesBoard, storedTurnPageQuestion } from "@/lib/boards/boardContinuation";
+import { syncStoredPageFigure } from "../lib/replay/pageFigureSync";
+import { notesPdfSectionsFromStoredTurns, notesPdfSlideImages } from "../lib/notes/notesPdf";
+import type { BoardEntry } from "@/lib/boards/types";
+import type { SettingsState } from "@/features/tutor-session/components/SettingsDrawer";
+import type { StoredSegment, StoredTurn } from "@/lib/boards/boardsClient";
+import type { DrawCommand, VerifiedDiagram } from "@heytutor/drawing";
+import {
+  isStoredCommandTrustedGeometry,
+  parseStoredSegmentCommands,
+  lessonNarrationText,
+  cancelFrame,
+  scheduleFrame,
+} from "@heytutor/drawing";
+import type { WhiteboardHandle } from "@heytutor/whiteboard";
+import {
+  estimateSpeechDurationMs,
+  mathToSpeech,
+  createScheduledWriteClock,
+  tutorDebug,
+  unlockTutorAudio,
+  type TTSClient,
+} from "@heytutor/tutor-core";
+import { appendCodeLessonNotesImages } from "@/lib/code-render/codeLessonNotesImages";
+import { storedCodeLessonPlan } from "@/lib/code-lesson/persistedCodeLesson";
+import type { CodeLessonController } from "../lib/code-lesson/codeLessonController";
+import { restoreDsaFrames } from "../lib/code-lesson/dsaFrames";
+import type { LessonFigureSequence } from "../lib/scene/lessonFigureSequence";
+import { restoreLessonFigures } from "../lib/scene/restoreLessonFigures";
+import { restoreVerifiedDiagramFromTurn } from "../lib/scene/restoreVerifiedDiagram";
+import { restoreReferencePictureFromTurn } from "../lib/scene/restoreReferencePicture";
+import { preloadReferencePicturesForTurns } from "../lib/scene/referencePicturePreload";
+import type { BoardLayoutState, TutorPhase } from "../types";
+import { isWhiteboardReadyToDraw } from "../lib/board/whiteboardReady";
+import { heldLessonNotesPage } from "../lib/board/doubtPage";
+import { drawSegmentInk, planSegmentInk } from "../lib/turn/segmentInk";
+import type { ExecuteCommandOptions } from "./turn/types";
+import { completeReplayDiagramTurn } from "../lib/replay/completeReplayDiagram";
+import { resetReplayPageAtTurn } from "../lib/replay/replayPageBoundary";
+
+type ReplayGenerationState = {
+  generation: number;
+  activeGeneration: number;
+  cancelled: boolean;
+};
+
+export function isReplayGenerationCurrent(state: ReplayGenerationState): boolean {
+  return state.generation === state.activeGeneration && !state.cancelled;
+}
+
+export type UseReplayParams = {
+  whiteboardRef: RefObject<WhiteboardHandle | null>;
+  cancelRef: RefObject<boolean>;
+  speedRef: RefObject<number>;
+  isPausedRef: RefObject<boolean>;
+  replayAudioRef: RefObject<HTMLAudioElement | null>;
+  replayDrawClockRef: RefObject<{ setPaused: (paused: boolean) => void } | null>;
+  replayAudioPreloadRef: RefObject<Map<string, HTMLAudioElement>>;
+  storedTurnsRef: RefObject<StoredTurn[]>;
+  /** Replayed DSA turns re-commit their persisted CodeLessonPlan here. */
+  codeLessonControllerRef?: RefObject<CodeLessonController | null>;
+  /** The executor's lesson figure sequence: replayed `[FOCUS:figure_k]` cues advance it. */
+  lessonFiguresRef?: RefObject<LessonFigureSequence | null>;
+  /**
+   * FOCUS / ANNOTATE resolve against this. Replay must rebuild it from the
+   * stored scene or the intro draws and the pen never traces afterwards.
+   */
+  activeVerifiedDiagramRef?: RefObject<VerifiedDiagram | null>;
+  setActiveVerifiedDiagram?: (diagram: VerifiedDiagram | null) => void;
+  fbdPhaseStartedRef?: RefObject<boolean>;
+  /** The board's layout: a doubt's fresh page holds it with the lesson's page and the resume puts it back. */
+  boardLayoutRef?: RefObject<BoardLayoutState>;
+  replayGenerationRef: RefObject<number>;
+  replayCueRef: RefObject<ReplayCue | null>;
+  ttsClientRef: RefObject<TTSClient | null>;
+  notesEpochsRef: RefObject<NotesEpoch[]>;
+  narrationSinceEpochRef: RefObject<string>;
+  liveQuestionRef: RefObject<string>;
+  phaseRef: RefObject<TutorPhase>;
+  isReplaying: boolean;
+  isPaused: boolean;
+  isDownloading: boolean;
+  replayProgressMs: number;
+  boards: BoardEntry[];
+  sessionId: string;
+  setPhase: Dispatch<SetStateAction<TutorPhase>>;
+  setCurrentSegmentText: Dispatch<SetStateAction<string>>;
+  setNarrationText: Dispatch<SetStateAction<string>>;
+  setIsPaused: Dispatch<SetStateAction<boolean>>;
+  setIsReplaying: Dispatch<SetStateAction<boolean>>;
+  setReplayProgressMs: Dispatch<SetStateAction<number>>;
+  setReplayTotalMs: Dispatch<SetStateAction<number>>;
+  setSettings: Dispatch<SetStateAction<SettingsState>>;
+  setIsDownloading: Dispatch<SetStateAction<boolean>>;
+  cancellableDelay: (duration: number) => Promise<void>;
+  raceWithCancel: <T>(promise: Promise<T>) => Promise<T | undefined>;
+  executeCommandWithCancel: (
+    command: DrawCommand,
+    options?: ExecuteCommandOptions,
+  ) => Promise<void>;
+  executeCommand: (command: DrawCommand, options?: ExecuteCommandOptions) => Promise<void>;
+  resetBoardLayout: (keepHeading?: boolean, forceSequentialWorkLayout?: boolean) => void;
+  finishLectureUi: () => void;
+  pauseTurn: () => void;
+  resumeTurn: () => void;
+  /**
+   * Stop a board restore that is still inking the saved page and wait for it.
+   * Replay clears the board and the work column layout; restore rows written
+   * after that land in replay's layout and push every replayed row down.
+   */
+  settleBoardRestore?: () => Promise<void>;
+};
+
+export function useReplay({
+  whiteboardRef,
+  cancelRef,
+  speedRef,
+  isPausedRef,
+  replayAudioRef,
+  replayDrawClockRef,
+  replayAudioPreloadRef,
+  storedTurnsRef,
+  codeLessonControllerRef,
+  lessonFiguresRef,
+  activeVerifiedDiagramRef,
+  setActiveVerifiedDiagram,
+  fbdPhaseStartedRef,
+  replayGenerationRef,
+  replayCueRef,
+  ttsClientRef,
+  notesEpochsRef,
+  narrationSinceEpochRef,
+  liveQuestionRef,
+  phaseRef,
+  isReplaying,
+  isPaused,
+  isDownloading,
+  replayProgressMs,
+  boards,
+  sessionId,
+  setPhase,
+  setCurrentSegmentText,
+  setNarrationText,
+  setIsPaused,
+  setIsReplaying,
+  setReplayProgressMs,
+  setReplayTotalMs,
+  setSettings,
+  setIsDownloading,
+  cancellableDelay,
+  raceWithCancel,
+  executeCommandWithCancel,
+  executeCommand,
+  resetBoardLayout,
+  finishLectureUi,
+  pauseTurn,
+  resumeTurn,
+  settleBoardRestore,
+  boardLayoutRef,
+}: UseReplayParams) {
+  /**
+   * Point the code panel and the verified diagram at the turn whose cues are
+   * about to play. FOCUS / ANNOTATE resolve against that diagram: without it
+   * the intro still draws from stored ink and the pen never traces after.
+   */
+  const syncReplayTurn = useCallback(
+    async (turnIndex: number, shouldCancel: () => boolean = () => false): Promise<void> => {
+      const turn = storedTurnsRef.current[turnIndex];
+      // A doubt answered on the lesson's page keeps that page's figure, code
+      // panel and walk-through. Rebuilding them here would drop the figure
+      // its FOCUS points at, or send the frames back to the first one. A
+      // doubt that drew its own figure swaps it in, and the resume brings
+      // the lesson's back (pageFigureAt).
+      if (turn && storedTurnContinuesBoard(turn)) {
+        const figure = await syncStoredPageFigure({
+          turns: storedTurnsRef.current,
+          turnIndex,
+          whiteboard: whiteboardRef.current,
+          layout: boardLayoutRef?.current ?? null,
+          executeCommand,
+          shouldCancel,
+          lessonFigures: lessonFiguresRef?.current,
+        });
+        if (figure.changed && !figure.cancelled) {
+          if (activeVerifiedDiagramRef) activeVerifiedDiagramRef.current = figure.diagram;
+          setActiveVerifiedDiagram?.(figure.diagram);
+          if (fbdPhaseStartedRef) fbdPhaseStartedRef.current = Boolean(figure.diagram);
+        }
+        return;
+      }
+      const controller = codeLessonControllerRef?.current;
+      const plan = turn ? storedCodeLessonPlan(turn.sceneArtifacts) : null;
+      if (controller) {
+        if (plan) controller.commit(plan);
+        else controller.reset();
+        // Rebuild the walk-through too, or the replayed FRAME cues have no
+        // frames to advance and the figure freezes on the first one.
+        restoreDsaFrames(controller, turn, plan);
+      }
+      restoreLessonFigures(lessonFiguresRef?.current, turn);
+      const diagram =
+        controller?.frames.current()?.presentation.diagram
+        ?? restoreVerifiedDiagramFromTurn(turn)
+        ?? restoreReferencePictureFromTurn(turn);
+      if (activeVerifiedDiagramRef) {
+        activeVerifiedDiagramRef.current = diagram;
+      }
+      setActiveVerifiedDiagram?.(diagram);
+      if (fbdPhaseStartedRef) {
+        fbdPhaseStartedRef.current = Boolean(diagram);
+      }
+    },
+    [
+      codeLessonControllerRef,
+      lessonFiguresRef,
+      storedTurnsRef,
+      activeVerifiedDiagramRef,
+      setActiveVerifiedDiagram,
+      fbdPhaseStartedRef,
+      whiteboardRef,
+      executeCommand,
+      boardLayoutRef,
+    ],
+  );
+
+  const runReplaySegmentDraw = useCallback(
+    async (
+      segment: StoredSegment,
+      segmentCommands: DrawCommand[],
+      narration: string,
+      generation: number,
+      audio?: HTMLAudioElement,
+      fallbackDurationMs?: number,
+      initialTextCommandIndex = 0,
+      startAtMs = 0,
+      opensSentence = true,
+      fallbackSpeechComplete?: () => boolean,
+      completedSentenceCommandCount = 0,
+    ): Promise<void> => {
+      const isCurrentReplay = () =>
+        isReplayGenerationCurrent({
+          generation,
+          activeGeneration: replayGenerationRef.current,
+          cancelled: cancelRef.current,
+        });
+
+      if (!isCurrentReplay()) {
+        return;
+      }
+
+      setPhase("drawing");
+      // Ink RAF speed tracks the live rate so mid-cue changes stay aligned.
+      whiteboardRef.current?.setAnimationSpeed(Math.max(speedRef.current, 0.1));
+      const trustedDiagramGeometry = isStoredCommandTrustedGeometry(segment.command);
+      const inkPlan = planSegmentInk({
+        commands: segmentCommands,
+        verifiedDiagramIntro: trustedDiagramGeometry,
+        hasNarration: narration.length > 0,
+      });
+      const durationMs =
+        fallbackDurationMs ??
+        segment.durationMs ??
+        estimateSpeechDurationMs(mathToSpeech(narration).length);
+      const spokenChars = mathToSpeech(narration).length;
+      const getRate = () => Math.max(speedRef.current, 0.1);
+      const shouldCancel = () => !isCurrentReplay();
+      const isPaused = () => isPausedRef.current;
+      const wallClock = createAccumulatingMediaClock({ getPlaybackRate: getRate, isPaused });
+      replayDrawClockRef.current = wallClock;
+      // An in-cue seek and the latest recorded position are both absolute
+      // media time. Keep that origin if failed media unload resets currentTime.
+      let mediaToWallOffsetMs = Math.max(startAtMs, 0);
+      const getDrawClockMs = createScheduledWriteClock({
+        nowMs: wallClock.nowMs,
+        getRawPositionMs: () => {
+          const wallMs = wallClock.positionMs();
+          if (audio && replayAudioRef.current === audio
+            && Number.isFinite(audio.currentTime) && audio.currentTime > 0) {
+            const mediaMs = audio.currentTime * 1000;
+            mediaToWallOffsetMs = mediaMs - wallMs;
+            return mediaMs;
+          }
+          return Math.max(startAtMs, wallMs + mediaToWallOffsetMs);
+        },
+      });
+
+      // Same pacing as the live lesson, on the recording's clock: figure parts
+      // wait for their cue words, FOCUS traces each part on its name, and a
+      // sentence's commands run in the order their words are spoken.
+      try {
+        await drawSegmentInk({
+          plan: inkPlan,
+          // A seek may have completed the gesture but still be inside its
+          // sentence. Its target ownership survives the remaining-command slice.
+          sentenceCommands: parseStoredSegmentCommands(segment.command),
+          completedSentenceCommandCount,
+          verifiedDiagramIntro: trustedDiagramGeometry,
+          clock: {
+            narration,
+            getTimings: () => segment.timings,
+            totalSpeechMs: narration ? durationMs : Math.max(inkPlan.totalDrawWeight, 200),
+            estimatedSpeechMs: durationMs,
+            // Without an alignment, cue words are estimated across the clip's
+            // real length rather than the default speaking rate.
+            msPerChar: !segment.timings && segment.durationMs && spokenChars > 0
+              ? segment.durationMs / spokenChars
+              : undefined,
+            getAudioPositionMs: getDrawClockMs,
+            getPlaybackRate: getRate,
+            // Drawing starts only after accepted voice start (or voiceDone).
+            // A missing recording's owned TTS may outlast the stored duration.
+            isSpeechActive: () => audio && replayAudioRef.current === audio
+              ? !audio.ended : fallbackSpeechComplete ? !fallbackSpeechComplete() : false,
+            isPaused,
+            nowMs: wallClock.nowMs,
+            // A recorded clip's position stops at its end; a code block still
+            // typing then finishes on the wall clock, as it does live.
+            ...(audio ? { isSpeechComplete: () => replayAudioRef.current === audio
+              ? audio.ended : fallbackSpeechComplete?.() ?? audio.ended }
+              : fallbackSpeechComplete ? { isSpeechComplete: fallbackSpeechComplete } : {}),
+            canAdvanceAfterSpeech: () => !isPausedRef.current,
+          },
+          getDiagram: () => activeVerifiedDiagramRef?.current ?? null,
+          isCancelled: shouldCancel,
+          waitWhilePaused: async () => {
+            while (isPausedRef.current) {
+              if (shouldCancel()) return false;
+              await new Promise((resolve) => window.setTimeout(resolve, 80));
+            }
+            return !shouldCancel();
+          },
+          execute: executeCommandWithCancel,
+          commandOptions: () => ({
+            applyLayout: false,
+            isCancelled: shouldCancel,
+            trustedDiagramGeometry,
+          }),
+          beforeCommand: () => whiteboardRef.current?.setAnimationSpeed(getRate()),
+          initialTextCommandIndex,
+          opensSentence,
+        });
+      } finally {
+        if (replayDrawClockRef.current === wallClock) replayDrawClockRef.current = null;
+      }
+    },
+    [activeVerifiedDiagramRef, cancelRef, isPausedRef, replayAudioRef, replayDrawClockRef, replayGenerationRef, speedRef, setPhase, whiteboardRef, executeCommandWithCancel],
+  );
+
+  const waitWhileReplayPaused = useCallback(async (generation: number) => {
+    while (isPausedRef.current) {
+      if (cancelRef.current || generation !== replayGenerationRef.current) {
+        return false;
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 80));
+    }
+    return !cancelRef.current && generation === replayGenerationRef.current;
+  }, [cancelRef, isPausedRef, replayGenerationRef]);
+
+  const renderBoardAtTime = useCallback(
+    async (timeMs: number, cues: ReplayCue[], generation: number) => {
+      const wb = whiteboardRef.current;
+      const isCurrentReplay = () =>
+        isReplayGenerationCurrent({
+          generation,
+          activeGeneration: replayGenerationRef.current,
+          cancelled: cancelRef.current,
+        });
+      if (!wb) {
+        return;
+      }
+
+      if (!isCurrentReplay()) {
+        return;
+      }
+
+      if (!wb) {
+        return;
+      }
+
+      await wb.clearBoard();
+      resetBoardLayout(false, false);
+
+      // Track turn crossings so the code panel always holds the plan of the
+      // turn being rendered; TYPE below then reveals its blocks instantly.
+      let syncedTurnIndex = cues.length > 0 ? cues[0]!.turnIndex : -1;
+      if (syncedTurnIndex >= 0) {
+        await syncReplayTurn(syncedTurnIndex, () => !isCurrentReplay());
+      }
+
+      // Render all completed commands instantly — no animation during seek.
+      // durationScale 0 makes the whiteboard jump to the final state.
+      for (const [cueIndex, cue] of cues.entries()) {
+        if (cue.startMs >= timeMs) {
+          break;
+        }
+
+        if (cue.turnIndex !== syncedTurnIndex) {
+          if (!await resetReplayPageAtTurn({
+            turn: storedTurnsRef.current[cue.turnIndex], previousTurnIndex: syncedTurnIndex, turnIndex: cue.turnIndex,
+            whiteboard: wb, resetBoardLayout, shouldCancel: () => !isCurrentReplay(),
+          })) return;
+          syncedTurnIndex = cue.turnIndex;
+          await syncReplayTurn(syncedTurnIndex, () => !isCurrentReplay());
+        }
+
+        const partialCount =
+          cue.endMs <= timeMs
+            ? cue.commands.length
+            : getPartialCommandCount(cue, timeMs - cue.startMs);
+
+        for (let i = 0; i < partialCount; i++) {
+          if (!isCurrentReplay()) {
+            return;
+          }
+          const command = cue.commands[i]!;
+          // FOCUS can also release permanent deferred labels and dimensions.
+          // Its seek path draws those instantly and skips the transient gesture.
+          if (command.type === "PAUSE") {
+            continue;
+          }
+          await executeCommand(command, {
+            durationScale: 0,
+            applyLayout: false,
+            isCancelled: () => !isCurrentReplay(),
+            trustedDiagramGeometry: cue.trustedDiagramGeometry,
+          });
+        }
+        if (cue.endMs <= timeMs) {
+          await completeReplayDiagramTurn({
+            cue,
+            nextCue: cues[cueIndex + 1],
+            turn: storedTurnsRef.current[cue.turnIndex],
+            pageTurns: pageTurnsEndingAt(storedTurnsRef.current, cue.turnIndex),
+            diagram: activeVerifiedDiagramRef?.current ?? null,
+            executeCommand,
+            shouldCancel: () => !isCurrentReplay(),
+            durationScale: 0,
+          });
+        }
+      }
+    },
+    [whiteboardRef, replayGenerationRef, cancelRef, executeCommand, resetBoardLayout, syncReplayTurn, storedTurnsRef, activeVerifiedDiagramRef],
+  );
+
+  const playReplayCue = useCallback(
+    async (
+      cue: ReplayCue,
+      offsetMs: number,
+      generation: number,
+      skipDraw: boolean,
+      nextCue?: ReplayCue,
+      startCommandIndex = 0,
+    ) => {
+      if (cancelRef.current || generation !== replayGenerationRef.current) {
+        return;
+      }
+
+      const ready = await waitWhileReplayPaused(generation);
+      if (!ready) {
+        return;
+      }
+
+      replayCueRef.current = cue;
+      if (cue.narration) {
+        setCurrentSegmentText(cue.narration);
+      }
+
+      // Preload the next segment's audio so there's no gap between cues.
+      if (nextCue?.audioUrl) {
+        const preloadKey = nextCue.audioUrl;
+        if (!replayAudioPreloadRef.current.has(preloadKey)) {
+          const preloaded = new Audio(nextCue.audioUrl);
+          preloaded.preload = "auto";
+          applyReplayPlaybackRate(preloaded, speedRef.current);
+          replayAudioPreloadRef.current.set(preloadKey, preloaded);
+        } else {
+          const existing = replayAudioPreloadRef.current.get(preloadKey);
+          if (existing) {
+            applyReplayPlaybackRate(existing, speedRef.current);
+          }
+        }
+      } else if (nextCue) {
+        const nextSpoken = (nextCue.segment.spokenText || nextCue.narration).trim();
+        if (nextSpoken) {
+          ttsClientRef.current?.prefetchSegment?.(nextSpoken);
+        }
+      }
+
+      const fallbackDurationMs =
+        cue.durationMsStored ?? estimateSpeechDurationMs(mathToSpeech(cue.narration).length);
+      const remainingMs = Math.max(cue.durationMs - offsetMs, 0);
+      const getRate = () => Math.max(speedRef.current, 0.1);
+      const shouldCancel = () =>
+        cancelRef.current || generation !== replayGenerationRef.current;
+      const startIdx = Math.max(0, startCommandIndex);
+      const remainingCommands = cue.commands.slice(startIdx);
+      const initialTextCommandIndex = cue.commands
+        .slice(0, startIdx)
+        .filter((command) =>
+          command.type === "WRITE" || command.type === "LABEL" || command.type === "TYPE")
+        .length;
+
+      const spokenText = (cue.segment.spokenText || cue.narration).trim();
+      let fallbackSpeechComplete = false;
+      const speakLiveTts = async (onStart?: () => void, text = spokenText): Promise<void> => {
+        const tts = ttsClientRef.current;
+        if (!text || !tts || shouldCancel()) {
+          fallbackSpeechComplete = true;
+          // Nothing to hear: a silent beat's ink starts now.
+          onStart?.();
+          if (remainingMs > 0) {
+            await speedAwareDelay(remainingMs, {
+              shouldCancel,
+              getPlaybackRate: getRate,
+            });
+          }
+          return;
+        }
+        unlockTutorAudio();
+        tts.unlockAudio?.();
+        tts.setMuted?.(false);
+        tts.setPlaybackRate(getRate());
+        fallbackSpeechComplete = false;
+        try {
+          await tts.speakSegment(text, { onStart });
+        } finally {
+          // Runtime explanation pointing must stop with this voice, including
+          // a failure before onStart; authored ink retains its existing recovery.
+          fallbackSpeechComplete = true;
+        }
+      };
+
+      const drawRemaining = (audio?: HTMLAudioElement) =>
+        runReplaySegmentDraw(
+          cue.segment,
+          remainingCommands,
+          cue.narration,
+          generation,
+          audio,
+          fallbackDurationMs,
+          initialTextCommandIndex,
+          offsetMs,
+          startIdx === 0,
+          () => fallbackSpeechComplete,
+          startIdx,
+        );
+
+      try {
+        if (cue.audioUrl) {
+          setPhase("speaking");
+          // Drop preloaded element after applying rate — playReplayAudio owns playback.
+          const preloaded = replayAudioPreloadRef.current.get(cue.audioUrl);
+          if (preloaded) {
+            replayAudioPreloadRef.current.delete(cue.audioUrl);
+          }
+
+          let releaseDrawStart = () => {};
+          const voiceStarted = new Promise<void>((resolve) => {
+            releaseDrawStart = resolve;
+          });
+          let recordedAudioStarted = false;
+          let failedAtMs = 0;
+          const { audio, done } = playReplayAudio(cue.audioUrl, {
+            audio: preloaded,
+            playbackRate: getRate(),
+            getPlaybackRate: getRate,
+            maxDurationMs: fallbackDurationMs,
+            startAtMs: offsetMs,
+            shouldCancel,
+            isPaused: () => isPausedRef.current,
+            onFailure: (playedMs) => { failedAtMs = playedMs; },
+            onStart: () => {
+              recordedAudioStarted = true;
+              releaseDrawStart();
+            },
+          });
+          replayAudioRef.current = audio;
+          whiteboardRef.current?.setAnimationSpeed(getRate());
+
+          const voiceDone = done.catch(async (error: unknown) => {
+            tutorDebug("turn", "replay audio missing or blocked; using live TTS", {
+              order_index: cue.segment.orderIndex,
+              audio_url: cue.audioUrl,
+              error: error instanceof Error ? error.message : String(error),
+            });
+            replayAudioRef.current = null;
+            if (shouldCancel()) {
+              return;
+            }
+            // playReplayAudio unloads the failed element before rejecting, so
+            // the replacement voice cannot overlap a late-playing recording.
+            if (!(await waitWhileReplayPaused(generation))) return;
+            try {
+              await speakLiveTts(
+                releaseDrawStart,
+                remainingReplaySpeech(spokenText, Math.max(offsetMs, failedAtMs), cue.timings),
+              );
+            } finally {
+              releaseDrawStart();
+            }
+          });
+
+          if (!skipDraw) {
+            // Buffering may finish well after metadata. Keep the pen parked
+            // until either recorded audio or the live TTS fallback is heard.
+            await Promise.race([voiceStarted, voiceDone]);
+            if (shouldCancel()) return;
+            setPhase("drawing");
+            await Promise.all([
+              raceWithCancel(voiceDone),
+              raceWithCancel(drawRemaining(recordedAudioStarted ? audio : undefined)),
+            ]);
+          } else {
+            await raceWithCancel(voiceDone);
+          }
+          replayAudioRef.current = null;
+        } else {
+          setPhase("speaking");
+          whiteboardRef.current?.setAnimationSpeed(getRate());
+          let releaseDrawStart = () => {};
+          const voiceStarted = new Promise<void>((resolve) => {
+            releaseDrawStart = resolve;
+          });
+          const voiceDone = speakLiveTts(releaseDrawStart).finally(releaseDrawStart);
+          if (!skipDraw) {
+            // As live: the pen waits for the voice it follows to be heard.
+            await Promise.race([voiceStarted, voiceDone]);
+            if (shouldCancel()) return;
+            setPhase("drawing");
+            await Promise.all([
+              raceWithCancel(voiceDone),
+              raceWithCancel(drawRemaining()),
+            ]);
+          } else {
+            await raceWithCancel(voiceDone);
+          }
+        }
+      } catch (error) {
+        tutorDebug("turn", "replay segment failed", {
+          order_index: cue.segment.orderIndex,
+          audio_url: cue.audioUrl,
+          error: error instanceof Error ? error.message : String(error),
+        });
+
+        if (isReplayGenerationCurrent({
+          generation,
+          activeGeneration: replayGenerationRef.current,
+          cancelled: cancelRef.current,
+        }) && !skipDraw) {
+          await runReplaySegmentDraw(
+            cue.segment,
+            remainingCommands,
+            cue.narration,
+            generation,
+            undefined,
+            fallbackDurationMs,
+            initialTextCommandIndex,
+            offsetMs,
+            startIdx === 0,
+            () => fallbackSpeechComplete,
+            startIdx,
+          );
+        }
+      }
+
+      if (generation === replayGenerationRef.current) {
+        setReplayProgressMs(cue.endMs);
+      }
+    },
+    [
+      cancelRef,
+      isPausedRef,
+      replayGenerationRef,
+      replayCueRef,
+      replayAudioPreloadRef,
+      speedRef,
+      replayAudioRef,
+      ttsClientRef,
+      setCurrentSegmentText,
+      setPhase,
+      setReplayProgressMs,
+      waitWhileReplayPaused,
+      runReplaySegmentDraw,
+      raceWithCancel,
+      whiteboardRef,
+    ],
+  );
+
+  const playReplayFrom = useCallback(
+    async (startMs: number) => {
+      const wb = whiteboardRef.current;
+      const timeline = buildReplayTimeline(storedTurnsRef.current);
+      if (!isWhiteboardReadyToDraw(wb) || timeline.cues.length === 0) {
+        return;
+      }
+
+      if (phaseRef.current !== "idle" && !isReplaying) {
+        return;
+      }
+
+      const generation = ++replayGenerationRef.current;
+      cancelRef.current = false;
+      isPausedRef.current = false;
+      setIsPaused(false);
+      setIsReplaying(true);
+      setReplayTotalMs(timeline.totalMs);
+      setReplayProgressMs(startMs);
+      setPhase("speaking");
+
+      stopReplayAudio(replayAudioRef.current);
+      replayAudioRef.current = null;
+
+      // The reopened page may still be inking: stop it and let its last row
+      // land before replay clears the board and the work column.
+      await settleBoardRestore?.();
+      if (cancelRef.current || generation !== replayGenerationRef.current) {
+        return;
+      }
+
+      // The replay clock does not wait for the network: a reference picture's
+      // pixels are fetched before the seek renders, so it never pops in late.
+      await preloadReferencePicturesForTurns(storedTurnsRef.current);
+      if (cancelRef.current || generation !== replayGenerationRef.current) {
+        return;
+      }
+
+      await renderBoardAtTime(startMs, timeline.cues, generation);
+      if (cancelRef.current || generation !== replayGenerationRef.current) {
+        return;
+      }
+
+      const found = findCueAtTime(timeline.cues, startMs);
+      if (!found) {
+        stopReplayAudio(replayAudioRef.current);
+        replayAudioRef.current = null;
+        setIsReplaying(false);
+        finishLectureUi();
+        return;
+      }
+
+      // renderBoardAtTime left the code panel on the turn of the last cue it
+      // rendered (or the first turn when starting from zero). Re-committing
+      // that same turn here would wipe the blocks it revealed, so only turn
+      // crossings from this point on re-sync the panel.
+      let syncedTurnIndex = timeline.cues[0]!.turnIndex;
+      for (const cue of timeline.cues) {
+        if (cue.startMs >= startMs) break;
+        syncedTurnIndex = cue.turnIndex;
+      }
+
+      try {
+        for (let i = found.index; i < timeline.cues.length; i++) {
+          if (cancelRef.current || generation !== replayGenerationRef.current) {
+            break;
+          }
+
+          const cue = timeline.cues[i]!;
+          if (cue.turnIndex !== syncedTurnIndex) {
+            if (!await resetReplayPageAtTurn({
+              turn: storedTurnsRef.current[cue.turnIndex], previousTurnIndex: syncedTurnIndex, turnIndex: cue.turnIndex,
+              whiteboard: whiteboardRef.current, resetBoardLayout,
+              shouldCancel: () => cancelRef.current || generation !== replayGenerationRef.current,
+            })) return;
+            syncedTurnIndex = cue.turnIndex;
+            await syncReplayTurn(syncedTurnIndex, () => cancelRef.current || generation !== replayGenerationRef.current);
+          }
+          const nextCue = timeline.cues[i + 1];
+          const offsetMs = i === found.index ? found.offsetMs : 0;
+          // Don't skip draw on mid-segment seek — renderBoardAtTime already
+          // drew the completed portion instantly. Continue drawing only the
+          // remaining commands in this cue alongside the audio.
+          const startCommandIndex =
+            i === found.index && offsetMs > 0
+              ? getPartialCommandCount(cue, offsetMs)
+              : 0;
+          await playReplayCue(
+            cue,
+            offsetMs,
+            generation,
+            false,
+            nextCue,
+            startCommandIndex,
+          );
+          await completeReplayDiagramTurn({
+            cue,
+            nextCue,
+            turn: storedTurnsRef.current[cue.turnIndex],
+            pageTurns: pageTurnsEndingAt(storedTurnsRef.current, cue.turnIndex),
+            diagram: activeVerifiedDiagramRef?.current ?? null,
+            executeCommand: executeCommandWithCancel,
+            shouldCancel: () => cancelRef.current || generation !== replayGenerationRef.current,
+          });
+        }
+
+        const lastTurn =
+          storedTurnsRef.current[storedTurnsRef.current.length - 1];
+        if (lastTurn && generation === replayGenerationRef.current) {
+          setNarrationText(lessonNarrationText(lastTurn.rawResponse));
+        }
+      } finally {
+        if (generation !== replayGenerationRef.current) {
+          return;
+        }
+        stopReplayAudio(replayAudioRef.current);
+        replayAudioRef.current = null;
+        replayCueRef.current = null;
+        // Clean up any preloaded audio elements.
+        for (const preloaded of replayAudioPreloadRef.current.values()) {
+          stopReplayAudio(preloaded);
+        }
+        replayAudioPreloadRef.current.clear();
+        // A replayed DSA lesson ends like a live one: panel stays up in
+        // "complete" mode with type-along available. A user stop mid-lesson
+        // stays in lesson mode, mirroring the live cancel path.
+        if (!cancelRef.current) {
+          codeLessonControllerRef?.current?.markLessonComplete();
+        }
+        setIsReplaying(false);
+        setReplayProgressMs(timeline.totalMs);
+        finishLectureUi();
+      }
+    },
+    [
+      settleBoardRestore,
+      whiteboardRef,
+      resetBoardLayout,
+      storedTurnsRef,
+      phaseRef,
+      isReplaying,
+      replayGenerationRef,
+      cancelRef,
+      isPausedRef,
+      replayAudioRef,
+      replayAudioPreloadRef,
+      replayCueRef,
+      setIsPaused,
+      setIsReplaying,
+      setReplayTotalMs,
+      setReplayProgressMs,
+      setPhase,
+      setNarrationText,
+      renderBoardAtTime,
+      playReplayCue,
+      finishLectureUi,
+      syncReplayTurn,
+      codeLessonControllerRef,
+      activeVerifiedDiagramRef,
+      executeCommandWithCancel,
+    ],
+  );
+
+  const replayLecture = useCallback((): boolean => {
+    if (storedTurnsRef.current.length === 0 || isReplaying) {
+      return false;
+    }
+    if (!isWhiteboardReadyToDraw(whiteboardRef.current)) {
+      return false;
+    }
+    unlockTutorAudio();
+    ttsClientRef.current?.unlockAudio?.();
+    ttsClientRef.current?.setMuted?.(false);
+    void playReplayFrom(0);
+    return true;
+  }, [storedTurnsRef, isReplaying, playReplayFrom, ttsClientRef, whiteboardRef]);
+
+  /**
+   * Board pages in teaching order, including the page still on screen and any
+   * code-panel pages the board snapshot cannot see. Call this only after
+   * restore has finished; an earlier capture is a blank sheet.
+   */
+  const collectNotesSlides = useCallback(async (): Promise<string[]> => {
+    const wb = whiteboardRef.current;
+    if (!wb) {
+      return [];
+    }
+    const epochs: NotesEpoch[] = [...notesEpochsRef.current];
+    const finalSnapshot = wb.captureSnapshot(2);
+    if (finalSnapshot) {
+      epochs.push({
+        index: epochs.length,
+        question: liveQuestionRef.current,
+        snapshotDataUrl: finalSnapshot,
+        narrationText: narrationSinceEpochRef.current,
+        timestampMs: Date.now(),
+      });
+    }
+    // doubt-page-held-notes:begin
+    // A doubt's fresh page is up with the lesson's page held (review round 3
+    // M2): the lesson page is a notes page too, after the doubt page, as the
+    // return or a new question will capture them.
+    const held = heldLessonNotesPage(wb, 2);
+    if (held) {
+      epochs.push({
+        index: epochs.length,
+        question: liveQuestionRef.current,
+        snapshotDataUrl: held.snapshotDataUrl,
+        narrationText: held.narration,
+        timestampMs: Date.now(),
+      });
+    }
+    // doubt-page-held-notes:end
+    // Stored turns are the authority: restore loads every saved turn into the
+    // ref, so the click needs no round trip and works offline. Epochs only
+    // supply board images captured this session.
+    const storedTurns = storedTurnsRef.current;
+    const codeState = codeLessonControllerRef?.current?.getState();
+    const codePlan = codeState?.plan;
+    const codePlanKey = codePlan ? JSON.stringify(codePlan) : null;
+    const lastVisibleTurnIndex = isReplaying && replayCueRef.current
+      ? replayCueRef.current.turnIndex
+      : storedTurns.length - 1;
+    const codeTurn = codePlan && codePlanKey
+      ? pageTurnsEndingAt(storedTurns, lastVisibleTurnIndex).reverse().find((turn) =>
+          storedTurnPageQuestion(turn).trim() === codePlan.question.trim() &&
+          JSON.stringify(storedCodeLessonPlan(turn.sceneArtifacts)) === codePlanKey)
+      : null;
+    const capturedCode = codeTurn && codeState && codePlan
+      ? { turnId: codeTurn.id, plan: codePlan, revealedChars: { ...codeState.revealedChars } }
+      : null;
+    const sections = notesPdfSectionsFromStoredTurns(storedTurns, epochs);
+    // DSA turns keep their code in a DOM panel the board snapshot cannot
+    // see; render each section's code as its own notes page.
+    appendCodeLessonNotesImages(sections, storedTurns, capturedCode);
+    return notesPdfSlideImages(sections);
+  }, [
+    whiteboardRef,
+    notesEpochsRef,
+    narrationSinceEpochRef,
+    liveQuestionRef,
+    storedTurnsRef,
+    codeLessonControllerRef,
+    isReplaying,
+    replayCueRef,
+  ]);
+
+  const downloadNotesPdf = useCallback(() => {
+    if (isDownloading) {
+      return;
+    }
+    if (!whiteboardRef.current) {
+      return;
+    }
+    setIsDownloading(true);
+    void (async () => {
+      try {
+        // Let "Generating…" paint before jsPDF blocks the main thread.
+        await new Promise<void>((resolve) => {
+          requestAnimationFrame(() => window.setTimeout(resolve, 0));
+        });
+        const images = await collectNotesSlides();
+        if (images.length === 0) {
+          return;
+        }
+        const boardTitle = boards.find((b) => b.id === sessionId)?.title ?? "Lecture Notes";
+        await exportNotesPdf({
+          title: boardTitle,
+          sections: [
+            {
+              question: "",
+              images,
+              workLines: [],
+              narration: "",
+              planFacts: [],
+              interrupted: false,
+            },
+          ],
+        });
+      } catch (error) {
+        console.error("Notes PDF export failed:", error);
+      } finally {
+        setIsDownloading(false);
+      }
+    })();
+  }, [
+    whiteboardRef,
+    collectNotesSlides,
+    boards,
+    sessionId,
+    isDownloading,
+    setIsDownloading,
+  ]);
+
+  const seekReplay = useCallback(
+    (timeMs: number) => {
+      if (!isReplaying) {
+        return;
+      }
+      void playReplayFrom(timeMs);
+    },
+    [isReplaying, playReplayFrom],
+  );
+
+  const toggleReplayPlayPause = useCallback(() => {
+    if (!isReplaying) {
+      return;
+    }
+    if (isPausedRef.current) {
+      resumeTurn();
+    } else {
+      pauseTurn();
+    }
+  }, [isReplaying, isPausedRef, pauseTurn, resumeTurn]);
+
+  const handleReplaySpeedChange = useCallback((rate: number) => {
+    const safeRate = applyReplaySpeed({
+      rate,
+      audio: replayAudioRef.current,
+      preloaded: replayAudioPreloadRef.current.values(),
+      setTtsPlaybackRate: (next) => ttsClientRef.current?.setPlaybackRate(next),
+      setAnimationSpeed: (next) => whiteboardRef.current?.setAnimationSpeed(next),
+    });
+    speedRef.current = safeRate;
+    setSettings((prev) => ({ ...prev, speedMultiplier: safeRate }));
+  }, [speedRef, setSettings, ttsClientRef, replayAudioRef, replayAudioPreloadRef, whiteboardRef]);
+
+  useEffect(() => {
+    if (!isReplaying || isPaused) {
+      return;
+    }
+
+    let frameId = 0;
+    let lastWallMs = performance.now();
+    let mediaProgressMs = replayProgressMs;
+    let lastCueStartMs = replayCueRef.current?.startMs ?? -1;
+
+    const tick = () => {
+      const cue = replayCueRef.current;
+      const audio = replayAudioRef.current;
+      const now = performance.now();
+      if (cue && cue.startMs !== lastCueStartMs) {
+        // New cue or seek landed in another cue — resync media baseline.
+        lastCueStartMs = cue.startMs;
+        mediaProgressMs =
+          audio && Number.isFinite(audio.currentTime)
+            ? cue.startMs + audio.currentTime * 1000
+            : cue.startMs;
+        lastWallMs = now;
+      }
+      if (cue && audio && !audio.paused && Number.isFinite(audio.currentTime)) {
+        mediaProgressMs = Math.min(cue.startMs + audio.currentTime * 1000, cue.endMs);
+        setReplayProgressMs(mediaProgressMs);
+        lastWallMs = now;
+      } else if (cue) {
+        // No audio — advance in media-time using the live speed so mid-cue
+        // rate changes keep the scrubber honest without resetting the baseline.
+        const rate = Math.max(speedRef.current, 0.1);
+        mediaProgressMs = Math.min(
+          mediaProgressMs + (now - lastWallMs) * rate,
+          cue.endMs,
+        );
+        lastWallMs = now;
+        setReplayProgressMs(mediaProgressMs);
+      } else {
+        lastWallMs = now;
+      }
+      frameId = scheduleFrame(tick);
+    };
+
+    frameId = scheduleFrame(tick);
+    return () => cancelFrame(frameId);
+    // replayProgressMs is intentionally read only at effect start / cue change;
+    // including it every tick would reset the media baseline on each frame.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    isReplaying,
+    isPaused,
+    replayCueRef,
+    replayAudioRef,
+    speedRef,
+    setReplayProgressMs,
+  ]);
+
+  return {
+    runReplaySegmentDraw,
+    waitWhileReplayPaused,
+    renderBoardAtTime,
+    playReplayCue,
+    playReplayFrom,
+    replayLecture,
+    collectNotesSlides,
+    downloadNotesPdf,
+    seekReplay,
+    toggleReplayPlayPause,
+    handleReplaySpeedChange,
+  };
+}

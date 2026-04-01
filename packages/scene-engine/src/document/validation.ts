@@ -1,0 +1,7232 @@
+import {
+  SCENE_ANNOTATION_KINDS,
+  SCENE_DOCUMENT_VERSION,
+  SCENE_ENGINE_VERSION,
+  type SceneAnnotationStyle,
+  type SceneDocument,
+  type SceneIssue,
+  type ValidationReport,
+  type ValidationResult,
+} from "../types";
+import { sceneCountOverLimit, sceneTextOverLimit } from "./textLimits";
+import { parseMathExpression, parseMathExpression2D } from "../math/expression";
+import { AXIS_BASELINE, piecewiseLinearGraph, polygonMatchesGraphRegion, regionGrid, type GraphBoundary, type GraphPoint } from "../compile/graphRegion";
+import {
+  isExecutableSceneConstructionOperator,
+  SUPPORTED_SCENE_COMPONENT_SYMBOLS,
+  type SupportedSceneConstructionOperator,
+  type SupportedSceneComponentSymbol,
+} from "../capability/capabilityManifest";
+import { ensureStudentFacingPointMarks, promoteAngleMarkVertices } from "./namedPoints";
+import { normalizeOperatorInputAliases } from "./operatorInputAliases";
+import { readPolyhedralSolid } from "../math/polyhedralSolid";
+import { STATISTICS_OPERATORS, validateStatisticsConstruction } from "../compile/statistics";
+import { TRIANGLE_OPERATORS, validateTriangleConstruction } from "../compile/triangleGeometry";
+import { CONIC_OPERATORS, validateConicConstruction } from "../compile/conicGeometry";
+import { SPACE_DERIVATION_OPERATORS, validateSpaceDerivationConstruction } from "../compile/spaceDerivations";
+import { planSpaceView } from "../compile/spaceView";
+import { PROBABILITY_OPERATORS, validateProbabilityConstruction } from "../compile/probabilityGeometry";
+import { FIELD_OPERATORS, validateFieldConstruction } from "../compile/fieldGeometry";
+import { DIPOLE_FIELD_OPERATORS, validateDipoleFieldConstruction } from "../compile/dipoleFieldGeometry";
+import { ANALYTIC_LINE_OPERATORS, validateAnalyticLineConstruction as validateCoordinateLineConstruction } from "../compile/analyticLineGeometry";
+import { RIGID_MASS_OPERATORS, validateRigidMassConstruction } from "../compile/rigidMassGeometry";
+import { MATRIX_ARRAY_OPERATORS, validateMatrixArrayConstruction } from "../compile/matrixArrayGeometry";
+import { validateBlockFlowConstruction } from "../compile/blockFlowGeometry";
+import { LINEAR_REGION_OPERATORS, validateLinearRegionConstruction } from "../compile/linearRegionGeometry";
+import { validateMatrixSourceBinding } from "../compile/matrixSourceBinding";
+import { CIRCLE_OPERATORS, validateCircleConstruction } from "../compile/circleGeometry";
+import { AFFINE_OPERATORS, validateAffineConstruction } from "../compile/affineGeometry";
+import { VECTOR_OPERATORS, validateVectorConstruction } from "../compile/vectorGeometry";
+import { KINEMATICS_OPERATORS, validateKinematicsConstruction } from "../compile/kinematicsGeometry";
+import { CALCULUS_OPERATORS as DERIVED_CURVE_OPERATORS, validateCalculusConstruction as validateDerivedCurveConstruction, validateAnalyticLineConstruction as validateCurveAnalyticLineConstruction } from "../compile/calculusGeometry";
+import { AC_OPERATORS, validateAcConstruction } from "../compile/acGeometry";
+import { WAVES_OPERATORS, validateWavesConstruction } from "../compile/wavesGeometry";
+import { GEOMETRIC_OPTICS_OPERATORS, validateGeometricOpticsConstruction } from "../compile/geometricOpticsGeometry";
+import { THERMODYNAMICS_OPERATORS, validateThermodynamicsConstruction } from "../compile/thermodynamicsGeometry";
+import { validatePvProcessConstruction } from "../compile/pvProcessGeometry";
+
+import { COMPLEX_OPERATORS, validateComplexConstruction } from "../compile/complexGeometry";
+const COMPLEX_CONSTRUCTIONS = new Set<string>(COMPLEX_OPERATORS);
+
+import { MAGNETIC_OPERATORS, validateMagneticConstruction } from "../compile/magneticGeometry";
+const MAGNETIC_CONSTRUCTIONS = new Set<string>(MAGNETIC_OPERATORS);
+import { RELATIVE_MOTION_OPERATORS, validateRelativeMotionConstruction } from "../compile/relativeMotionGeometry";
+const RELATIVE_MOTION_CONSTRUCTIONS = new Set<string>(RELATIVE_MOTION_OPERATORS);
+import { NETWORK_OPERATORS, validateNetworkConstruction } from "../compile/networkGeometry";
+const NETWORK_CONSTRUCTIONS = new Set<string>(NETWORK_OPERATORS);
+import { MECHANICS_DIAGRAM_OPERATORS, validateMechanicsDiagramConstruction } from "../compile/mechanicsDiagramGeometry";
+const MECHANICS_DIAGRAM_CONSTRUCTIONS = new Set<string>(MECHANICS_DIAGRAM_OPERATORS);
+import { CURRENT_FIELD_OPERATORS, validateCurrentFieldConstruction } from "../compile/currentFieldGeometry";
+import { CHAPTER_REMAINDER_OPERATORS, validateChapterRemainderConstruction } from "../compile/chapterRemainderGeometry";
+import { CHAPTER_INSTRUMENT_OPERATORS, validateChapterInstrumentConstruction } from "../compile/chapterInstrumentGeometry";
+const CURRENT_FIELD_CONSTRUCTIONS = new Set<string>(CURRENT_FIELD_OPERATORS);
+const CHAPTER_REMAINDER_CONSTRUCTIONS = new Set<string>(CHAPTER_REMAINDER_OPERATORS);
+const CHAPTER_INSTRUMENT_CONSTRUCTIONS = new Set<string>(CHAPTER_INSTRUMENT_OPERATORS);
+
+import { FLUID_OPERATORS, validateFluidConstruction } from "../compile/fluidGeometry";
+const FLUID_CONSTRUCTIONS = new Set<string>(FLUID_OPERATORS);
+
+import { HARMONIC_MOTION_OPERATORS, validateHarmonicMotionConstruction } from "../compile/harmonicMotionGeometry";
+const HARMONIC_MOTION_CONSTRUCTIONS = new Set<string>(HARMONIC_MOTION_OPERATORS);
+
+import { GRAVITY_OPERATORS, validateGravityConstruction } from "../compile/gravityGeometry";
+const GRAVITY_CONSTRUCTIONS = new Set<string>(GRAVITY_OPERATORS);
+
+import { SET_OPERATORS, validateSetConstruction } from "../compile/setGeometry";
+const SET_CONSTRUCTIONS = new Set<string>(SET_OPERATORS);
+
+import { INDUCTION_OPERATORS, validateInductionConstruction } from "../compile/inductionGeometry";
+const INDUCTION_CONSTRUCTIONS = new Set<string>(INDUCTION_OPERATORS);
+
+import { ROTATION_OPERATORS, validateRotationConstruction } from "../compile/rotationGeometry";
+const ROTATION_CONSTRUCTIONS = new Set<string>(ROTATION_OPERATORS);
+
+import { COMBINATORICS_OPERATORS, validateCombinatoricsConstruction } from "../compile/combinatoricsGeometry";
+const COMBINATORICS_CONSTRUCTIONS = new Set<string>(COMBINATORICS_OPERATORS);
+import { ELASTICITY_OPERATORS, validateElasticityConstruction } from "../compile/elasticityGeometry";
+const ELASTICITY_CONSTRUCTIONS = new Set<string>(ELASTICITY_OPERATORS);
+import { DISTRIBUTED_FIELDS_OPERATORS, validateDistributedFieldsConstruction } from "../compile/distributedFieldsGeometry";
+const DISTRIBUTED_FIELDS_CONSTRUCTIONS = new Set<string>(DISTRIBUTED_FIELDS_OPERATORS);
+
+const STATISTICAL_CONSTRUCTIONS = new Set<string>(STATISTICS_OPERATORS);
+const TRIANGLE_CONSTRUCTIONS = new Set<string>(TRIANGLE_OPERATORS);
+const CONIC_CONSTRUCTIONS = new Set<string>(CONIC_OPERATORS);
+const SPACE_DERIVATION_CONSTRUCTIONS = new Set<string>(SPACE_DERIVATION_OPERATORS);
+const PROBABILITY_CONSTRUCTIONS = new Set<string>(PROBABILITY_OPERATORS);
+const FIELD_CONSTRUCTIONS = new Set<string>(FIELD_OPERATORS);
+const DIPOLE_FIELD_CONSTRUCTIONS = new Set<string>(DIPOLE_FIELD_OPERATORS);
+const COORDINATE_LINE_CONSTRUCTIONS = new Set<string>(ANALYTIC_LINE_OPERATORS);
+const RIGID_MASS_CONSTRUCTIONS = new Set<string>(RIGID_MASS_OPERATORS);
+const MATRIX_ARRAY_CONSTRUCTIONS = new Set<string>(MATRIX_ARRAY_OPERATORS);
+const VARIABLE_KIND_CONSTRUCTIONS = new Set<string>([...ANALYTIC_LINE_OPERATORS, ...RIGID_MASS_OPERATORS]);
+const CIRCLE_CONSTRUCTIONS = new Set<string>(CIRCLE_OPERATORS);
+const AFFINE_CONSTRUCTIONS = new Set<string>(AFFINE_OPERATORS);
+const VECTOR_CONSTRUCTIONS = new Set<string>(VECTOR_OPERATORS);
+const KINEMATICS_CONSTRUCTIONS = new Set<string>(KINEMATICS_OPERATORS);
+const CALCULUS_CONSTRUCTIONS = new Set<string>(DERIVED_CURVE_OPERATORS);
+const AC_CONSTRUCTIONS = new Set<string>(AC_OPERATORS);
+const WAVES_CONSTRUCTIONS = new Set<string>(WAVES_OPERATORS);
+const GEOMETRIC_OPTICS_CONSTRUCTIONS = new Set<string>(GEOMETRIC_OPTICS_OPERATORS);
+const THERMODYNAMICS_CONSTRUCTIONS = new Set<string>(THERMODYNAMICS_OPERATORS);
+const SPATIAL_POINT_CONSTRUCTIONS = new Set(["space_point", "space_project", "space_closest_points", "space_intersection"]);
+
+const ARRAY_FIELDS = [
+  "quantities", "entities", "constructions", "relations", "assertions",
+  "annotations", "requiredEntityIds", "revealGroups", "teachingTimeline",
+] as const;
+
+const VISIBLE_ENTITY_KIND_BY_OPERATOR: Readonly<Record<string, string>> = {
+  elastic_profile: "polyline", elastic_state: "point",
+  flux_process: "polyline", rotational_motion: "point", rotational_state: "vector", planar_torque: "polyline",
+  set_select: "label",
+  harmonic_motion: "polyline", harmonic_state: "point", gravitational_field: "vector", gravitational_force: "vector",
+  complex_point: "point", complex_transform: "point", complex_roots: "point",
+  magnetic_force: "vector", magnetic_components: "vector",
+  hydrostatic_profile: "polyline", hydrostatic_state: "point", buoyancy: "vector",
+  segment: "segment", ray: "ray", line: "line", circle: "circle", arc: "arc",
+  rectangle: "polygon", polygon: "polygon", polyline: "polyline", vector: "vector",
+  axes: "axes", function_curve: "curve", function_region: "region",
+  parametric_curve: "polyline", polar_curve: "polyline", implicit_curve: "polyline",
+  conic: "polyline", conic_anchor: "point", conic_directrix: "line", conic_asymptotes: "polyline", conic_tangent: "line",
+  histogram: "polyline", frequency_polygon: "polyline", cumulative_frequency: "polyline",
+  electric_field: "vector",
+  coulomb_pair: "vector", point_charge_field: "vector", field_lines: "polyline",
+  dipole_field: "vector", dipole_torque: "vector", dipole_energy: "vector",
+  line_charge_field: "vector", wire_field: "vector", loop_field: "vector", flux_sinusoid: "polyline",
+  circle_from_three_points: "circle", circle_tangent_at: "line",
+  affine_point: "point",
+  vector_sum: "vector", vector_scale: "vector", vector_projection: "vector",
+  constant_acceleration_trajectory: "polyline",
+  curve_anchor: "point", curve_secant: "line", curve_derivative: "vector",
+  impedance: "vector", impedance_combine: "vector",
+  harmonic_wave: "polyline", wave_superposition: "polyline", wave_sample: "point",
+  polytropic_process: "polyline", isochoric_process: "polyline", process_state: "point", pv_process: "polyline",
+  triangle_center: "point",
+  tangent_line: "line", normal_line: "line", representative_slice: "region",
+  solid_of_revolution: "solid", solid_projection: "solid", solid_cross_section: "region", solid_anchor: "point",
+  space_frame: "polyline", space_point: "point", space_line: "line", plane: "polygon",
+  space_project: "point", space_segment: "segment",
+  space_vector: "vector", space_cross: "vector", space_angle_mark: "angle_mark", space_right_angle_mark: "right_angle_mark",
+  wavefront_family: "polyline", aperture: "polyline", screen_pattern: "polyline",
+  transverse_field: "polyline", polarizer: "polyline",
+  optical_train: "ray",
+  spherical_surface: "arc",
+  lens_section: "polygon",
+  angle_mark: "angle_mark", right_angle_mark: "right_angle_mark", tick_mark: "tick_mark",
+  sign_badge: "vector", dimension: "dimension", connect: "connector", symbol: "component", label: "label",
+  matrix_array: "matrix_array", matrix_add: "matrix_array", matrix_scale: "matrix_array",
+  matrix_product: "matrix_array", matrix_transpose: "matrix_array",
+  block_flow: "block_flow",
+  number_line_set: "linear_region", linear_half_plane: "linear_region",
+  linear_feasible_region: "linear_region", linear_system: "linear_region",
+};
+
+function visibleConstructionKind(construction: Record<string, unknown>): string | undefined {
+  if (typeof construction.operator !== "string") return undefined;
+  if (construction.operator === "equipotential" && isRecord(construction.inputs)) {
+    if (construction.inputs.source === "point_charge") return "circle";
+    if (construction.inputs.source === "dipole") return "polyline";
+    return undefined;
+  }
+  return VISIBLE_ENTITY_KIND_BY_OPERATOR[construction.operator];
+}
+
+function retainsVariableKindConstruction(construction: Record<string, unknown>): boolean {
+  return typeof construction.operator === "string" && VARIABLE_KIND_CONSTRUCTIONS.has(construction.operator);
+}
+
+const INFERRED_CONSTRUCTION_ENTITY = "__inferredConstructionEntity";
+const CONSTRUCTION_ENTITY_REFERENCE_KEYS = new Set([
+  "start", "end", "from", "to", "a", "b", "c", "center", "origin", "surface", "conic",
+  "through", "parallelTo", "first", "second", "point", "line", "incoming",
+  "normal", "vertex", "curve", "upper", "lower", "profile", "solid", "basis",
+  "vector", "target", "points", "direction", "axis", "objective", "eyepiece", "focus",
+  "object", "finalImage", "virtualImage", "frame", "onto", "at", "position", "field", "circle", "circleA", "circleB", "externalPoint", "path", "vectors", "trajectory", "sources", "impedance", "waves", "wave", "process", "source", "force", "motion", "partition",
+]);
+
+/** Capability-corpus gate: fixtures may only name executable scene operators. */
+export function isSupportedSceneOperator(
+  operator: string,
+): operator is SupportedSceneConstructionOperator {
+  return isExecutableSceneConstructionOperator(operator);
+}
+
+const SAMPLED_CURVE_OPERATORS = new Set(["function_curve", "parametric_curve", "polar_curve"]);
+/** Analytic curves whose tangent and normal lines tangent_line/normal_line also derive. */
+const ANALYTIC_TANGENT_CURVE_OPERATORS = new Set(["harmonic_wave", "wave_superposition", "polytropic_process", "isochoric_process",
+  "constant_acceleration_trajectory", "hydrostatic_profile", "harmonic_motion", "flux_process", "elastic_profile"]);
+/**
+ * Open polylines that may be read as a graph y = f(x) when their vertices
+ * strictly increase in x: a hand-placed piecewise linear graph or a
+ * motion_graph. The compiler proves the x order before reading a value.
+ */
+const GRAPH_POLYLINE_OPERATORS = new Set(["polyline", "motion_graph"]);
+/**
+ * A polygon role that names a region. Only the left edge is a word boundary:
+ * `\b` misses "shaded_area", where the underscore is a word character, and a
+ * plural or "shaded" still names the region. "shadow" is an optics part.
+ */
+const GRAPH_REGION_ROLE = /(?:^|[^a-z])(?:region|area|enclosed|shad(?!ow)|displacement)/;
+const CALCULUS_OPERATORS = new Set([
+  "parametric_curve", "polar_curve", "implicit_curve", "tangent_line", "normal_line",
+  "representative_slice", "solid_of_revolution",
+]);
+const MENSURATION_OPERATORS = new Set(["solid_projection", "solid_cross_section", "solid_anchor"]);
+const SPACE_OPERATORS = new Set(["space_frame", "space_point", "space_line", "plane"]);
+const SPACE_ANGLE_MARK_OPERATORS = new Set(["space_angle_mark", "space_right_angle_mark"]);
+const WAVE_VISUAL_OPERATORS = new Set([
+  "wavefront_family", "aperture", "screen_pattern", "transverse_field", "polarizer",
+]);
+const SURFACE_RAY_OPERATORS = new Set(["reflect_at", "refract_at"]);
+const SOLID_PROJECTION_KINDS = new Set(["cylinder", "cone", "frustum", "sphere", "hemisphere"]);
+/**
+ * Remove entities that are provably planner artifacts before strict validation.
+ * This is deliberately narrower than schema repair: ordinary dead entities are
+ * removed only when omitted from ownership and references. A connector directly
+ * duplicating a component terminal pair is also removed when nothing claims it
+ * as an intentional short/bypass and no semantic reference consumes it.
+ */
+export function pruneDeadSceneEntities(raw: Record<string, unknown>): Record<string, unknown> {
+  // Snapshot the electrical edges before any normalization/pruning helper can
+  // remove them. New load-count admission must not certify a repaired graph as
+  // evidence that the original circuit had no extra load, source, or bypass.
+  const originalBranchOutputs = circuitBranchOutputs(raw);
+  const alreadyRepaired = isRecord(raw.source) && raw.source.circuitTopologyRepaired === true;
+  const retainCircuitRepairEvidence = (document: Record<string, unknown>): Record<string, unknown> => {
+    const retainedBranchOutputs = circuitBranchOutputs(document);
+    const removedBranch = [...originalBranchOutputs].some((id) => !retainedBranchOutputs.has(id));
+    if (!alreadyRepaired && !removedBranch) return document;
+    return {
+      ...document,
+      // Content-free and monotone across JSON round trips and repeated repair.
+      source: { ...(isRecord(document.source) ? document.source : {}), circuitTopologyRepaired: true },
+    };
+  };
+  raw = normalizeConstructedLabels(raw);
+  raw = pruneSelfReferentialConstructedLabels(raw);
+  raw = promoteAssertedEntityOwnership(raw);
+  raw = promoteAngleMarkVertices(raw);
+  raw = pruneUnconstructedWarningAssertions(raw);
+  raw = pruneQuantityNarrationAnnotations(raw);
+  raw = normalizeCoincidentUnownedPointAliases(raw);
+  raw = normalizeAssertedDimensionBindings(raw);
+  raw = normalizeRecognizedComponentOperators(raw);
+  raw = repairAssertedSeriesTerminalIncidence(raw);
+  raw = repairUniquelyAssertedPoweredLoop(raw);
+  raw = normalizeMechanicalPlannerArtifacts(raw);
+  raw = normalizeProofDerivedOpticsGeometry(raw);
+  raw = normalizeAssertedSharedVertexAngleGeometry(raw);
+  raw = normalizeProofDerivedOpticalTrain(raw);
+  raw = normalizeMissingReferenceLineEndpoints(raw);
+  raw = pruneRedundantIncidentPathDeclarations(raw);
+  raw = promoteVisibleIncidentPaths(raw);
+  raw = promoteTransformIncidentPaths(raw);
+  raw = pruneUnsolvedRayPairs(raw);
+  if (
+    !Array.isArray(raw.entities) ||
+    !Array.isArray(raw.constructions) ||
+    !Array.isArray(raw.requiredEntityIds) ||
+    !Array.isArray(raw.revealGroups)
+  ) {
+    return retainCircuitRepairEvidence(raw);
+  }
+
+  const entityIds = new Set(raw.entities.flatMap((entity) =>
+    isRecord(entity) && typeof entity.id === "string" ? [entity.id] : [],
+  ));
+  const producerByOutput = new Map<string, Record<string, unknown>>();
+  for (const construction of raw.constructions) {
+    if (!isRecord(construction) || !Array.isArray(construction.outputs)) continue;
+    for (const output of construction.outputs) {
+      if (typeof output === "string") producerByOutput.set(output, construction);
+    }
+  }
+  const annotationTexts = new Set(
+    (Array.isArray(raw.annotations) ? raw.annotations : []).flatMap((annotation) =>
+      isRecord(annotation) && typeof annotation.text === "string"
+        ? [normalizeLabelText(annotation.text)]
+        : [],
+    ),
+  );
+  const redundantLabelIds = new Set(raw.entities.flatMap((entity) =>
+    isRecord(entity) &&
+    typeof entity.id === "string" &&
+    entity.kind === "label" &&
+    typeof entity.label === "string" &&
+    !producerByOutput.has(entity.id) &&
+    annotationTexts.has(normalizeLabelText(entity.label))
+      ? [entity.id]
+      : [],
+  ));
+
+  const owned = new Set(raw.requiredEntityIds.filter((id): id is string =>
+    typeof id === "string" && !redundantLabelIds.has(id),
+  ));
+  for (const group of raw.revealGroups) {
+    if (!isRecord(group) || !Array.isArray(group.entityIds)) continue;
+    for (const id of group.entityIds) {
+      if (typeof id === "string" && !redundantLabelIds.has(id)) owned.add(id);
+    }
+  }
+
+  const referenced = new Set<string>();
+  const nonAssertionReferenced = new Set<string>();
+  const contractReferenced = new Set<string>();
+  const collectEntityReferences = (value: unknown): void => {
+    if (typeof value === "string") {
+      if (entityIds.has(value)) referenced.add(value);
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) collectEntityReferences(item);
+      return;
+    }
+    if (isRecord(value)) {
+      for (const item of Object.values(value)) collectEntityReferences(item);
+    }
+  };
+  for (const construction of raw.constructions) {
+    if (isRecord(construction)) {
+      collectConstructionEntityReferences(construction.inputs, entityIds, referenced);
+      collectConstructionEntityReferences(
+        construction.inputs,
+        entityIds,
+        nonAssertionReferenced,
+      );
+    }
+  }
+  for (const field of ["relations", "annotations", "teachingTimeline"] as const) {
+    if (Array.isArray(raw[field])) collectEntityReferences(raw[field]);
+    if (Array.isArray(raw[field])) {
+      collectEntityReferencesInto(raw[field], entityIds, nonAssertionReferenced);
+      collectEntityReferencesInto(raw[field], entityIds, contractReferenced);
+    }
+  }
+  if (Array.isArray(raw.assertions)) {
+    for (const assertion of raw.assertions) {
+      const isRedundantLabelAssertion = isRecord(assertion) &&
+        assertion.predicate === "label_attached" &&
+        Array.isArray(assertion.entities) &&
+        assertion.entities.length > 0 &&
+        assertion.entities.every((id) => typeof id === "string" && redundantLabelIds.has(id));
+      if (!isRedundantLabelAssertion) {
+        collectEntityReferences(assertion);
+        collectEntityReferencesInto(assertion, entityIds, contractReferenced);
+      }
+    }
+  }
+
+  const originalEntities = raw.entities;
+  const entitiesById = new Map(originalEntities.flatMap((entity) =>
+    isRecord(entity) && typeof entity.id === "string" ? [[entity.id, entity] as const] : [],
+  ));
+  const labelNormalizedEntities = originalEntities.map((entity) =>
+    isRecord(entity) && shouldStripHelperPointLabel(entity, raw)
+      ? omitLabel(entity)
+      : entity,
+  );
+  const componentPairs = new Set<string>();
+  const componentTerminals = new Map<string, readonly [string, string]>();
+  for (const construction of raw.constructions) {
+    if (!isRecord(construction) || construction.operator !== "symbol" || !isRecord(construction.inputs)) continue;
+    const start = constructionEndpoint(construction.inputs, ["start", "from", "a"]);
+    const end = constructionEndpoint(construction.inputs, ["end", "to", "b"]);
+    const output = Array.isArray(construction.outputs) ? construction.outputs[0] : undefined;
+    if (start && end && start !== end) {
+      componentPairs.add(canonicalTerminalPair(start, end));
+      if (typeof output === "string") componentTerminals.set(output, [start, end]);
+    }
+  }
+  const assertedChainTerminalPairs = assertedComponentChainTerminalPairs(raw.assertions, componentTerminals);
+  const groupByEntity = new Map<string, string>();
+  for (const group of raw.revealGroups) {
+    if (!isRecord(group) || typeof group.id !== "string" || !Array.isArray(group.entityIds)) continue;
+    for (const id of group.entityIds) {
+      if (typeof id === "string") groupByEntity.set(id, group.id);
+    }
+  }
+  const crossViewConnectors = new Set<string>();
+  for (const construction of raw.constructions) {
+    if (
+      !isRecord(construction) ||
+      construction.operator !== "connect" ||
+      !isRecord(construction.inputs) ||
+      !Array.isArray(construction.outputs) ||
+      construction.outputs.length !== 1 ||
+      typeof construction.outputs[0] !== "string"
+    ) continue;
+    const output = construction.outputs[0];
+    const start = constructionEndpoint(construction.inputs, ["start", "from", "a"]);
+    const end = constructionEndpoint(construction.inputs, ["end", "to", "b"]);
+    const startGroup = start ? groupByEntity.get(start) : undefined;
+    const endGroup = end ? groupByEntity.get(end) : undefined;
+    const entity = entitiesById.get(output);
+    const semanticRole = `${String(entity?.role ?? "")} ${String(entity?.label ?? "")}`.toLowerCase();
+    if (
+      startGroup &&
+      endGroup &&
+      startGroup !== endGroup &&
+      !/\b(bridge|cross[- ]?view|coupling|link)\b/.test(semanticRole) &&
+      !referenced.has(output)
+    ) {
+      crossViewConnectors.add(output);
+    }
+  }
+  const redundantDirectBypasses = new Set<string>();
+  const degenerateConnectors = new Set<string>();
+  const redundantClosingConnectors = new Set<string>();
+  const connectorsByPair = new Map<string, string[]>();
+  for (const construction of raw.constructions) {
+    if (
+      !isRecord(construction) ||
+      construction.operator !== "connect" ||
+      !isRecord(construction.inputs) ||
+      !Array.isArray(construction.outputs) ||
+      construction.outputs.length !== 1 ||
+      typeof construction.outputs[0] !== "string"
+    ) continue;
+    const output = construction.outputs[0];
+    const start = constructionEndpoint(construction.inputs, ["start", "from", "a"]);
+    const end = constructionEndpoint(construction.inputs, ["end", "to", "b"]);
+    const entity = entitiesById.get(output);
+    const semanticRole = entity
+      ? `${String(entity.role ?? "")} ${String(entity.label ?? "")}`.toLowerCase()
+      : "";
+    const explicitlySemantic = isExplicitConnectorSemantic(semanticRole);
+    if (start && end) {
+      if (start === end && !explicitlySemantic && !referenced.has(output)) {
+        degenerateConnectors.add(output);
+      } else if (start !== end) {
+        const pair = canonicalTerminalPair(start, end);
+        const siblings = connectorsByPair.get(pair) ?? [];
+        siblings.push(output);
+        connectorsByPair.set(pair, siblings);
+        if (
+          assertedChainTerminalPairs.has(pair) &&
+          !explicitlySemantic &&
+          !referenced.has(output)
+        ) {
+          redundantClosingConnectors.add(output);
+        }
+      }
+    }
+    if (
+      start &&
+      end &&
+      componentPairs.has(canonicalTerminalPair(start, end)) &&
+      !explicitlySemantic &&
+      !nonAssertionReferenced.has(output)
+    ) {
+      redundantDirectBypasses.add(output);
+    }
+  }
+  const duplicateConnectors = new Set<string>();
+  for (const siblings of connectorsByPair.values()) {
+    if (siblings.length < 2) continue;
+    for (const output of siblings.slice(1)) {
+      const entity = entitiesById.get(output);
+      const semanticRole = entity
+        ? `${String(entity.role ?? "")} ${String(entity.label ?? "")}`.toLowerCase()
+        : "";
+      if (!isExplicitConnectorSemantic(semanticRole) && !referenced.has(output)) {
+        duplicateConnectors.add(output);
+      }
+    }
+  }
+
+  const prunable = new Set<string>();
+  const solverOnlyPointDeclarations = new Set<string>();
+  for (const [entityIndex, entity] of raw.entities.entries()) {
+    if (!isRecord(entity) || typeof entity.id !== "string") continue;
+    const output = entity.id;
+    const producer = producerByOutput.get(output);
+    const normalizedEntity = labelNormalizedEntities[entityIndex];
+    const normalizedRole = normalizeLabelText(
+      isRecord(normalizedEntity) && typeof normalizedEntity.role === "string"
+        ? normalizedEntity.role
+        : String(entity.kind ?? ""),
+    );
+    const isolatedHelperPoint =
+      entity.kind === "point" &&
+      producer?.operator === "point" &&
+      !referenced.has(output) &&
+      isRecord(normalizedEntity) &&
+      typeof normalizedEntity.label !== "string" &&
+      /^(?:point|node|terminal|junction|endpoint|connection|branch|helper|layout|wire)$/.test(normalizedRole);
+    const constructionOnlyHelperPoint =
+      entity.kind === "point" &&
+      producer?.operator === "point" &&
+      !owned.has(output) &&
+      !contractReferenced.has(output) &&
+      isRecord(normalizedEntity) &&
+      typeof normalizedEntity.label !== "string";
+    if (constructionOnlyHelperPoint) solverOnlyPointDeclarations.add(output);
+    const orphanLabelDeclaration =
+      entity.kind === "label" &&
+      !producer &&
+      !referenced.has(output) &&
+      isRecord(normalizedEntity) &&
+      typeof normalizedEntity.label !== "string";
+    if (
+      redundantDirectBypasses.has(output) ||
+      redundantClosingConnectors.has(output) ||
+      duplicateConnectors.has(output) ||
+      degenerateConnectors.has(output) ||
+      crossViewConnectors.has(output) ||
+      isolatedHelperPoint ||
+      orphanLabelDeclaration ||
+      (
+        !owned.has(output) &&
+        !referenced.has(output) &&
+        (!producer || (Array.isArray(producer.outputs) && producer.outputs.length === 1))
+      )
+    ) {
+      prunable.add(output);
+    }
+  }
+  const retainedConstructions = raw.constructions.filter((construction) =>
+    !isRecord(construction) ||
+    !Array.isArray(construction.outputs) ||
+    construction.outputs.length !== 1 ||
+    typeof construction.outputs[0] !== "string" ||
+    !prunable.has(construction.outputs[0]) ||
+    retainsVariableKindConstruction(construction),
+  );
+  const declaredRetainedIds = new Set(labelNormalizedEntities.flatMap((entity) =>
+    isRecord(entity) &&
+    typeof entity.id === "string" &&
+    !prunable.has(entity.id)
+      ? [entity.id]
+      : [],
+  ));
+  const externallyOwned = new Set<string>([
+    ...raw.requiredEntityIds.filter((id): id is string =>
+      typeof id === "string" && !prunable.has(id)),
+    ...raw.revealGroups.flatMap((group) =>
+      isRecord(group) && Array.isArray(group.entityIds)
+        ? group.entityIds.filter((id): id is string =>
+            typeof id === "string" && !prunable.has(id))
+        : [],
+    ),
+  ]);
+  const nonConstructionReferences = new Set<string>();
+  for (const field of ["assertions", "relations", "annotations", "teachingTimeline"] as const) {
+    collectStrings(raw[field], (value) => nonConstructionReferences.add(value));
+  }
+  let constructions = retainedConstructions;
+  while (true) {
+    const retainedInputReferences = new Set(nonConstructionReferences);
+    for (const construction of constructions) {
+      if (!isRecord(construction)) continue;
+      collectStrings(construction.inputs, (value) => retainedInputReferences.add(value));
+    }
+    const next = constructions.filter((construction) => {
+      if (!isRecord(construction) || !Array.isArray(construction.outputs)) return true;
+      const outputs = construction.outputs.filter((output): output is string => typeof output === "string");
+      if (outputs.length === 0) return false;
+      if (visibleConstructionKind(construction) || retainsVariableKindConstruction(construction)) return true;
+      return outputs.some((output) =>
+        declaredRetainedIds.has(output) ||
+        externallyOwned.has(output) ||
+        retainedInputReferences.has(output));
+    });
+    if (next.length === constructions.length) break;
+    constructions = next;
+  }
+  const executableEntityIds = new Set(declaredRetainedIds);
+  for (const construction of constructions) {
+    if (!isRecord(construction) || !Array.isArray(construction.outputs)) continue;
+    for (const output of construction.outputs) {
+      if (typeof output === "string") executableEntityIds.add(output);
+    }
+  }
+  const assertions = Array.isArray(raw.assertions)
+    ? normalizeAssertionsAfterPruning(raw.assertions, prunable, constructions)
+      .filter((assertion) =>
+        !isRecord(assertion) ||
+        !Array.isArray(assertion.entities) ||
+        assertion.entities.every((id) =>
+          typeof id === "string" && executableEntityIds.has(id)))
+    : raw.assertions;
+
+  return retainCircuitRepairEvidence(ensureStudentFacingPointMarks({
+    ...raw,
+    requiredEntityIds: raw.requiredEntityIds.filter((id) =>
+      typeof id !== "string" || !prunable.has(id),
+    ),
+    revealGroups: raw.revealGroups.map((group) =>
+      isRecord(group) && Array.isArray(group.entityIds)
+        ? { ...group, entityIds: group.entityIds.filter((id) => typeof id !== "string" || !prunable.has(id)) }
+        : group,
+    ),
+    assertions,
+    entities: labelNormalizedEntities.filter((entity) =>
+      !isRecord(entity) ||
+      typeof entity.id !== "string" ||
+      (!prunable.has(entity.id) && !solverOnlyPointDeclarations.has(entity.id)),
+    ),
+    constructions,
+  }));
+}
+
+/** Output identities, never role prose, identify the original circuit edges. */
+function circuitBranchOutputs(document: Record<string, unknown>): Set<string> {
+  return new Set(Array.isArray(document.constructions) ? document.constructions.flatMap((construction) =>
+    isRecord(construction) && (construction.operator === "connect" || construction.operator === "symbol") &&
+    Array.isArray(construction.outputs)
+      ? construction.outputs.filter((output): output is string => typeof output === "string")
+      : [],
+  ) : []);
+}
+
+function normalizeMissingReferenceLineEndpoints(raw: Record<string, unknown>): Record<string, unknown> {
+  if (!Array.isArray(raw.entities) || !Array.isArray(raw.constructions)) return raw;
+  const produced = new Set(raw.constructions.flatMap((construction) =>
+    isRecord(construction) && Array.isArray(construction.outputs)
+      ? construction.outputs.filter((id): id is string => typeof id === "string")
+      : []));
+  const entityById = new Map(raw.entities.flatMap((entity) =>
+    isRecord(entity) && typeof entity.id === "string" ? [[entity.id, entity] as const] : []));
+  let changed = false;
+  const constructions = raw.constructions.map((construction) => {
+    if (
+      !isRecord(construction) ||
+      construction.operator !== "line" ||
+      !isRecord(construction.inputs) ||
+      construction.inputs.direction !== undefined ||
+      typeof construction.inputs.start !== "string" ||
+      !produced.has(construction.inputs.start) ||
+      typeof construction.inputs.end !== "string" ||
+      produced.has(construction.inputs.end) ||
+      !Array.isArray(construction.outputs) ||
+      typeof construction.outputs[0] !== "string"
+    ) return construction;
+    const entity = entityById.get(construction.outputs[0]);
+    const semantic = `${construction.outputs[0]} ${String(entity?.role ?? "")} ${String(entity?.label ?? "")}`
+      .toLowerCase().replace(/[_-]+/g, " ");
+    if (!/\b(?:interface|boundary|reference axis|principal axis|optical axis)\b/.test(semantic)) return construction;
+    changed = true;
+    const inputs = { ...construction.inputs };
+    delete inputs.end;
+    return { ...construction, inputs: { ...inputs, direction: [1, 0] } };
+  });
+  return changed ? { ...raw, constructions } : raw;
+}
+
+/**
+ * Assertions make an entity part of the visible semantic contract. Planner
+ * responses sometimes omit that entity from ownership metadata even though a
+ * sibling assertion entity already identifies the intended reveal group.
+ */
+function promoteAssertedEntityOwnership(raw: Record<string, unknown>): Record<string, unknown> {
+  if (
+    !Array.isArray(raw.entities) ||
+    !Array.isArray(raw.assertions) ||
+    !Array.isArray(raw.requiredEntityIds) ||
+    !Array.isArray(raw.revealGroups)
+  ) return raw;
+
+  const declared = new Set(raw.entities.flatMap((entity) =>
+    isRecord(entity) && typeof entity.id === "string" ? [entity.id] : []));
+  const required = raw.requiredEntityIds.filter((id): id is string => typeof id === "string");
+  const requiredSet = new Set(required);
+  const groups = raw.revealGroups.map((group) =>
+    isRecord(group) && Array.isArray(group.entityIds)
+      ? { ...group, entityIds: group.entityIds.filter((id): id is string => typeof id === "string") }
+      : group);
+  const groupIndexByEntity = new Map<string, number>();
+  groups.forEach((group, index) => {
+    if (!isRecord(group) || !Array.isArray(group.entityIds)) return;
+    for (const id of group.entityIds) if (typeof id === "string") groupIndexByEntity.set(id, index);
+  });
+
+  let changed = false;
+  for (const assertion of raw.assertions) {
+    if (!isRecord(assertion) || !Array.isArray(assertion.entities)) continue;
+    const entityIds = assertion.entities.filter((id): id is string => typeof id === "string" && declared.has(id));
+    const ownerIndex = entityIds.map((id) => groupIndexByEntity.get(id)).find((index) => index !== undefined)
+      ?? (groups.length === 1 ? 0 : undefined);
+    if (ownerIndex === undefined) continue;
+    const owner = groups[ownerIndex];
+    if (!isRecord(owner) || !Array.isArray(owner.entityIds)) continue;
+    for (const id of entityIds) {
+      if (!requiredSet.has(id)) {
+        required.push(id);
+        requiredSet.add(id);
+        changed = true;
+      }
+      if (!groupIndexByEntity.has(id)) {
+        owner.entityIds.push(id);
+        groupIndexByEntity.set(id, ownerIndex);
+        changed = true;
+      }
+    }
+  }
+  return changed ? { ...raw, requiredEntityIds: required, revealGroups: groups } : raw;
+}
+
+function normalizeConstructedLabels(raw: Record<string, unknown>): Record<string, unknown> {
+  if (!Array.isArray(raw.entities) || !Array.isArray(raw.constructions)) return raw;
+  const labels = new Map<string, string>();
+  for (const construction of raw.constructions) {
+    if (
+      !isRecord(construction) ||
+      construction.operator !== "label" ||
+      !isRecord(construction.inputs) ||
+      typeof construction.inputs.text !== "string" ||
+      !Array.isArray(construction.outputs) ||
+      typeof construction.outputs[0] !== "string"
+    ) continue;
+    labels.set(construction.outputs[0], construction.inputs.text);
+  }
+  if (labels.size === 0) return raw;
+  return {
+    ...raw,
+    entities: raw.entities.map((entity) => {
+      if (!isRecord(entity) || typeof entity.id !== "string") return entity;
+      const text = labels.get(entity.id);
+      return text === undefined ? entity : { ...entity, kind: "label", role: "diagram label", label: text };
+    }),
+  };
+}
+
+function pruneSelfReferentialConstructedLabels(raw: Record<string, unknown>): Record<string, unknown> {
+  if (!Array.isArray(raw.entities) || !Array.isArray(raw.constructions)) return raw;
+  const removedIds = new Set(raw.constructions.flatMap((construction) =>
+    isRecord(construction) &&
+    construction.operator === "label" &&
+    isRecord(construction.inputs) &&
+    Array.isArray(construction.outputs) &&
+    typeof construction.outputs[0] === "string" &&
+    construction.inputs.target === construction.outputs[0]
+      ? [construction.outputs[0]]
+      : []));
+  if (removedIds.size === 0) return raw;
+  const withoutIds = (value: unknown): unknown => Array.isArray(value)
+    ? value.filter((item) => typeof item !== "string" || !removedIds.has(item))
+    : value;
+  const annotations = Array.isArray(raw.annotations)
+    ? raw.annotations.flatMap((annotation) => {
+        if (!isRecord(annotation) || !Array.isArray(annotation.targetIds)) return [annotation];
+        const targetIds = withoutIds(annotation.targetIds);
+        return Array.isArray(targetIds) && targetIds.length > 0 ? [{ ...annotation, targetIds }] : [];
+      })
+    : raw.annotations;
+  const retainedAnnotationIds = new Set(Array.isArray(annotations) ? annotations.flatMap((annotation) =>
+    isRecord(annotation) && typeof annotation.id === "string" ? [annotation.id] : []) : []);
+  const removedAnnotationIds = new Set(Array.isArray(raw.annotations) ? raw.annotations.flatMap((annotation) =>
+    isRecord(annotation) && typeof annotation.id === "string" && !retainedAnnotationIds.has(annotation.id)
+      ? [annotation.id]
+      : []) : []);
+  const removedTimelineTargets = new Set([...removedIds, ...removedAnnotationIds]);
+  return {
+    ...raw,
+    entities: raw.entities.filter((entity) =>
+      !isRecord(entity) || typeof entity.id !== "string" || !removedIds.has(entity.id)),
+    constructions: raw.constructions.filter((construction) =>
+      !isRecord(construction) ||
+      !Array.isArray(construction.outputs) ||
+      !construction.outputs.some((output) => typeof output === "string" && removedIds.has(output))),
+    requiredEntityIds: withoutIds(raw.requiredEntityIds),
+    revealGroups: Array.isArray(raw.revealGroups)
+      ? raw.revealGroups.map((group) => isRecord(group)
+        ? { ...group, entityIds: withoutIds(group.entityIds) }
+        : group)
+      : raw.revealGroups,
+    assertions: Array.isArray(raw.assertions)
+      ? raw.assertions.filter((assertion) =>
+        !isRecord(assertion) ||
+        !Array.isArray(assertion.entities) ||
+        !assertion.entities.some((id) => typeof id === "string" && removedIds.has(id)))
+      : raw.assertions,
+    annotations,
+    teachingTimeline: Array.isArray(raw.teachingTimeline)
+      ? raw.teachingTimeline.flatMap((action) => {
+          if (!isRecord(action)) return [action];
+          if (typeof action.targetId === "string" && removedTimelineTargets.has(action.targetId)) return [];
+          if (!Array.isArray(action.targetIds)) return [action];
+          const targetIds = action.targetIds.filter((id) =>
+            typeof id !== "string" || !removedTimelineTargets.has(id));
+          return targetIds.length > 0 ? [{ ...action, targetIds }] : [];
+        })
+      : raw.teachingTimeline,
+  };
+}
+
+function pruneUnconstructedWarningAssertions(raw: Record<string, unknown>): Record<string, unknown> {
+  if (!Array.isArray(raw.assertions) || !Array.isArray(raw.constructions)) return raw;
+  const produced = new Set(raw.constructions.flatMap((construction) =>
+    isRecord(construction) && Array.isArray(construction.outputs)
+      ? construction.outputs.filter((id): id is string => typeof id === "string")
+      : [],
+  ));
+  return {
+    ...raw,
+    assertions: raw.assertions.filter((assertion) => {
+      if (!isRecord(assertion) || assertion.severity !== "warning" || !Array.isArray(assertion.entities)) return true;
+      return assertion.entities.every((id) => typeof id !== "string" || produced.has(id));
+    }),
+  };
+}
+
+function pruneUnsolvedRayPairs(raw: Record<string, unknown>): Record<string, unknown> {
+  if (!Array.isArray(raw.entities) || !Array.isArray(raw.constructions)) return raw;
+  const constructions = raw.constructions.filter(isRecord);
+  const transforms = constructions.filter((construction) =>
+    construction.operator === "reflect_direction" || construction.operator === "refract_direction");
+  if (transforms.length === 0) return raw;
+  const usedIncoming = new Set(transforms.flatMap((construction) =>
+    isRecord(construction.inputs) && typeof construction.inputs.incoming === "string"
+      ? [construction.inputs.incoming]
+      : []));
+  const outputProducer = new Map<string, Record<string, unknown>>();
+  for (const construction of constructions) {
+    if (!Array.isArray(construction.outputs)) continue;
+    for (const output of construction.outputs) if (typeof output === "string") outputProducer.set(output, construction);
+  }
+  const removedIds = new Set<string>();
+  for (const entity of raw.entities) {
+    if (
+      !isRecord(entity) || typeof entity.id !== "string" ||
+      (entity.kind !== "ray" && entity.kind !== "vector") ||
+      typeof entity.role !== "string" || !/\bincident(?:[ _-]?ray)?\b/i.test(entity.role) ||
+      usedIncoming.has(entity.id)
+    ) continue;
+    const suffixes = semanticNumericSuffixes(entity.id, String(outputProducer.get(entity.id)?.id ?? ""));
+    if (suffixes.size === 0) continue;
+    const outgoing = raw.entities.find((candidate) => {
+      if (
+        !isRecord(candidate) || typeof candidate.id !== "string" || candidate.id === entity.id ||
+        (candidate.kind !== "ray" && candidate.kind !== "vector")
+      ) return false;
+      const producer = outputProducer.get(candidate.id);
+      if (producer?.operator === "reflect_direction" || producer?.operator === "refract_direction") return false;
+      const words = `${candidate.id} ${String(candidate.role ?? "")}`.replace(/[_-]+/g, " ");
+      if (!/\b(?:out|reflected|refracted|reflection|refraction|ref)\b/i.test(words)) return false;
+      const candidateSuffixes = semanticNumericSuffixes(candidate.id, String(producer?.id ?? ""));
+      return [...suffixes].some((suffix) => candidateSuffixes.has(suffix));
+    });
+    if (isRecord(outgoing) && typeof outgoing.id === "string") {
+      removedIds.add(entity.id);
+      removedIds.add(outgoing.id);
+    }
+  }
+  if (removedIds.size === 0) return raw;
+
+  let remainingConstructions = raw.constructions.filter((construction) =>
+    !isRecord(construction) || !Array.isArray(construction.outputs) ||
+    !construction.outputs.some((output) => typeof output === "string" && removedIds.has(output)));
+  const declaredIds = new Set(raw.entities.flatMap((entity) =>
+    isRecord(entity) && typeof entity.id === "string" && !removedIds.has(entity.id) ? [entity.id] : [],
+  ));
+  let changed = true;
+  while (changed) {
+    changed = false;
+    const referenced = new Set<string>();
+    for (const construction of remainingConstructions) {
+      if (isRecord(construction)) collectStrings(construction.inputs, (id) => referenced.add(id));
+    }
+    const next = remainingConstructions.filter((construction) => {
+      if (!isRecord(construction) || !Array.isArray(construction.outputs)) return true;
+      const outputs = construction.outputs.filter((output): output is string => typeof output === "string");
+      const orphan = outputs.length > 0 && outputs.every((output) =>
+        !declaredIds.has(output) && !referenced.has(output));
+      if (orphan) outputs.forEach((output) => removedIds.add(output));
+      return !orphan;
+    });
+    changed = next.length !== remainingConstructions.length;
+    remainingConstructions = next;
+  }
+  const stripIds = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.filter((item) =>
+      typeof item !== "string" || !removedIds.has(item)).map(stripIds);
+    if (!isRecord(value)) return value;
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, stripIds(item)]));
+  };
+  return {
+    ...raw,
+    entities: raw.entities.filter((entity) =>
+      !isRecord(entity) || typeof entity.id !== "string" || !removedIds.has(entity.id)),
+    constructions: remainingConstructions,
+    requiredEntityIds: stripIds(raw.requiredEntityIds),
+    revealGroups: stripIds(raw.revealGroups),
+    annotations: Array.isArray(raw.annotations)
+      ? raw.annotations.flatMap((annotation) => {
+          if (!isRecord(annotation)) return [annotation];
+          const targetIds = Array.isArray(annotation.targetIds)
+            ? annotation.targetIds.filter((id) => typeof id !== "string" || !removedIds.has(id))
+            : [];
+          return targetIds.length > 0 ? [{ ...annotation, targetIds }] : [];
+        })
+      : raw.annotations,
+    assertions: Array.isArray(raw.assertions)
+      ? raw.assertions.filter((assertion) =>
+          !isRecord(assertion) || !Array.isArray(assertion.entities) ||
+          !assertion.entities.some((id) => typeof id === "string" && removedIds.has(id)))
+      : raw.assertions,
+    relations: Array.isArray(raw.relations)
+      ? raw.relations.filter((relation) =>
+          !isRecord(relation) || !Array.isArray(relation.entities) ||
+          !relation.entities.some((id) => typeof id === "string" && removedIds.has(id)))
+      : raw.relations,
+    teachingTimeline: Array.isArray(raw.teachingTimeline)
+      ? raw.teachingTimeline.flatMap((action) => {
+          if (!isRecord(action) || (typeof action.targetId === "string" && removedIds.has(action.targetId))) {
+            return isRecord(action) ? [] : [action];
+          }
+          if (!Array.isArray(action.targetIds)) return [action];
+          const targetIds = action.targetIds.filter((id) =>
+            typeof id !== "string" || !removedIds.has(id));
+          return targetIds.length > 0 ? [{ ...action, targetIds }] : [];
+        })
+      : raw.teachingTimeline,
+  };
+}
+
+function pruneQuantityNarrationAnnotations(raw: Record<string, unknown>): Record<string, unknown> {
+  if (!Array.isArray(raw.annotations) || !Array.isArray(raw.quantities)) return raw;
+  const quantityIds = new Set(raw.quantities.flatMap((quantity) =>
+    isRecord(quantity) && typeof quantity.id === "string" ? [quantity.id] : [],
+  ));
+  const annotations = raw.annotations.filter((annotation) =>
+    !(
+      isRecord(annotation) &&
+      annotation.kind === "narration" &&
+      Array.isArray(annotation.targetIds) &&
+      annotation.targetIds.length > 0 &&
+      annotation.targetIds.every((id) => typeof id === "string" && quantityIds.has(id))
+    ));
+  return annotations.length === raw.annotations.length ? raw : { ...raw, annotations };
+}
+
+/** Collapse an exact duplicate point when only one alias participates in the scene contract. */
+function normalizeCoincidentUnownedPointAliases(
+  raw: Record<string, unknown>,
+): Record<string, unknown> {
+  if (
+    !Array.isArray(raw.entities) ||
+    !Array.isArray(raw.constructions) ||
+    !Array.isArray(raw.requiredEntityIds) ||
+    !Array.isArray(raw.revealGroups)
+  ) return raw;
+  const owned = new Set<string>(raw.requiredEntityIds.filter((id): id is string => typeof id === "string"));
+  for (const group of raw.revealGroups) {
+    if (!isRecord(group) || !Array.isArray(group.entityIds)) continue;
+    for (const id of group.entityIds) if (typeof id === "string") owned.add(id);
+  }
+  const pointConstructions = raw.constructions.filter((construction) =>
+    isRecord(construction) && construction.operator === "point" &&
+    isRecord(construction.inputs) && Array.isArray(construction.outputs) &&
+    typeof construction.outputs[0] === "string" &&
+    typeof construction.inputs.x === "number" && typeof construction.inputs.y === "number",
+  ) as Array<Record<string, unknown>>;
+  const aliases = new Map<string, string>();
+  for (const candidate of pointConstructions) {
+    const candidateId = (candidate.outputs as string[])[0]!;
+    if (owned.has(candidateId)) continue;
+    const candidateInputs = candidate.inputs as Record<string, unknown>;
+    const keeper = pointConstructions.find((other) => {
+      const otherId = (other.outputs as string[])[0]!;
+      if (!owned.has(otherId) || otherId === candidateId) return false;
+      const otherInputs = other.inputs as Record<string, unknown>;
+      return otherInputs.x === candidateInputs.x && otherInputs.y === candidateInputs.y &&
+        (otherInputs.coordinateSpace ?? "world") === (candidateInputs.coordinateSpace ?? "world");
+    });
+    if (keeper) aliases.set(candidateId, (keeper.outputs as string[])[0]!);
+  }
+  return aliases.size > 0 ? replaceAndRemoveEntityAliases(raw, aliases) : raw;
+}
+
+/**
+ * A visible incident path and a surface-contact solver output must be the same
+ * geometry. When the planner emitted both, make the solver produce the visible
+ * semantic ID and use that path to determine the contact point.
+ */
+function promoteVisibleIncidentPaths(raw: Record<string, unknown>): Record<string, unknown> {
+  if (!Array.isArray(raw.entities) || !Array.isArray(raw.constructions)) return raw;
+  const constructions = raw.constructions.filter(isRecord);
+  const declaredIds = new Set(raw.entities.flatMap((entity) =>
+    isRecord(entity) && typeof entity.id === "string" ? [entity.id] : [],
+  ));
+  const ownedIds = new Set([
+    ...(Array.isArray(raw.requiredEntityIds)
+      ? raw.requiredEntityIds.filter((id): id is string => typeof id === "string")
+      : []),
+    ...(Array.isArray(raw.revealGroups)
+      ? raw.revealGroups.flatMap((group) =>
+          isRecord(group) && Array.isArray(group.entityIds)
+            ? group.entityIds.filter((id): id is string => typeof id === "string")
+            : [])
+      : []),
+  ]);
+  const contacts = constructions.filter((construction) =>
+    construction.operator === "surface_contact" && isRecord(construction.inputs) &&
+    Array.isArray(construction.outputs) && typeof construction.outputs[1] === "string" &&
+    !ownedIds.has(construction.outputs[1] as string),
+  );
+  if (contacts.length === 0) return raw;
+
+  const promotions = new Map<string, {
+    visibleId: string;
+    producerId: string;
+    through: unknown;
+  }>();
+  const unmatchedVisible = raw.entities.filter((entity) =>
+    isRecord(entity) && typeof entity.id === "string" &&
+    (entity.kind === "ray" || entity.kind === "vector") &&
+    typeof entity.role === "string" && /\bincident(?:[ _-]?ray)?\b/i.test(entity.role),
+  ) as Array<Record<string, unknown>>;
+  for (const contact of contacts) {
+    const helperId = (contact.outputs as string[])[1]!;
+    if (declaredIds.has(helperId)) continue;
+    const contactInputs = contact.inputs as Record<string, unknown>;
+    const origin = contactInputs.origin;
+    const suffixes = semanticNumericSuffixes(String(contact.id ?? ""), String((contact.outputs as string[])[0] ?? ""), helperId);
+    const candidates = unmatchedVisible.flatMap((entity) => {
+      const visibleId = entity.id as string;
+      const producer = constructions.find((construction) =>
+        (construction.operator === "ray" || construction.operator === "vector") &&
+        Array.isArray(construction.outputs) && construction.outputs.includes(visibleId) &&
+        isRecord(construction.inputs) && construction.inputs.start === origin,
+      );
+      if (!producer || !isRecord(producer.inputs) || typeof producer.id !== "string") return [];
+      const visibleSuffixes = semanticNumericSuffixes(visibleId, producer.id);
+      const suffixMatch = suffixes.size > 0 && [...suffixes].some((suffix) => visibleSuffixes.has(suffix));
+      return [{ entity, producer, suffixMatch }];
+    });
+    const matched = candidates.filter((candidate) => candidate.suffixMatch);
+    const choice = matched.length === 1 ? matched[0] : candidates.length === 1 ? candidates[0] : undefined;
+    if (!choice || !isRecord(choice.producer.inputs)) continue;
+    const end = constructionEndpoint(choice.producer.inputs, ["end", "to", "b"]);
+    const direction = choice.producer.inputs.direction;
+    const through = end ?? pointAlongDirection(origin, direction, constructions) ?? contactInputs.through;
+    promotions.set(helperId, {
+      visibleId: choice.entity.id as string,
+      producerId: choice.producer.id as string,
+      through,
+    });
+  }
+  if (promotions.size === 0) return raw;
+
+  const replaceId = (value: unknown): unknown => {
+    if (typeof value === "string") return promotions.get(value)?.visibleId ?? value;
+    if (Array.isArray(value)) return value.map(replaceId);
+    if (!isRecord(value)) return value;
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, replaceId(item)]));
+  };
+  const removedProducerIds = new Set([...promotions.values()].map((promotion) => promotion.producerId));
+  return {
+    ...raw,
+    constructions: raw.constructions.flatMap((construction) => {
+      if (!isRecord(construction) || typeof construction.id !== "string") return [construction];
+      if (removedProducerIds.has(construction.id)) return [];
+      if (
+        construction.operator === "surface_contact" &&
+        Array.isArray(construction.outputs) &&
+        typeof construction.outputs[1] === "string" &&
+        promotions.has(construction.outputs[1])
+      ) {
+        const promotion = promotions.get(construction.outputs[1])!;
+        return [{
+          ...construction,
+          inputs: { ...(isRecord(construction.inputs) ? construction.inputs : {}), through: promotion.through },
+          outputs: [construction.outputs[0], promotion.visibleId],
+        }];
+      }
+      return [{ ...construction, inputs: replaceId(construction.inputs) }];
+    }),
+    assertions: Array.isArray(raw.assertions) ? raw.assertions.map(replaceId) : raw.assertions,
+    relations: Array.isArray(raw.relations) ? raw.relations.map(replaceId) : raw.relations,
+    annotations: Array.isArray(raw.annotations) ? raw.annotations.map(replaceId) : raw.annotations,
+    teachingTimeline: Array.isArray(raw.teachingTimeline)
+      ? raw.teachingTimeline.map(replaceId)
+      : raw.teachingTimeline,
+  };
+}
+
+/** Make a visible incident ray the authoritative input to its matching transform. */
+function promoteTransformIncidentPaths(raw: Record<string, unknown>): Record<string, unknown> {
+  if (!Array.isArray(raw.entities) || !Array.isArray(raw.constructions)) return raw;
+  const constructions = raw.constructions.filter(isRecord);
+  const declaredIds = new Set(raw.entities.flatMap((entity) =>
+    isRecord(entity) && typeof entity.id === "string" ? [entity.id] : [],
+  ));
+  const replacements = new Map<string, { visibleId: string; producerId: string }>();
+  for (const transform of constructions) {
+    if (
+      (transform.operator !== "reflect_direction" && transform.operator !== "refract_direction") ||
+      !isRecord(transform.inputs) || typeof transform.inputs.incoming !== "string" ||
+      typeof transform.inputs.origin !== "string"
+    ) continue;
+    const helperId = transform.inputs.incoming;
+    const transformOrigin = transform.inputs.origin;
+    if (declaredIds.has(helperId)) continue;
+    const helperProducer = constructions.find((construction) =>
+      Array.isArray(construction.outputs) && construction.outputs.includes(helperId));
+    if (
+      !helperProducer ||
+      !isRecord(helperProducer.inputs) ||
+      typeof helperProducer.id !== "string" ||
+      !Array.isArray(helperProducer.outputs) ||
+      helperProducer.outputs.length !== 1
+    ) continue;
+    const suffixes = semanticNumericSuffixes(
+      String(transform.id ?? ""),
+      ...((Array.isArray(transform.outputs) ? transform.outputs : []).filter((id): id is string => typeof id === "string")),
+      helperId,
+    );
+    const candidates = raw.entities.flatMap((entity) => {
+      if (
+        !isRecord(entity) || typeof entity.id !== "string" ||
+        (entity.kind !== "ray" && entity.kind !== "vector") ||
+        typeof entity.role !== "string" || !/\bincident(?:[ _-]?ray)?\b/i.test(entity.role)
+      ) return [];
+      const producer = constructions.find((construction) =>
+        (construction.operator === "ray" || construction.operator === "vector") &&
+        Array.isArray(construction.outputs) && construction.outputs.includes(entity.id) &&
+        isRecord(construction.inputs));
+      if (!producer || !isRecord(producer.inputs)) return [];
+      const start = constructionEndpoint(producer.inputs, ["start", "from", "a", "origin"]);
+      const end = constructionEndpoint(producer.inputs, ["end", "to", "b", "through"]);
+      if (start !== transformOrigin && end !== transformOrigin) return [];
+      const candidateSuffixes = semanticNumericSuffixes(entity.id, String(producer.id ?? ""));
+      const suffixMatch = suffixes.size > 0 && [...suffixes].some((suffix) => candidateSuffixes.has(suffix));
+      return [{ entityId: entity.id, suffixMatch }];
+    });
+    const matched = candidates.filter((candidate) => candidate.suffixMatch);
+    const selected = matched.length === 1 ? matched[0] : candidates.length === 1 ? candidates[0] : undefined;
+    if (selected) replacements.set(helperId, {
+      visibleId: selected.entityId,
+      producerId: helperProducer.id,
+    });
+  }
+  if (replacements.size === 0) return raw;
+  const replace = (value: unknown): unknown => {
+    if (typeof value === "string") return replacements.get(value)?.visibleId ?? value;
+    if (Array.isArray(value)) return value.map(replace);
+    if (!isRecord(value)) return value;
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, replace(item)]));
+  };
+  const removedProducerIds = new Set([...replacements.values()].map((value) => value.producerId));
+  return {
+    ...raw,
+    constructions: raw.constructions.flatMap((construction) =>
+      isRecord(construction) && typeof construction.id === "string" && removedProducerIds.has(construction.id)
+        ? []
+        : [isRecord(construction) ? { ...construction, inputs: replace(construction.inputs) } : construction]),
+    entities: raw.entities.filter((entity) =>
+      !isRecord(entity) || typeof entity.id !== "string" || !replacements.has(entity.id)),
+    requiredEntityIds: replace(raw.requiredEntityIds),
+    revealGroups: replace(raw.revealGroups),
+    assertions: replace(raw.assertions),
+    relations: replace(raw.relations),
+    annotations: replace(raw.annotations),
+    teachingTimeline: replace(raw.teachingTimeline),
+  };
+}
+
+function semanticNumericSuffixes(...values: string[]): Set<string> {
+  return new Set(values.flatMap((value) => value.match(/\d+/g) ?? []));
+}
+
+function pointAlongDirection(
+  origin: unknown,
+  direction: unknown,
+  constructions: Record<string, unknown>[],
+): Record<string, unknown> | null {
+  const originPoint = literalPointFor(origin, constructions);
+  const vector = Array.isArray(direction) && direction.length === 2 &&
+    direction.every((value) => typeof value === "number" && Number.isFinite(value))
+    ? { x: direction[0] as number, y: direction[1] as number }
+    : isRecord(direction) && typeof direction.x === "number" && typeof direction.y === "number"
+      ? { x: direction.x, y: direction.y }
+      : null;
+  if (!originPoint || !vector || Math.hypot(vector.x, vector.y) <= 1e-9) return null;
+  return {
+    x: originPoint.x + vector.x,
+    y: originPoint.y + vector.y,
+    coordinateSpace: originPoint.coordinateSpace,
+  };
+}
+
+function literalPointFor(
+  value: unknown,
+  constructions: Record<string, unknown>[],
+): { x: number; y: number; coordinateSpace: unknown } | null {
+  if (isRecord(value) && typeof value.x === "number" && typeof value.y === "number") {
+    return { x: value.x, y: value.y, coordinateSpace: value.coordinateSpace ?? "world" };
+  }
+  if (typeof value !== "string") return null;
+  const producer = constructions.find((construction) =>
+    construction.operator === "point" && Array.isArray(construction.outputs) &&
+    construction.outputs.includes(value) && isRecord(construction.inputs),
+  );
+  if (!producer || !isRecord(producer.inputs) ||
+      typeof producer.inputs.x !== "number" || typeof producer.inputs.y !== "number") return null;
+  return {
+    x: producer.inputs.x,
+    y: producer.inputs.y,
+    coordinateSpace: producer.inputs.coordinateSpace ?? "world",
+  };
+}
+
+function replaceAndRemoveEntityAliases(
+  raw: Record<string, unknown>,
+  aliases: ReadonlyMap<string, string>,
+): Record<string, unknown> {
+  const replace = (value: unknown): unknown => {
+    if (typeof value === "string") return aliases.get(value) ?? value;
+    if (Array.isArray(value)) return [...new Set(value.map(replace))];
+    if (!isRecord(value)) return value;
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, replace(item)]));
+  };
+  return {
+    ...raw,
+    entities: Array.isArray(raw.entities)
+      ? raw.entities.filter((entity) =>
+          !isRecord(entity) || typeof entity.id !== "string" || !aliases.has(entity.id))
+      : raw.entities,
+    constructions: Array.isArray(raw.constructions)
+      ? raw.constructions.flatMap((construction) =>
+          isRecord(construction) && Array.isArray(construction.outputs) &&
+          construction.outputs.some((output) => typeof output === "string" && aliases.has(output))
+            ? []
+            : [isRecord(construction) ? { ...construction, inputs: replace(construction.inputs) } : construction])
+      : raw.constructions,
+    requiredEntityIds: replace(raw.requiredEntityIds),
+    revealGroups: replace(raw.revealGroups),
+    relations: replace(raw.relations),
+    assertions: replace(raw.assertions),
+    annotations: replace(raw.annotations),
+    teachingTimeline: replace(raw.teachingTimeline),
+  };
+}
+
+const DIMENSION_OWNER_OPERATORS = new Set([
+  "segment", "connect", "symbol", "ray", "line", "vector",
+]);
+
+/**
+ * A length assertion is also an annotation-ownership contract. Keeping the
+ * dimension attached to unrelated points can satisfy the numeric assertion
+ * while producing a visually false explanation, so bind it to the asserted
+ * path before validation and layout.
+ */
+function normalizeAssertedDimensionBindings(
+  raw: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!Array.isArray(raw.constructions) || !Array.isArray(raw.assertions)) return raw;
+
+  const producerByOutput = new Map<string, Record<string, unknown>>();
+  for (const construction of raw.constructions) {
+    if (!isRecord(construction) || !Array.isArray(construction.outputs)) continue;
+    for (const output of construction.outputs) {
+      if (typeof output === "string") producerByOutput.set(output, construction);
+    }
+  }
+
+  const bindings = new Map<string, { start: string; end: string }>();
+  for (const assertion of raw.assertions) {
+    if (
+      !isRecord(assertion) ||
+      assertion.predicate !== "equal_length" ||
+      assertion.expected === false ||
+      !Array.isArray(assertion.entities) ||
+      assertion.entities.length !== 2 ||
+      !assertion.entities.every((id) => typeof id === "string")
+    ) continue;
+    const [firstId, secondId] = assertion.entities as [string, string];
+    const first = producerByOutput.get(firstId);
+    const second = producerByOutput.get(secondId);
+    const dimensionId = first?.operator === "dimension"
+      ? firstId
+      : second?.operator === "dimension" ? secondId : null;
+    const owner = dimensionId === firstId ? second : dimensionId === secondId ? first : null;
+    if (
+      !dimensionId ||
+      !owner ||
+      typeof owner.operator !== "string" ||
+      !DIMENSION_OWNER_OPERATORS.has(owner.operator) ||
+      !isRecord(owner.inputs)
+    ) continue;
+    const start = constructionEndpoint(owner.inputs, ["start", "from", "a"]);
+    const end = constructionEndpoint(owner.inputs, ["end", "to", "b"]);
+    if (start && end && start !== end) bindings.set(dimensionId, { start, end });
+  }
+  if (bindings.size === 0) return raw;
+
+  return {
+    ...raw,
+    constructions: raw.constructions.map((construction) => {
+      if (!isRecord(construction) || !Array.isArray(construction.outputs)) return construction;
+      const binding = construction.outputs.flatMap((output) =>
+        typeof output === "string" && bindings.has(output) ? [bindings.get(output)!] : [],
+      )[0];
+      if (!binding || construction.operator !== "dimension") return construction;
+      return {
+        ...construction,
+        inputs: {
+          ...(isRecord(construction.inputs) ? construction.inputs : {}),
+          ...binding,
+        },
+      };
+    }),
+  };
+}
+
+function normalizeRecognizedComponentOperators(
+  raw: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!Array.isArray(raw.entities) || !Array.isArray(raw.constructions)) return raw;
+  const entities = new Map(raw.entities.flatMap((entity) =>
+    isRecord(entity) && typeof entity.id === "string"
+      ? [[entity.id, entity] as const]
+      : [],
+  ));
+  let changed = false;
+  const constructions = raw.constructions.map((construction) => {
+    if (
+      !isRecord(construction) ||
+      (construction.operator !== "connect" && construction.operator !== "segment") ||
+      !isRecord(construction.inputs) ||
+      !Array.isArray(construction.outputs) ||
+      construction.outputs.length !== 1 ||
+      typeof construction.outputs[0] !== "string"
+    ) return construction;
+    const entity = entities.get(construction.outputs[0]);
+    if (!entity || (entity.kind !== "component" && entity.kind !== "symbol")) return construction;
+    const semantic = `${construction.outputs[0]} ${String(entity.role ?? "")} ${String(entity.label ?? "")}`
+      .toLowerCase()
+      .replace(/[_-]+/g, " ");
+    const symbol = recognizedComponentSymbol(semantic);
+    const start = constructionEndpoint(construction.inputs, ["start", "from", "a"]);
+    const end = constructionEndpoint(construction.inputs, ["end", "to", "b"]);
+    if (!symbol || !start || !end || start === end) return construction;
+    changed = true;
+    return {
+      ...construction,
+      operator: "symbol",
+      inputs: { symbol, start, end },
+    };
+  });
+  return changed ? { ...raw, constructions } : raw;
+}
+
+function recognizedComponentSymbol(semantic: string): SupportedSceneComponentSymbol | undefined {
+  return SUPPORTED_SCENE_COMPONENT_SYMBOLS.find((candidate) => {
+    const phrase = candidate.replace(/_/g, " ");
+    return new RegExp(`(?:^|[^a-z])${phrase}(?:[^a-z]|$)`, "i").test(semantic);
+  });
+}
+
+/**
+ * Repair a port assignment, not a missing topology. A model sometimes places
+ * both adjacent series connectors on one terminal of a two-terminal symbol.
+ * When the ordered path identifies one unique connector toward the next
+ * component, move only that local endpoint to the symbol's unused terminal.
+ */
+function repairAssertedSeriesTerminalIncidence(
+  raw: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!Array.isArray(raw.constructions) || !Array.isArray(raw.assertions)) return raw;
+  const constructions = raw.constructions.map((construction) =>
+    isRecord(construction) && isRecord(construction.inputs)
+      ? { ...construction, inputs: { ...construction.inputs } }
+      : construction,
+  );
+  const symbols = new Map<string, { start: string; end: string }>();
+  for (const construction of constructions) {
+    if (
+      !isRecord(construction) ||
+      construction.operator !== "symbol" ||
+      !isRecord(construction.inputs) ||
+      !Array.isArray(construction.outputs) ||
+      typeof construction.outputs[0] !== "string"
+    ) continue;
+    const start = constructionEndpoint(construction.inputs, ["start", "from", "a"]);
+    const end = constructionEndpoint(construction.inputs, ["end", "to", "b"]);
+    if (start && end && start !== end) symbols.set(construction.outputs[0], { start, end });
+  }
+  let changed = false;
+  for (const assertion of raw.assertions) {
+    if (
+      !isRecord(assertion) ||
+      assertion.predicate !== "path" ||
+      assertion.expected === false ||
+      !Array.isArray(assertion.entities)
+    ) continue;
+    const ordered = assertion.entities.filter(
+      (id): id is string => typeof id === "string" && symbols.has(id),
+    );
+    if (ordered.length < 2) continue;
+    for (let index = 0; index < ordered.length; index += 1) {
+      const componentId = ordered[index]!;
+      const terminals = symbols.get(componentId)!;
+      const connectors = constructions.flatMap((construction, constructionIndex) => {
+        if (
+          !isRecord(construction) ||
+          construction.operator !== "connect" ||
+          !isRecord(construction.inputs)
+        ) return [];
+        const start = constructionEndpoint(construction.inputs, ["start", "from", "a"]);
+        const end = constructionEndpoint(construction.inputs, ["end", "to", "b"]);
+        if (!start || !end) return [];
+        if (start === terminals.start || end === terminals.start) {
+          return [{ constructionIndex, local: terminals.start, other: start === terminals.start ? end : start }];
+        }
+        if (start === terminals.end || end === terminals.end) {
+          return [{ constructionIndex, local: terminals.end, other: start === terminals.end ? end : start }];
+        }
+        return [];
+      });
+      const startConnectors = connectors.filter((connector) => connector.local === terminals.start);
+      const endConnectors = connectors.filter((connector) => connector.local === terminals.end);
+      const overloaded = startConnectors.length > 1 && endConnectors.length === 0
+        ? { connectors: startConnectors, from: terminals.start, to: terminals.end }
+        : endConnectors.length > 1 && startConnectors.length === 0
+          ? { connectors: endConnectors, from: terminals.end, to: terminals.start }
+          : null;
+      if (!overloaded) continue;
+      const nextId = ordered[index + 1];
+      const nextTerminals = nextId ? symbols.get(nextId) : undefined;
+      const towardNext = nextTerminals
+        ? overloaded.connectors.filter((connector) =>
+            connector.other === nextTerminals.start || connector.other === nextTerminals.end)
+        : [];
+      if (towardNext.length !== 1) continue;
+      const selected = constructions[towardNext[0]!.constructionIndex];
+      if (!isRecord(selected) || !isRecord(selected.inputs)) continue;
+      for (const key of ["start", "from", "a", "end", "to", "b"]) {
+        if (selected.inputs[key] === overloaded.from) {
+          selected.inputs[key] = overloaded.to;
+          changed = true;
+          break;
+        }
+      }
+    }
+  }
+  return changed ? { ...raw, constructions } : raw;
+}
+
+/**
+ * Close one missing return wire only when the document itself proves the
+ * intent: a complete/series powered circuit, a connected component assertion,
+ * and one unique nearest pair of dangling terminals. Ambiguous and explicitly
+ * open circuits remain untouched and fail the normal topology proof.
+ */
+function repairUniquelyAssertedPoweredLoop(
+  raw: Record<string, unknown>,
+): Record<string, unknown> {
+  if (
+    !Array.isArray(raw.entities) ||
+    !Array.isArray(raw.constructions) ||
+    !Array.isArray(raw.assertions) ||
+    !Array.isArray(raw.requiredEntityIds) ||
+    !Array.isArray(raw.revealGroups)
+  ) return raw;
+  const question = isRecord(raw.source) && typeof raw.source.question === "string"
+    ? raw.source.question.toLowerCase()
+    : "";
+  if (
+    /\b(?:open circuit|open switch|switch is open|disconnected circuit)\b/.test(question) ||
+    !(/\b(?:series|complete|closed)\b.*\b(?:circuit|loop)\b/.test(question) ||
+      /\b(?:circuit|loop)\b.*\b(?:series|complete|closed)\b/.test(question))
+  ) return raw;
+
+  const constructions = raw.constructions.filter(isRecord);
+  const symbolEdges = constructions.flatMap((construction) => {
+    if (
+      construction.operator !== "symbol" ||
+      !isRecord(construction.inputs) ||
+      !Array.isArray(construction.outputs) ||
+      typeof construction.outputs[0] !== "string"
+    ) return [];
+    const start = constructionEndpoint(construction.inputs, ["start", "from", "a"]);
+    const end = constructionEndpoint(construction.inputs, ["end", "to", "b"]);
+    if (!start || !end || start === end) return [];
+    return [{
+      id: construction.outputs[0],
+      start,
+      end,
+      semantic: String(construction.inputs.symbol ?? ""),
+    }];
+  });
+  const source = symbolEdges.find((edge) =>
+    /\b(?:(?:ac|dc|voltage|current|power)[_ -]?source|battery|cell|supply|generator)\b/i
+      .test(edge.semantic));
+  if (!source) return raw;
+  const assertedIds = raw.assertions.flatMap((assertion) =>
+    isRecord(assertion) &&
+    assertion.predicate === "connected" &&
+    assertion.expected !== false &&
+    Array.isArray(assertion.entities) &&
+    assertion.entities.includes(source.id) &&
+    assertion.entities.filter((id) =>
+      typeof id === "string" && symbolEdges.some((edge) => edge.id === id)).length >= 3
+      ? assertion.entities.filter((id): id is string => typeof id === "string")
+      : [],
+  );
+  if (assertedIds.length === 0) return raw;
+  const asserted = new Set(assertedIds);
+  const relevantSymbols = symbolEdges.filter((edge) => asserted.has(edge.id));
+  const connectorEdges = constructions.flatMap((construction) => {
+    if (
+      construction.operator !== "connect" ||
+      !isRecord(construction.inputs)
+    ) return [];
+    const start = constructionEndpoint(construction.inputs, ["start", "from", "a"]);
+    const end = constructionEndpoint(construction.inputs, ["end", "to", "b"]);
+    return start && end && start !== end ? [{ start, end }] : [];
+  });
+  const terminals = new Set([
+    ...relevantSymbols.flatMap((edge) => [edge.start, edge.end]),
+    ...connectorEdges.flatMap((edge) => [edge.start, edge.end]),
+  ]);
+  const parent = new Map([...terminals].map((id) => [id, id]));
+  const find = (id: string): string => {
+    const owner = parent.get(id);
+    if (!owner || owner === id) return id;
+    const root = find(owner);
+    parent.set(id, root);
+    return root;
+  };
+  const join = (first: string, second: string): void => {
+    const firstRoot = find(first);
+    const secondRoot = find(second);
+    if (firstRoot !== secondRoot) parent.set(secondRoot, firstRoot);
+  };
+  const nonSourceEdges = [
+    ...relevantSymbols.filter((edge) => edge.id !== source.id),
+    ...connectorEdges,
+  ];
+  const degree = new Map<string, number>();
+  for (const edge of nonSourceEdges) {
+    join(edge.start, edge.end);
+    degree.set(edge.start, (degree.get(edge.start) ?? 0) + 1);
+    degree.set(edge.end, (degree.get(edge.end) ?? 0) + 1);
+  }
+  const firstRoot = find(source.start);
+  const secondRoot = find(source.end);
+  if (firstRoot === secondRoot) return raw;
+  const relevantRoots = new Set(relevantSymbols.flatMap((edge) =>
+    edge.id === source.id ? [] : [find(edge.start), find(edge.end)]));
+  if ([...relevantRoots].some((root) => root !== firstRoot && root !== secondRoot)) return raw;
+
+  const points = new Map(constructions.flatMap((construction) =>
+    construction.operator === "point" &&
+    isRecord(construction.inputs) &&
+    Array.isArray(construction.outputs) &&
+    typeof construction.outputs[0] === "string" &&
+    typeof construction.inputs.x === "number" &&
+    Number.isFinite(construction.inputs.x) &&
+    typeof construction.inputs.y === "number" &&
+    Number.isFinite(construction.inputs.y) &&
+    (construction.inputs.coordinateSpace === "layout" || construction.inputs.coordinateSpace === "world")
+      ? [[construction.outputs[0], {
+          x: construction.inputs.x,
+          y: construction.inputs.y,
+          space: construction.inputs.coordinateSpace,
+        }] as const]
+      : [],
+  ));
+  const dangling = [...terminals].filter((id) => (degree.get(id) ?? 0) <= 1 && points.has(id));
+  const sourcePair = canonicalTerminalPair(source.start, source.end);
+  const candidates = dangling.flatMap((first) => dangling.flatMap((second) => {
+    if (
+      first >= second ||
+      find(first) === find(second) ||
+      canonicalTerminalPair(first, second) === sourcePair
+    ) return [];
+    const firstPoint = points.get(first)!;
+    const secondPoint = points.get(second)!;
+    if (firstPoint.space !== secondPoint.space) return [];
+    return [{
+      first,
+      second,
+      distance: Math.hypot(firstPoint.x - secondPoint.x, firstPoint.y - secondPoint.y),
+    }];
+  })).filter((candidate) => candidate.distance > 1e-9)
+    .sort((first, second) => first.distance - second.distance);
+  if (
+    candidates.length === 0 ||
+    (candidates[1] && Math.abs(candidates[1].distance - candidates[0]!.distance) <= 1e-9)
+  ) return raw;
+
+  const ownerGroup = raw.revealGroups.find((group) => {
+    if (!isRecord(group) || !Array.isArray(group.entityIds)) return false;
+    const entityIds = group.entityIds;
+    return relevantSymbols.every((edge) => entityIds.includes(edge.id));
+  });
+  if (!isRecord(ownerGroup) || !Array.isArray(ownerGroup.entityIds)) return raw;
+  const occupied = new Set([
+    ...raw.entities.flatMap((entity) =>
+      isRecord(entity) && typeof entity.id === "string" ? [entity.id] : []),
+    ...constructions.flatMap((construction) =>
+      typeof construction.id === "string" ? [construction.id] : []),
+  ]);
+  let entityId = "asserted_loop_closure";
+  let suffix = 2;
+  while (occupied.has(entityId)) entityId = `asserted_loop_closure_${suffix++}`;
+  const constructionId = `construct_${entityId}`;
+  const winner = candidates[0]!;
+  return {
+    ...raw,
+    entities: [
+      ...raw.entities,
+      { id: entityId, kind: "connector", role: "inferred return wire" },
+    ],
+    constructions: [
+      ...raw.constructions,
+      {
+        id: constructionId,
+        operator: "connect",
+        inputs: { start: winner.first, end: winner.second },
+        outputs: [entityId],
+        reason: "unique asserted powered-loop closure",
+      },
+    ],
+    requiredEntityIds: [...new Set([...raw.requiredEntityIds, entityId])],
+    revealGroups: raw.revealGroups.map((group) =>
+      group === ownerGroup
+        ? {
+            ...group,
+            entityIds: [
+              ...new Set([
+                ...(Array.isArray(group.entityIds) ? group.entityIds : []),
+                entityId,
+              ]),
+            ],
+          }
+        : group),
+  };
+}
+
+/**
+ * A surface_contact construction owns the finite incoming path used by a
+ * reflection/refraction transform. Remove a second visible vector only when it
+ * describes that exact origin/through path and has no semantic consumers.
+ */
+function pruneRedundantIncidentPathDeclarations(
+  raw: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!Array.isArray(raw.entities) || !Array.isArray(raw.constructions)) return raw;
+  const constructions = raw.constructions.filter(isRecord);
+  const usedIncomingIds = new Set(constructions.flatMap((construction) =>
+    (construction.operator === "reflect_direction" || construction.operator === "refract_direction") &&
+    isRecord(construction.inputs) &&
+    typeof construction.inputs.incoming === "string"
+      ? [construction.inputs.incoming]
+      : [],
+  ));
+  const contacts = constructions.filter((construction) =>
+    construction.operator === "surface_contact" && isRecord(construction.inputs),
+  );
+  if (contacts.length === 0 || usedIncomingIds.size === 0) return raw;
+
+  const replacements = new Map<string, string>();
+  for (const entity of raw.entities) {
+    if (
+      !isRecord(entity) ||
+      typeof entity.id !== "string" ||
+      (entity.kind !== "vector" && entity.kind !== "ray") ||
+      typeof entity.role !== "string" ||
+      !/\bincident(?:[ _-]?ray)?\b/i.test(entity.role) ||
+      usedIncomingIds.has(entity.id)
+    ) continue;
+    const producer = constructions.find((construction) =>
+      (construction.operator === "vector" || construction.operator === "ray") &&
+      Array.isArray(construction.outputs) &&
+      construction.outputs.includes(entity.id) &&
+      isRecord(construction.inputs),
+    );
+    if (!producer || !isRecord(producer.inputs)) continue;
+    const start = producer.inputs.start;
+    const end = producer.inputs.end;
+    const equivalentContact = contacts.find((contact) =>
+      isRecord(contact.inputs) &&
+      contact.inputs.origin === start &&
+      contact.inputs.through === end &&
+      Array.isArray(contact.outputs) &&
+      typeof contact.outputs[1] === "string" &&
+      usedIncomingIds.has(contact.outputs[1]),
+    );
+    const replacement = equivalentContact && Array.isArray(equivalentContact.outputs)
+      ? equivalentContact.outputs[1]
+      : undefined;
+    if (typeof replacement === "string") replacements.set(entity.id, replacement);
+  }
+  if (replacements.size === 0) return raw;
+
+  const replaceId = (value: unknown): unknown => {
+    if (typeof value === "string") return replacements.get(value) ?? value;
+    if (Array.isArray(value)) return [...new Set(value.map(replaceId))];
+    if (!isRecord(value)) return value;
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, replaceId(item)]));
+  };
+
+  return {
+    ...raw,
+    entities: raw.entities.filter((entity) =>
+      !isRecord(entity) || typeof entity.id !== "string" || !replacements.has(entity.id)),
+    constructions: raw.constructions.flatMap((construction) => {
+      if (
+        isRecord(construction) &&
+        Array.isArray(construction.outputs) &&
+        construction.outputs.some((output) => typeof output === "string" && replacements.has(output))
+      ) return [];
+      return isRecord(construction)
+        ? [{ ...construction, inputs: replaceId(construction.inputs) }]
+        : [construction];
+    }),
+    requiredEntityIds: Array.isArray(raw.requiredEntityIds)
+      ? [...new Set(raw.requiredEntityIds.map(replaceId))]
+      : raw.requiredEntityIds,
+    revealGroups: Array.isArray(raw.revealGroups)
+      ? raw.revealGroups.map((group) => isRecord(group) && Array.isArray(group.entityIds)
+        ? { ...group, entityIds: [...new Set(group.entityIds.map(replaceId))] }
+        : group)
+      : raw.revealGroups,
+    annotations: Array.isArray(raw.annotations)
+      ? raw.annotations.map(replaceId)
+      : raw.annotations,
+    assertions: Array.isArray(raw.assertions)
+      ? raw.assertions.map(replaceId)
+      : raw.assertions,
+    relations: Array.isArray(raw.relations)
+      ? raw.relations.map(replaceId)
+      : raw.relations,
+    teachingTimeline: Array.isArray(raw.teachingTimeline)
+      ? raw.teachingTimeline.map(replaceId)
+      : raw.teachingTimeline,
+  };
+}
+
+function collectEntityReferencesInto(
+  value: unknown,
+  entityIds: ReadonlySet<string>,
+  target: Set<string>,
+): void {
+  if (typeof value === "string") {
+    if (entityIds.has(value)) target.add(value);
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectEntityReferencesInto(item, entityIds, target));
+    return;
+  }
+  if (isRecord(value)) {
+    Object.values(value).forEach((item) =>
+      collectEntityReferencesInto(item, entityIds, target));
+  }
+}
+
+function collectConstructionEntityReferences(
+  inputs: unknown,
+  entityIds: ReadonlySet<string>,
+  target: Set<string>,
+): void {
+  if (!isRecord(inputs)) return;
+  for (const [key, value] of Object.entries(inputs)) {
+    if (!CONSTRUCTION_ENTITY_REFERENCE_KEYS.has(key)) continue;
+    collectEntityReferencesInto(value, entityIds, target);
+  }
+}
+
+function normalizeAssertionsAfterPruning(
+  assertions: unknown[],
+  prunable: ReadonlySet<string>,
+  constructions: unknown[],
+): unknown[] {
+  const topologyEdgeIds = new Set(constructions.flatMap((construction) =>
+    isRecord(construction) &&
+    (construction.operator === "symbol" || construction.operator === "connect") &&
+    Array.isArray(construction.outputs)
+      ? construction.outputs.filter((output): output is string => typeof output === "string")
+      : [],
+  ));
+  return assertions.flatMap((assertion) => {
+    if (!isRecord(assertion) || !Array.isArray(assertion.entities)) return [assertion];
+    let entities = assertion.entities.filter(
+      (id) => typeof id !== "string" || !prunable.has(id),
+    );
+    if (assertion.predicate === "path") {
+      entities = entities.filter((id) => typeof id !== "string" || topologyEdgeIds.has(id));
+    }
+    if (entities.length === assertion.entities.length) return [assertion];
+    const minimum = assertion.predicate === "path" || assertion.predicate === "label_attached"
+      ? 1
+      : assertion.predicate === "converges"
+        ? 3
+        : 2;
+    return entities.length >= minimum ? [{ ...assertion, entities }] : [];
+  });
+}
+
+/**
+ * Normalize only planner artifacts whose intended representation is
+ * unambiguous. Physics, topology, and assertion failures remain untouched.
+ */
+function normalizeMechanicalPlannerArtifacts(raw: Record<string, unknown>): Record<string, unknown> {
+  if (!Array.isArray(raw.constructions)) return raw;
+
+  const declaredCoordinateSpaces = raw.constructions.flatMap((construction) => {
+    if (
+      !isRecord(construction) ||
+      construction.operator !== "point" ||
+      !isRecord(construction.inputs) ||
+      (construction.inputs.coordinateSpace !== "layout" && construction.inputs.coordinateSpace !== "world")
+    ) return [];
+    return [construction.inputs.coordinateSpace];
+  });
+  const worldSpaceCount = declaredCoordinateSpaces.filter((space) => space === "world").length;
+  const defaultCoordinateSpace: "layout" | "world" =
+    worldSpaceCount >= declaredCoordinateSpaces.length - worldSpaceCount ? "world" : "layout";
+  const inlinePointInputKeys = new Set([
+    "start", "end", "from", "to", "a", "b", "origin", "target", "at",
+    "point", "through", "center", "vertex",
+  ]);
+
+  const declaredEntityIds = new Set(
+    (Array.isArray(raw.entities) ? raw.entities : []).flatMap((entity) =>
+      isRecord(entity) && typeof entity.id === "string" ? [entity.id] : [],
+    ),
+  );
+  const declaredEntities = new Map(
+    (Array.isArray(raw.entities) ? raw.entities : []).flatMap((entity) =>
+      isRecord(entity) && typeof entity.id === "string"
+        ? [[entity.id, entity] as const]
+        : [],
+    ),
+  );
+  const interfaceCandidates = [...declaredEntities].flatMap(([id, entity]) => {
+    const semantic = `${id} ${String(entity.role ?? "")} ${String(entity.label ?? "")}`
+      .toLowerCase()
+      .replace(/[_-]+/g, " ");
+    return (entity.kind === "line" || entity.kind === "segment") &&
+      /\b(?:boundary|interface|surface)\b/.test(semantic)
+      ? [id]
+      : [];
+  });
+  const occupiedIds = new Set<string>([
+    ...declaredEntityIds,
+    ...raw.constructions.flatMap((construction) =>
+      isRecord(construction) && typeof construction.id === "string"
+        ? [construction.id]
+        : [],
+    ),
+  ]);
+  const retainedConstructionIds = new Set<string>();
+  const allocateId = (base: string): string => {
+    let candidate = base;
+    let suffix = 2;
+    while (occupiedIds.has(candidate)) {
+      candidate = `${base}_${suffix}`;
+      suffix += 1;
+    }
+    occupiedIds.add(candidate);
+    return candidate;
+  };
+  const constructions: unknown[] = [];
+  for (const rawConstruction of raw.constructions) {
+    if (!isRecord(rawConstruction)) {
+      constructions.push(rawConstruction);
+      continue;
+    }
+
+    const originalId = typeof rawConstruction.id === "string"
+      ? rawConstruction.id
+      : undefined;
+    const outputs = typeof rawConstruction.outputs === "string"
+      ? [rawConstruction.outputs]
+      : Array.isArray(rawConstruction.outputs) && rawConstruction.outputs.length > 0
+        ? rawConstruction.outputs
+        : originalId && (
+            declaredEntityIds.has(originalId) ||
+            rawConstruction.operator === "normal_at"
+          )
+          ? [originalId]
+          : inferOutputFromConstructionName(originalId, declaredEntityIds);
+    // An outputless construction whose ID does not name a declared entity
+    // cannot contribute deterministic geometry.
+    if (outputs.length === 0) continue;
+
+    let constructionId = originalId;
+    if (
+      constructionId &&
+      (
+        declaredEntityIds.has(constructionId) ||
+        retainedConstructionIds.has(constructionId) ||
+        outputs.includes(constructionId)
+      )
+    ) {
+      constructionId = allocateId(`construct_${constructionId}`);
+    }
+    if (constructionId) retainedConstructionIds.add(constructionId);
+
+    let operator = rawConstruction.operator;
+    let inputs = isRecord(rawConstruction.inputs)
+      ? { ...rawConstruction.inputs }
+      : rawConstruction.inputs;
+    if (
+      operator === "label" &&
+      isRecord(inputs) &&
+      typeof inputs.target === "string" &&
+      declaredEntities.get(inputs.target)?.kind === "group" &&
+      interfaceCandidates.length === 1
+    ) {
+      inputs = { ...inputs, target: interfaceCandidates[0] };
+    }
+    if (isRecord(inputs)) {
+      for (const [key, value] of Object.entries(inputs)) {
+        // These operator contracts consume a coordinate value, not a point-entity reference.
+        if (key === "origin" && typeof operator === "string" &&
+          (MATRIX_ARRAY_CONSTRUCTIONS.has(operator) || ROTATION_CONSTRUCTIONS.has(operator))) continue;
+        const inlinePoint = isInlineCoordinatePoint(value)
+          ? value
+          : inlinePointInputKeys.has(key) &&
+              Array.isArray(value) &&
+              value.length >= 2 &&
+              typeof value[0] === "number" &&
+              Number.isFinite(value[0]) &&
+              typeof value[1] === "number" &&
+              Number.isFinite(value[1])
+            ? {
+                x: value[0],
+                y: value[1],
+                coordinateSpace: inputs.coordinateSpace === "layout" || inputs.coordinateSpace === "world"
+                  ? inputs.coordinateSpace
+                  : defaultCoordinateSpace,
+              }
+          : inlinePointInputKeys.has(key) &&
+              isRecord(value) &&
+              typeof value.x === "number" &&
+              Number.isFinite(value.x) &&
+              typeof value.y === "number" &&
+              Number.isFinite(value.y)
+            ? {
+                ...value,
+                coordinateSpace: inputs.coordinateSpace === "layout" || inputs.coordinateSpace === "world"
+                  ? inputs.coordinateSpace
+                  : defaultCoordinateSpace,
+              }
+            : null;
+        if (!inlinePoint) continue;
+        const outputStem = typeof outputs[0] === "string"
+          ? outputs[0]
+          : constructionId ?? "geometry";
+        const anchorId = allocateId(`${outputStem}_${key}_anchor`);
+        const anchorConstructionId = allocateId(`construct_${anchorId}`);
+        retainedConstructionIds.add(anchorConstructionId);
+        constructions.push({
+          id: anchorConstructionId,
+          operator: "point",
+          inputs: inlinePoint,
+          outputs: [anchorId],
+        });
+        inputs[key] = anchorId;
+      }
+    }
+    if (
+      operator === "vector" &&
+      isRecord(inputs) &&
+      Array.isArray(inputs.direction) &&
+      inputs.direction.length >= 3 &&
+      inputs.direction.slice(0, 3).every((value) =>
+        typeof value === "number" && Number.isFinite(value))
+    ) {
+      const [x, y, z] = inputs.direction as number[];
+      if (Math.hypot(x!, y!) > 1e-9) {
+        inputs = { ...inputs, direction: [x, y] };
+      } else if (Math.abs(z!) > 1e-9 && typeof inputs.start === "string") {
+        operator = "label";
+        inputs = { target: inputs.start, text: z! < 0 ? "×" : "•" };
+      }
+    }
+
+    constructions.push({
+      ...rawConstruction,
+      ...(constructionId ? { id: constructionId } : {}),
+      operator,
+      inputs,
+      outputs,
+    });
+  }
+
+  const labelTextByOutput = new Map<string, string>();
+  for (const construction of constructions) {
+    if (
+      !isRecord(construction) ||
+      construction.operator !== "label" ||
+      !isRecord(construction.inputs) ||
+      typeof construction.inputs.text !== "string" ||
+      !isCompactDiagramLabel(construction.inputs.text) ||
+      !Array.isArray(construction.outputs) ||
+      construction.outputs.length !== 1 ||
+      typeof construction.outputs[0] !== "string"
+    ) continue;
+    labelTextByOutput.set(construction.outputs[0], construction.inputs.text);
+  }
+  const entities: unknown[] = Array.isArray(raw.entities)
+    ? raw.entities.map((entity) => {
+        if (!isRecord(entity)) return entity;
+        const normalizedEntity = { ...entity };
+        if (
+          typeof normalizedEntity.kind === "string" &&
+          (typeof normalizedEntity.role !== "string" || normalizedEntity.role.trim() === "")
+        ) {
+          normalizedEntity.role = normalizedEntity.kind === "point"
+            ? "helper point"
+            : normalizedEntity.kind.replace(/_/g, " ");
+        }
+        if (typeof normalizedEntity.label === "string" && normalizedEntity.label.trim() === "") {
+          delete normalizedEntity.label;
+        }
+        if (
+          normalizedEntity.kind !== "label" &&
+          typeof normalizedEntity.label === "string" &&
+          !isCompactDiagramLabel(normalizedEntity.label)
+        ) {
+          delete normalizedEntity.label;
+        }
+        if (
+          normalizedEntity.kind === "label" &&
+          typeof normalizedEntity.id === "string"
+        ) {
+          const label = labelTextByOutput.get(normalizedEntity.id);
+          if (label) normalizedEntity.label = label;
+        }
+        if (
+          typeof normalizedEntity.id === "string" &&
+          labelTextByOutput.has(normalizedEntity.id)
+        ) {
+          normalizedEntity.kind = "label";
+          normalizedEntity.role = "direction marker";
+          normalizedEntity.label = labelTextByOutput.get(normalizedEntity.id);
+        }
+        return normalizedEntity;
+      })
+    : [];
+  const annotations = Array.isArray(raw.annotations)
+    ? raw.annotations.map((annotation) => {
+        if (
+          !isRecord(annotation) ||
+          annotation.kind !== "label" ||
+          typeof annotation.text !== "string" ||
+          isCompactDiagramLabel(annotation.text)
+        ) return annotation;
+        return { ...annotation, kind: "callout" };
+      })
+    : raw.annotations;
+  const derivedPathNormalized = normalizeDerivedPathWrappers({
+    ...raw,
+    entities,
+    constructions,
+    annotations,
+  });
+  const componentNormalizedConstructions = normalizeVectorComponentBases(
+    derivedPathNormalized.constructions as unknown[],
+    derivedPathNormalized.entities as unknown[],
+  );
+  const coordinateNormalizedConstructions = normalizeVectorCoordinateSpaces(
+    componentNormalizedConstructions,
+  );
+  const normalizedAssertions = normalizeIncidentAssertionOrder(
+    coordinateNormalizedConstructions,
+    derivedPathNormalized.assertions,
+  );
+  const normalizedOpticsAssertions = normalizeSnellAssertionShape(
+    coordinateNormalizedConstructions,
+    normalizedAssertions,
+    derivedPathNormalized.quantities,
+    derivedPathNormalized.entities,
+  );
+  const normalizedAngleAssertions = normalizeNumericAngleAssertions(
+    coordinateNormalizedConstructions,
+    normalizedOpticsAssertions,
+    derivedPathNormalized.quantities,
+    derivedPathNormalized.entities,
+  );
+  const normalizedConstructions = normalizeAssertedVectorDirections(
+    coordinateNormalizedConstructions,
+    normalizedAngleAssertions,
+  );
+  const normalized = {
+    ...derivedPathNormalized,
+    constructions: normalizedConstructions,
+    assertions: normalizedAngleAssertions,
+  };
+  return constrainParaxialIllustrationHeight(normalized);
+}
+
+/**
+ * Replace guessed refraction geometry only when the document already contains
+ * a complete, unambiguous proof contract. This is driven by predicates and
+ * quantities rather than topic names, so the same repair applies to plane,
+ * curved, prism, and wavefront scenes.
+ */
+function normalizeProofDerivedOpticsGeometry(raw: Record<string, unknown>): Record<string, unknown> {
+  if (
+    !Array.isArray(raw.entities) ||
+    !Array.isArray(raw.constructions) ||
+    !Array.isArray(raw.assertions) ||
+    !Array.isArray(raw.quantities)
+  ) return raw;
+
+  const entities = raw.entities.map((entity) => isRecord(entity) ? { ...entity } : entity);
+  const entityById = new Map(entities.flatMap((entity) =>
+    isRecord(entity) && typeof entity.id === "string" ? [[entity.id, entity] as const] : []));
+  const semantic = (id: string): string => {
+    const entity = entityById.get(id);
+    return `${id} ${String(entity?.role ?? "")} ${String(entity?.label ?? "")}`
+      .toLowerCase()
+      .replace(/[_{}-]+/g, " ")
+      .replace(/\s+/g, " ");
+  };
+  const originalConstructions = raw.constructions.map((construction) =>
+    isRecord(construction) ? { ...construction, inputs: isRecord(construction.inputs) ? { ...construction.inputs } : construction.inputs } : construction);
+  let constructions = originalConstructions;
+  const assertions = raw.assertions.map((assertion) => isRecord(assertion) ? { ...assertion } : assertion);
+  const occupiedConstructionIds = new Set(constructions.flatMap((construction) =>
+    isRecord(construction) && typeof construction.id === "string" ? [construction.id] : []));
+  const allocateConstructionId = (base: string): string => {
+    let id = base;
+    let suffix = 2;
+    while (occupiedConstructionIds.has(id)) id = `${base}_${suffix++}`;
+    occupiedConstructionIds.add(id);
+    return id;
+  };
+  let changed = false;
+
+  for (let assertionIndex = 0; assertionIndex < assertions.length; assertionIndex += 1) {
+    const assertion = assertions[assertionIndex];
+    if (
+      !isRecord(assertion) ||
+      assertion.predicate !== "snells_law" ||
+      assertion.expected === false ||
+      !Array.isArray(assertion.entities)
+    ) continue;
+
+    const producers = constructionProducers(constructions);
+    const assertedIds = assertion.entities.filter((id): id is string => typeof id === "string");
+    const incidentId = assertedIds.find((id) =>
+      /\bincident\b/.test(semantic(id)) && !/\bwavefront\b/.test(semantic(id)));
+    const refractedId = assertedIds.find((id) =>
+      /\brefract(?:ed|ion)?\b/.test(semantic(id)) && !/\bwavefront\b/.test(semantic(id)));
+    const normalId = assertedIds.find((id) =>
+      /\bnormal\b/.test(semantic(id)) && !/\bwavefront\b/.test(semantic(id)));
+    if (!incidentId || !refractedId || !normalId) continue;
+
+    const existingBundle = [incidentId, normalId, refractedId]
+      .map((id) => producers.get(id))
+      .find((producer) => producer?.operator === "refract_at");
+    const contactSurface = proofDerivedContactAndSurface(raw, constructions, entityById);
+    const indices = proofDerivedRefractiveIndices(assertion.expected, raw.quantities);
+    const incidentAngleDeg = proofDerivedIncidentAngleDeg(
+      assertions,
+      raw.quantities,
+      incidentId,
+      normalId,
+    );
+    if (!contactSurface || !indices || incidentAngleDeg === null) continue;
+
+    if (!existingBundle) {
+      const replacedProducers = new Set(
+        [incidentId, normalId, refractedId]
+          .map((id) => producers.get(id))
+          .filter((producer): producer is Record<string, unknown> => Boolean(producer)),
+      );
+      if (replacedProducers.size !== 3) continue;
+      const span = proofDerivedRaySpan(
+        incidentId,
+        refractedId,
+        contactSurface.contact,
+        producers,
+      );
+      const tangentSign = proofDerivedTangentSign(
+        incidentId,
+        contactSurface.contact,
+        contactSurface.surface,
+        producers,
+      );
+      const dependencyIndexes = [contactSurface.contact, contactSurface.surface]
+        .map((id) => producers.get(id))
+        .map((producer) => constructions.indexOf(producer))
+        .filter((index) => index >= 0);
+      if (dependencyIndexes.length !== 2) continue;
+      const insertionIndex = Math.max(...dependencyIndexes) + 1;
+      const bundle = {
+        id: allocateConstructionId(`derive_${String(assertion.id ?? "snell")}_rays`),
+        operator: "refract_at",
+        inputs: {
+          point: contactSurface.contact,
+          surface: contactSurface.surface,
+          incidentAngleDeg,
+          n1: indices.n1,
+          n2: indices.n2,
+          tangentSign,
+          span,
+        },
+        outputs: [incidentId, normalId, refractedId],
+      };
+      constructions = [
+        ...constructions.slice(0, insertionIndex).filter((item) => !replacedProducers.has(item as Record<string, unknown>)),
+        bundle,
+        ...constructions.slice(insertionIndex).filter((item) => !replacedProducers.has(item as Record<string, unknown>)),
+      ];
+      changed = true;
+    }
+
+    assertions[assertionIndex] = {
+      ...assertion,
+      entities: [incidentId, normalId, refractedId],
+      expected: indices,
+    };
+
+    const wavefrontIds = new Map<string, string>();
+    for (const candidate of assertions) {
+      if (
+        !isRecord(candidate) ||
+        candidate.predicate !== "perpendicular" ||
+        candidate.expected === false ||
+        !Array.isArray(candidate.entities)
+      ) continue;
+      const ids = candidate.entities.filter((id): id is string => typeof id === "string");
+      if (ids.length !== 2) continue;
+      const wavefrontId = ids.find((id) => /\bwavefront\b/.test(semantic(id)));
+      const rayId = ids.find((id) => id === incidentId || id === refractedId);
+      if (wavefrontId && rayId) wavefrontIds.set(wavefrontId, rayId);
+    }
+    if (wavefrontIds.size > 0) {
+      const updatedProducers = constructionProducers(constructions);
+      const replacedWavefrontProducers = new Set<Record<string, unknown>>();
+      const wavefrontConstructions: Record<string, unknown>[] = [];
+      const raySpan = proofDerivedRaySpan(
+        incidentId,
+        refractedId,
+        contactSurface.contact,
+        updatedProducers,
+      );
+      for (const [wavefrontId, rayId] of wavefrontIds) {
+        const producer = updatedProducers.get(wavefrontId);
+        if (producer?.operator === "wavefront_family") continue;
+        if (producer) replacedWavefrontProducers.add(producer);
+        const entity = entityById.get(wavefrontId);
+        if (entity) entity.kind = "polyline";
+        wavefrontConstructions.push({
+          id: allocateConstructionId(`derive_${wavefrontId}`),
+          operator: "wavefront_family",
+          inputs: {
+            origin: contactSurface.contact,
+            direction: rayId,
+            shape: "plane",
+            count: 1,
+            spacing: 1,
+            span: Math.max(1.5, raySpan * 0.8),
+          },
+          outputs: [wavefrontId],
+        });
+      }
+      if (wavefrontConstructions.length > 0) {
+        const bundleIndex = constructions.findIndex((construction) =>
+          isRecord(construction) &&
+          construction.operator === "refract_at" &&
+          Array.isArray(construction.outputs) &&
+          construction.outputs.includes(incidentId));
+        const withoutOldWavefronts = constructions.filter((construction) =>
+          !replacedWavefrontProducers.has(construction as Record<string, unknown>));
+        const adjustedBundleIndex = withoutOldWavefronts.findIndex((construction) =>
+          isRecord(construction) &&
+          construction.operator === "refract_at" &&
+          Array.isArray(construction.outputs) &&
+          construction.outputs.includes(incidentId));
+        const insertAfter = adjustedBundleIndex >= 0 ? adjustedBundleIndex + 1 : Math.max(0, bundleIndex + 1);
+        constructions = [
+          ...withoutOldWavefronts.slice(0, insertAfter),
+          ...wavefrontConstructions,
+          ...withoutOldWavefronts.slice(insertAfter),
+        ];
+        changed = true;
+      }
+    }
+
+    constructions = constructions.map((construction) => {
+      if (
+        !isRecord(construction) ||
+        construction.operator !== "angle_mark" ||
+        !Array.isArray(construction.outputs) ||
+        typeof construction.outputs[0] !== "string" ||
+        !isRecord(construction.inputs)
+      ) return construction;
+      const markSemantic = semantic(construction.outputs[0]);
+      const rayId = /\bincident\b/.test(markSemantic)
+        ? incidentId
+        : /\brefract(?:ed|ion)?\b/.test(markSemantic)
+          ? refractedId
+          : null;
+      return rayId
+        ? {
+            ...construction,
+            inputs: {
+              ...construction.inputs,
+              vertex: contactSurface.contact,
+              a: normalId,
+              b: rayId,
+            },
+          }
+        : construction;
+    });
+  }
+
+  return changed ? { ...raw, entities, constructions, assertions } : raw;
+}
+
+function inferOutputFromConstructionName(
+  constructionId: string | undefined,
+  entityIds: ReadonlySet<string>,
+): string[] {
+  if (!constructionId) return [];
+  const stems = [
+    constructionId.replace(/_construct(?:ion)?$/i, ""),
+    constructionId.replace(/^make_/i, ""),
+    constructionId.replace(/^c_/i, ""),
+  ];
+  for (const stem of stems) {
+    if (stem !== constructionId && entityIds.has(stem)) return [stem];
+  }
+  return [];
+}
+
+function instrumentSourceQuestion(raw: Record<string, unknown>): string {
+  if (typeof raw.source === "string") return raw.source;
+  return isRecord(raw.source) && typeof raw.source.question === "string" ? raw.source.question : "";
+}
+
+function instrumentEntitySemantic(entity: Record<string, unknown>, id: string): string {
+  return `${id} ${String(entity.role ?? "")} ${String(entity.label ?? "")}`
+    .toLowerCase().replace(/[_-]+/g, " ").replace(/([a-z])(\d)/g, "$1 $2").replace(/\s+/g, " ");
+}
+
+function isNamedInstrumentElement(
+  entity: Record<string, unknown>,
+  name: "objective" | "eyepiece",
+): boolean {
+  const label = String(entity.label ?? "").trim().toLowerCase();
+  const role = String(entity.role ?? "").toLowerCase().replace(/[_-]+/g, " ");
+  return label === name || role === name || new RegExp(`\\b${name} (?:lens|element)\\b`).test(role);
+}
+
+function isFiniteOpticalInstrumentScene(raw: Record<string, unknown>): boolean {
+  const visual = raw.visualDecision;
+  if (visual === "text_only" || (isRecord(visual) && visual.mode === "text_only")) return false;
+  if (!Array.isArray(raw.entities)) return false;
+  const question = instrumentSourceQuestion(raw);
+  const entities = raw.entities.filter(isRecord);
+  const hasElements = (["objective", "eyepiece"] as const).every((name) =>
+    entities.some((entity) => isNamedInstrumentElement(entity, name)));
+  if (!hasElements && !/(?:microscope|telescope|objective|eyepiece)/i.test(question)) return false;
+  if (/microscope/i.test(question)) return true;
+  const pointSemantics = entities.flatMap((entity) =>
+    entity.kind === "point" && typeof entity.id === "string"
+      ? [instrumentEntitySemantic(entity, entity.id)]
+      : []);
+  return pointSemantics.some((semantic) => /\bobject\b/.test(semantic) && !/\b(?:image|lens)\b/.test(semantic)) &&
+    pointSemantics.some((semantic) => /\bintermediate\b/.test(semantic)) &&
+    pointSemantics.some((semantic) => /\b(?:final|virtual image|near point)\b/.test(semantic));
+}
+
+function preferInstrumentPoint(
+  ids: readonly string[],
+  entities: ReadonlyMap<string, Record<string, unknown>>,
+  kind: "object" | "intermediate" | "final" | "center" | "focus",
+): string | null {
+  if (ids.length === 0) return null;
+  const ranked = ids.map((id) => {
+    const semantic = instrumentEntitySemantic(entities.get(id) ?? {}, id);
+    const helper = /\b(?:top|bottom|tip|arrow|head|base)\b/.test(semantic) ? 2 : 0;
+    const named = kind === "object" && /\bobject position\b/.test(semantic) ? -1
+      : kind === "intermediate" && /\bintermediate(?: real)? image\b/.test(semantic) ? -1
+      : kind === "final" && /\bfinal(?: virtual)? image\b/.test(semantic) ? -1
+      : kind === "center" && /\b(?:lens )?center\b/.test(semantic) ? -1
+      : kind === "focus" && /\bfoc(?:al|us)\b/.test(semantic) ? -1
+      : 0;
+    return { id, score: helper + named };
+  }).sort((left, right) => left.score - right.score || left.id.localeCompare(right.id));
+  return ranked[0]?.id ?? null;
+}
+
+function finiteInstrumentDisplayLayout(quantities: unknown): Record<"O" | "Fo" | "Co" | "I" | "Fe" | "Ce" | "Ip", number> {
+  const list = Array.isArray(quantities) ? quantities : [];
+  const fo = proofDerivedLengthInMeters(list, /\bf\s*o\b|objective focal/i);
+  const fe = proofDerivedLengthInMeters(list, /\bf\s*e\b|eyepiece focal/i);
+  const uo = proofDerivedLengthInMeters(list, /\bu\s*o\b|object distance|object placed/i);
+  const nearPoint = proofDerivedLengthInMeters(list, /\bnear point\b|\bleast distance\b|(?:^|\s)d(?:\s|$)/i);
+  let xO = 0;
+  let xFo = 1;
+  let xCo = 1.5;
+  let xI = 3.2;
+  let xFe = 4.2;
+  let xCe = 5;
+  let xIp = -2.5;
+  if (fo !== null && uo !== null && uo > fo) {
+    const vo = fo * uo / (uo - fo);
+    const depth = nearPoint ?? vo * 4;
+    const ue = fe !== null && depth > 0 ? 1 / (1 / fe + 1 / depth) : vo * 0.15;
+    xO = 0;
+    xFo = uo - fo;
+    xCo = uo;
+    xI = uo + vo;
+    xCe = uo + vo + ue;
+    xFe = xCe - (fe ?? ue * 1.1);
+    xIp = xCe - depth;
+  }
+  const values = [xO, xFo, xCo, xI, xFe, xCe, xIp];
+  const min = Math.min(...values);
+  const span = Math.max(Math.max(...values) - min, 1e-9);
+  const map = (value: number) => (value - min) / span * 8;
+  return { O: map(xO), Fo: map(xFo), Co: map(xCo), I: map(xI), Fe: map(xFe), Ce: map(xCe), Ip: map(xIp) };
+}
+
+/**
+ * Signed arrow heights (object up) from the chief rays: the objective centre
+ * maps the object tip to the intermediate image, the eyepiece centre maps
+ * that to the final image. The object height shrinks as the magnification
+ * grows so the largest image stays a readable size beside an 8 unit chain.
+ */
+function finiteInstrumentArrowHeights(
+  layout: Record<"O" | "Fo" | "Co" | "I" | "Fe" | "Ce" | "Ip", number>,
+): Record<"object" | "intermediate" | "final", number> {
+  const objectiveGain = Math.abs(layout.O - layout.Co) > 1e-9 ? (layout.I - layout.Co) / (layout.O - layout.Co) : -1;
+  const eyepieceGain = Math.abs(layout.I - layout.Ce) > 1e-9 ? (layout.Ip - layout.Ce) / (layout.I - layout.Ce) : 1;
+  const largest = Math.max(1, Math.abs(objectiveGain), Math.abs(objectiveGain * eyepieceGain));
+  const object = Math.min(0.55, Math.max(0.2, 2.6 / largest));
+  return { object, intermediate: object * objectiveGain, final: object * objectiveGain * eyepieceGain };
+}
+
+function deriveFiniteOpticalInstrumentChain(raw: Record<string, unknown>): Record<string, unknown> {
+  const entities = (Array.isArray(raw.entities) ? raw.entities : []).filter(isRecord);
+  const entityById = new Map(entities.flatMap((entity) =>
+    typeof entity.id === "string" ? [[entity.id, entity] as const] : []));
+  const pointIds = (test: (semantic: string) => boolean, kind: "object" | "intermediate" | "final" | "center" | "focus") =>
+    preferInstrumentPoint(
+      [...entityById].flatMap(([id, entity]) =>
+        entity.kind === "point" && test(instrumentEntitySemantic(entity, id)) ? [id] : []),
+      entityById,
+      kind,
+    );
+  const pickElement = (name: "objective" | "eyepiece"): string | null => {
+    const matches = entities.filter((entity) => isNamedInstrumentElement(entity, name));
+    const pathLike = matches.filter((entity) =>
+      ["line", "segment", "ray", "vector", "polyline", "object"].includes(String(entity.kind ?? "")));
+    const preferred = pathLike.filter((entity) => entity.kind === "line" || entity.kind === "segment");
+    const chosen = (preferred.length === 1 ? preferred : pathLike.length > 0 ? pathLike : matches)[0];
+    return typeof chosen?.id === "string" ? chosen.id : null;
+  };
+  const occupiedEntityIds = new Set(entityById.keys());
+  const ensureEntity = (id: string | null, fallback: string, kind: string, role: string): string => {
+    if (id && occupiedEntityIds.has(id)) return id;
+    let candidate = fallback;
+    let suffix = 2;
+    while (occupiedEntityIds.has(candidate)) candidate = `${fallback}_${suffix++}`;
+    occupiedEntityIds.add(candidate);
+    if (!entityById.has(candidate)) {
+      const entity = { id: candidate, kind, role };
+      entities.push(entity);
+      entityById.set(candidate, entity);
+    }
+    return candidate;
+  };
+  const axisId = ensureEntity(
+    [...entityById].find(([id, entity]) =>
+      (entity.kind === "line" || entity.kind === "segment") &&
+      /\b(?:optical |principal )?axis\b/.test(instrumentEntitySemantic(entity, id)))?.[0] ?? null,
+    "axis",
+    "line",
+    "optical axis",
+  );
+  const objectiveId = ensureEntity(pickElement("objective"), "obj_lens", "line", "objective lens");
+  const eyepieceId = ensureEntity(pickElement("eyepiece"), "eye_lens", "line", "eyepiece lens");
+  const objectId = ensureEntity(
+    pointIds((semantic) => /\bobject\b/.test(semantic) && !/\b(?:image|lens)\b/.test(semantic), "object"),
+    "O",
+    "point",
+    "object_position",
+  );
+  const intermediateId = ensureEntity(
+    pointIds((semantic) => /\bintermediate\b/.test(semantic), "intermediate"),
+    "I",
+    "point",
+    "intermediate_image",
+  );
+  const finalId = ensureEntity(
+    pointIds((semantic) => /\b(?:final|virtual image|near point)\b/.test(semantic) && !/\bintermediate\b/.test(semantic), "final"),
+    "I_prime",
+    "point",
+    "final_virtual_image",
+  );
+  const objectiveCenterId = ensureEntity(
+    pointIds((semantic) => /\b(?:objective|obj)\b/.test(semantic) && /\bcenter\b/.test(semantic), "center"),
+    "L_o",
+    "point",
+    "objective_lens_center",
+  );
+  const eyepieceCenterId = ensureEntity(
+    pointIds((semantic) => /\b(?:eyepiece|eye)\b/.test(semantic) && /\bcenter\b/.test(semantic), "center"),
+    "L_e",
+    "point",
+    "eyepiece_lens_center",
+  );
+  const objectiveFocusId = pointIds((semantic) => /\bobjective\b/.test(semantic) && /\bfoc(?:al|us)\b/.test(semantic), "focus");
+  const eyepieceFocusId = pointIds((semantic) => /\beyepiece\b/.test(semantic) && /\bfoc(?:al|us)\b/.test(semantic), "focus");
+  const layout = finiteInstrumentDisplayLayout(raw.quantities);
+  const placements = new Map<string, { x: number; y: number }>([
+    [objectId, { x: layout.O, y: 0 }],
+    [objectiveCenterId, { x: layout.Co, y: 0 }],
+    [intermediateId, { x: layout.I, y: 0 }],
+    [eyepieceCenterId, { x: layout.Ce, y: 0 }],
+    [finalId, { x: layout.Ip, y: 0 }],
+  ]);
+  if (objectiveFocusId) placements.set(objectiveFocusId, { x: layout.Fo, y: 0 });
+  if (eyepieceFocusId) placements.set(eyepieceFocusId, { x: layout.Fe, y: 0 });
+  // Arrow heights follow the chief rays through each lens centre, so the
+  // image arrows are scaled by magnification and their tips sit on the rays
+  // optical_train draws from the object tip.
+  const heights = finiteInstrumentArrowHeights(layout);
+  const sourceVectors = (Array.isArray(raw.constructions) ? raw.constructions : []).filter(isRecord)
+    .filter((construction) => construction.operator === "vector" && isRecord(construction.inputs));
+  const tipIds = new Map<"object" | "intermediate" | "final", string>();
+  for (const [role, baseId] of [["object", objectId], ["intermediate", intermediateId], ["final", finalId]] as const) {
+    const vector = sourceVectors.find((construction) =>
+      (construction.inputs as Record<string, unknown>).start === baseId);
+    const tip = vector ? (vector.inputs as Record<string, unknown>).end : undefined;
+    if (typeof tip === "string" && tip !== baseId && entityById.get(tip)?.kind === "point" && !placements.has(tip)) {
+      tipIds.set(role, tip);
+    }
+  }
+  const tipPlacement = (role: "object" | "intermediate" | "final") => ({
+    x: role === "object" ? layout.O : role === "intermediate" ? layout.I : layout.Ip,
+    y: heights[role],
+  });
+  for (const [role, id] of tipIds) placements.set(id, tipPlacement(role));
+  for (const [id, entity] of entityById) {
+    if (entity.kind !== "point" || placements.has(id)) continue;
+    const semantic = instrumentEntitySemantic(entity, id);
+    if (!/\b(?:top|bottom|tip|arrow)\b/.test(semantic)) continue;
+    const role = /\bobject\b/.test(semantic) ? "object"
+      : /\bintermediate\b/.test(semantic) ? "intermediate"
+      : /\b(?:final|virtual image)\b/.test(semantic) ? "final"
+      : null;
+    if (!role) continue;
+    if (/\b(?:bottom|base)\b/.test(semantic)) {
+      placements.set(id, { ...tipPlacement(role), y: 0 });
+    } else {
+      placements.set(id, tipPlacement(role));
+      if (!tipIds.has(role)) tipIds.set(role, id);
+    }
+  }
+  const objectTipId = tipIds.get("object") ?? null;
+  const intermediateTipId = tipIds.get("intermediate") ?? null;
+  // Rays cross at the intermediate image tip. A tip that is not drawn cannot
+  // carry an assertion; the arrow-on-ray check after compile holds it then.
+  const drawnBefore = new Set((Array.isArray(raw.requiredEntityIds) ? raw.requiredEntityIds : [])
+    .filter((id): id is string => typeof id === "string"));
+  const crossingId = objectTipId
+    ? (intermediateTipId && drawnBefore.has(intermediateTipId) ? intermediateTipId : null)
+    : intermediateId;
+
+  const existingRayIds = [...entityById].flatMap(([id, entity]) => entity.kind === "ray" ? [id] : []);
+  const trainRayIds = [...existingRayIds.slice(0, 6)];
+  const defaultRayIds = [
+    "incoming_upper", "incoming_lower", "internal_upper", "internal_lower", "outgoing_upper", "outgoing_lower",
+  ];
+  for (const rayId of defaultRayIds) {
+    if (trainRayIds.length >= 6) break;
+    trainRayIds.push(ensureEntity(null, rayId, "ray", "instrument ray"));
+  }
+  const droppedRayIds = new Set(existingRayIds.filter((id) => !trainRayIds.includes(id)));
+  for (const rayId of droppedRayIds) {
+    const index = entities.findIndex((entity) => entity.id === rayId);
+    if (index >= 0) entities.splice(index, 1);
+    entityById.delete(rayId);
+    occupiedEntityIds.delete(rayId);
+  }
+  const replacedOutputs = new Set([
+    axisId, objectiveId, eyepieceId, ...placements.keys(), ...existingRayIds,
+  ]);
+
+  const sourceConstructions = Array.isArray(raw.constructions) ? raw.constructions : [];
+  const occupiedConstructionIds = new Set([
+    ...sourceConstructions.flatMap((construction) =>
+      isRecord(construction) && typeof construction.id === "string" ? [construction.id] : []),
+    ...(Array.isArray(raw.assertions) ? raw.assertions : []).flatMap((assertion) =>
+      isRecord(assertion) && typeof assertion.id === "string" ? [assertion.id] : []),
+  ]);
+  const allocate = (base: string): string => {
+    if (!occupiedConstructionIds.has(base)) {
+      occupiedConstructionIds.add(base);
+      return base;
+    }
+    let suffix = 2;
+    while (occupiedConstructionIds.has(`${base}_${suffix}`)) suffix += 1;
+    const id = `${base}_${suffix}`;
+    occupiedConstructionIds.add(id);
+    return id;
+  };
+  const pointConstruction = (outputId: string, point: { x: number; y: number }) => ({
+    id: allocate(`derive_${outputId}`),
+    operator: "point",
+    inputs: { x: point.x, y: point.y, coordinateSpace: "world" },
+    outputs: [outputId],
+  });
+  const keptConstructions = sourceConstructions.filter((construction) => {
+    if (!isRecord(construction) || !Array.isArray(construction.outputs)) return true;
+    return !construction.outputs.some((output) => typeof output === "string" && replacedOutputs.has(output));
+  }).flatMap((construction) => {
+    if (!isRecord(construction) || construction.operator !== "dimension" || !isRecord(construction.inputs)) {
+      return [construction];
+    }
+    const outputId = Array.isArray(construction.outputs) ? construction.outputs[0] : null;
+    const dimensionEntity = typeof outputId === "string" ? entityById.get(outputId) : undefined;
+    const semantic = typeof outputId === "string"
+      ? instrumentEntitySemantic(dimensionEntity ?? {}, outputId)
+      : "";
+    if (/\btube\b/.test(semantic)) {
+      return [{
+        ...construction,
+        inputs: { ...construction.inputs, start: objectiveCenterId, end: eyepieceCenterId },
+      }];
+    }
+    return [construction];
+  });
+  const seenDimension = new Set<string>();
+  const dedupedConstructions = keptConstructions.filter((construction) => {
+    if (!isRecord(construction) || construction.operator !== "dimension" || !isRecord(construction.inputs)) return true;
+    const start = construction.inputs.start;
+    const end = construction.inputs.end;
+    if (typeof start !== "string" || typeof end !== "string") return true;
+    const key = [start, end].sort().join(":");
+    if (seenDimension.has(key)) return false;
+    seenDimension.add(key);
+    return true;
+  });
+  const derivedConstructions: unknown[] = [
+    ...[...placements].map(([id, point]) => pointConstruction(id, point)),
+    { id: allocate("derive_axis"), operator: "line", inputs: { start: objectId, end: eyepieceCenterId }, outputs: [axisId] },
+    {
+      id: allocate("derive_objective"),
+      operator: "perpendicular_through",
+      inputs: { through: objectiveCenterId, line: axisId },
+      outputs: [objectiveId],
+    },
+    {
+      id: allocate("derive_eyepiece"),
+      operator: "perpendicular_through",
+      inputs: { through: eyepieceCenterId, line: axisId },
+      outputs: [eyepieceId],
+    },
+    {
+      id: allocate("derive_optical_train"),
+      operator: "optical_train",
+      inputs: {
+        axis: axisId,
+        objective: objectiveId,
+        eyepiece: eyepieceId,
+        focus: intermediateId,
+        object: objectTipId ?? objectId,
+        finalImage: finalId,
+      },
+      outputs: trainRayIds,
+    },
+  ];
+
+  const keptAssertions = (Array.isArray(raw.assertions) ? raw.assertions : []).filter((assertion) => {
+    if (!isRecord(assertion) || !Array.isArray(assertion.entities)) return true;
+    if (assertion.predicate === "converges" || assertion.predicate === "ordered_along" || assertion.predicate === "between") return false;
+    return assertion.entities.every((id) => typeof id === "string" && !droppedRayIds.has(id) && occupiedEntityIds.has(id));
+  });
+  const assertions = [
+    ...keptAssertions.filter((assertion) => {
+      if (!isRecord(assertion) || !Array.isArray(assertion.entities)) return true;
+      const ids = assertion.entities.filter((id): id is string => typeof id === "string");
+      if (assertion.predicate === "perpendicular" && (ids.includes(objectiveId) || ids.includes(eyepieceId))) return false;
+      return true;
+    }),
+    { id: allocate("assert_objective_perp"), predicate: "perpendicular", entities: [objectiveId, axisId], expected: true, severity: "fatal" },
+    { id: allocate("assert_eyepiece_perp"), predicate: "perpendicular", entities: [eyepieceId, axisId], expected: true, severity: "fatal" },
+    { id: allocate("assert_object_on_axis"), predicate: "on", entities: [objectId, axisId], expected: true, severity: "fatal" },
+    { id: allocate("assert_image_on_axis"), predicate: "on", entities: [intermediateId, axisId], expected: true, severity: "fatal" },
+    { id: allocate("assert_final_on_axis"), predicate: "on", entities: [finalId, axisId], expected: true, severity: "fatal" },
+    { id: allocate("assert_intermediate_between"), predicate: "between", entities: [intermediateId, objectiveCenterId, eyepieceCenterId], expected: true, severity: "fatal" },
+    { id: allocate("assert_virtual_same_side"), predicate: "same_side", entities: [intermediateId, finalId, eyepieceCenterId], expected: true, severity: "fatal" },
+    ...(crossingId ? [{ id: allocate("assert_intermediate_focus"), predicate: "converges", entities: [trainRayIds[2], trainRayIds[3], crossingId], expected: true, severity: "fatal" }] : []),
+  ];
+
+  for (const id of [objectiveId, eyepieceId]) {
+    const entity = entityById.get(id);
+    if (entity) {
+      entity.kind = "line";
+      if (!isNamedInstrumentElement(entity, id === objectiveId ? "objective" : "eyepiece")) {
+        entity.role = id === objectiveId ? "objective lens" : "eyepiece lens";
+      }
+    }
+  }
+  for (const rayId of trainRayIds) {
+    const entity = entityById.get(rayId);
+    if (entity) entity.kind = "ray";
+  }
+
+  const visibleIds = [
+    axisId, objectiveId, eyepieceId, objectId, intermediateId, finalId,
+    objectiveCenterId, eyepieceCenterId, ...trainRayIds,
+  ];
+  const requiredEntityIds = [...new Set([
+    ...(Array.isArray(raw.requiredEntityIds) ? raw.requiredEntityIds : []).filter((id) =>
+      typeof id === "string" && occupiedEntityIds.has(id) && !droppedRayIds.has(id)),
+    ...visibleIds,
+  ])];
+  const revealGroups = (Array.isArray(raw.revealGroups) ? raw.revealGroups : []).map((group) => {
+    if (!isRecord(group) || !Array.isArray(group.entityIds)) return group;
+    const entityIds = [...new Set([
+      ...group.entityIds.filter((id) => typeof id === "string" && occupiedEntityIds.has(id) && !droppedRayIds.has(id)),
+      ...visibleIds,
+    ])];
+    return { ...group, entityIds };
+  });
+
+  const relations = (Array.isArray(raw.relations) ? raw.relations : []).filter((relation) => {
+    if (!isRecord(relation) || !Array.isArray(relation.entities)) return true;
+    return relation.entities.every((id) =>
+      typeof id !== "string" || (!droppedRayIds.has(id) && occupiedEntityIds.has(id)));
+  });
+
+  return {
+    ...raw,
+    entities,
+    constructions: [...dedupedConstructions, ...derivedConstructions],
+    assertions,
+    relations,
+    requiredEntityIds,
+    revealGroups: revealGroups.length > 0
+      ? revealGroups
+      : [{ id: "instrument", entityIds: visibleIds, dependsOn: [], narrationCue: "Draw the optical instrument chain." }],
+  };
+}
+
+function normalizeProofDerivedOpticalTrain(raw: Record<string, unknown>): Record<string, unknown> {
+  if (typeof raw.source === "string") {
+    raw = { ...raw, source: { question: raw.source } };
+  }
+  if (!Array.isArray(raw.entities) || !Array.isArray(raw.constructions) || !Array.isArray(raw.assertions)) {
+    return raw;
+  }
+  if (isFiniteOpticalInstrumentScene(raw)) {
+    return deriveFiniteOpticalInstrumentChain(raw);
+  }
+  if (
+    !Array.isArray(raw.quantities) ||
+    !isRecord(raw.source) ||
+    typeof raw.source.question !== "string" ||
+    !/\bnormal adjustment\b/i.test(raw.source.question)
+  ) return raw;
+
+  const sourceConstructions = raw.constructions;
+  const sourceAssertions = raw.assertions;
+  const entityById = new Map(raw.entities.flatMap((entity) =>
+    isRecord(entity) && typeof entity.id === "string" ? [[entity.id, entity] as const] : []));
+  const semantic = (id: string): string => {
+    const entity = entityById.get(id);
+    return `${id} ${String(entity?.role ?? "")} ${String(entity?.label ?? "")}`
+      .toLowerCase().replace(/[_-]+/g, " ").replace(/([a-z])(\d)/g, "$1 $2").replace(/\s+/g, " ");
+  };
+  const namedElementIds = (name: "objective" | "eyepiece"): string[] =>
+    [...entityById].flatMap(([id, entity]) => {
+      const label = String(entity.label ?? "").trim().toLowerCase();
+      const role = String(entity.role ?? "").toLowerCase().replace(/[_-]+/g, " ");
+      return label === name || new RegExp(`\\b${name} (?:lens|element)\\b`).test(role) ? [id] : [];
+    });
+  const objectiveIds = namedElementIds("objective");
+  const eyepieceIds = namedElementIds("eyepiece");
+  const axisIds = [...entityById].flatMap(([id, entity]) =>
+    (entity.kind === "line" || entity.kind === "segment") &&
+    /\b(?:optical |principal )?axis\b/.test(semantic(id))
+      ? [id]
+      : []);
+  const focusIds = [...entityById].flatMap(([id, entity]) =>
+    entity.kind === "point" && /\b(?:shared focus|intermediate focus|common .*foc|intermediate image)\b/.test(semantic(id))
+      ? [id]
+      : []);
+  if (objectiveIds.length !== 1 || eyepieceIds.length !== 1 || axisIds.length !== 1 || focusIds.length !== 1) {
+    return raw;
+  }
+  const objectiveId = objectiveIds[0]!;
+  const eyepieceId = eyepieceIds[0]!;
+  const axisId = axisIds[0]!;
+  const focusId = focusIds[0]!;
+  const rayIds = [...entityById].flatMap(([id, entity]) => entity.kind === "ray" ? [id] : []);
+  const incomingIds = rayIds.filter((id) => /\b(?:incoming|incident|in ray)\b/.test(semantic(id)));
+  const internalIds = rayIds.filter((id) =>
+    /\b(?:mid ray|internal ray|intermediate ray|objective (?:converging )?ray|converging ray)\b/.test(semantic(id)));
+  const outgoingIds = rayIds.filter((id) => /\b(?:out ray|outgoing|emergent)\b/.test(semantic(id)));
+  if (incomingIds.length !== 2 || internalIds.length !== 2 || outgoingIds.length !== 2) return raw;
+
+  const proves = (predicate: string, ids: readonly string[]): boolean =>
+    sourceAssertions.some((assertion) => {
+      if (
+        !isRecord(assertion) ||
+        assertion.predicate !== predicate ||
+        assertion.expected === false ||
+        !Array.isArray(assertion.entities)
+      ) return false;
+      const assertionEntities = assertion.entities;
+      return ids.every((id) => assertionEntities.includes(id));
+    });
+  if (
+    !proves("perpendicular", [objectiveId, axisId]) ||
+    !proves("perpendicular", [eyepieceId, axisId]) ||
+    !proves("parallel", incomingIds) ||
+    !proves("parallel", outgoingIds) ||
+    !sourceAssertions.some((assertion) =>
+      isRecord(assertion) && assertion.predicate === "converges" && assertion.expected !== false)
+  ) return raw;
+
+  const producers = constructionProducers(sourceConstructions);
+  if ([...incomingIds, ...internalIds, ...outgoingIds].some((id) =>
+    producers.get(id)?.operator === "optical_train")) return raw;
+  const rayProducers = new Set([...incomingIds, ...internalIds, ...outgoingIds]
+    .map((id) => producers.get(id))
+    .filter((producer): producer is Record<string, unknown> => Boolean(producer)));
+  if (rayProducers.size !== 6) return raw;
+  const dependencies = [objectiveId, eyepieceId, axisId, focusId]
+    .map((id) => producers.get(id));
+  if (dependencies.some((producer) => !producer)) return raw;
+  const dependencyIndexes = dependencies.map((producer) => sourceConstructions.indexOf(producer));
+  if (dependencyIndexes.some((index) => index < 0)) return raw;
+
+  const occupiedIds = new Set(sourceConstructions.flatMap((construction) =>
+    isRecord(construction) && typeof construction.id === "string" ? [construction.id] : []));
+  let constructionId = "derive_optical_train";
+  let suffix = 2;
+  while (occupiedIds.has(constructionId)) constructionId = `derive_optical_train_${suffix++}`;
+  const insertionIndex = Math.max(...dependencyIndexes) + 1;
+  const trainConstruction = {
+    id: constructionId,
+    operator: "optical_train",
+    inputs: {
+      axis: axisId,
+      objective: objectiveId,
+      eyepiece: eyepieceId,
+      focus: focusId,
+    },
+    outputs: [...incomingIds, ...internalIds, ...outgoingIds],
+  };
+  let constructions: unknown[] = [
+    ...sourceConstructions.slice(0, insertionIndex).filter((item) => !rayProducers.has(item as Record<string, unknown>)),
+    trainConstruction,
+    ...sourceConstructions.slice(insertionIndex).filter((item) => !rayProducers.has(item as Record<string, unknown>)),
+  ];
+
+  const objectiveCenter = proofDerivedElementCenter(objectiveId, producers);
+  const eyepieceCenter = proofDerivedElementCenter(eyepieceId, producers);
+  const objectiveFocalLength = proofDerivedLengthInMeters(raw.quantities, /\bf\s*o\b|objective focal/i);
+  const eyepieceFocalLength = proofDerivedLengthInMeters(raw.quantities, /\bf\s*e\b|eyepiece focal/i);
+  if (
+    objectiveCenter &&
+    eyepieceCenter &&
+    objectiveFocalLength !== null &&
+    eyepieceFocalLength !== null &&
+    objectiveFocalLength > 0 &&
+    eyepieceFocalLength > 0
+  ) {
+    const fraction = objectiveFocalLength / (objectiveFocalLength + eyepieceFocalLength);
+    constructions = constructions.map((construction) =>
+      isRecord(construction) &&
+      construction.operator === "point" &&
+      Array.isArray(construction.outputs) &&
+      construction.outputs.includes(focusId) &&
+      isRecord(construction.inputs)
+        ? {
+            ...construction,
+            inputs: {
+              ...construction.inputs,
+              x: objectiveCenter.x + (eyepieceCenter.x - objectiveCenter.x) * fraction,
+              y: objectiveCenter.y + (eyepieceCenter.y - objectiveCenter.y) * fraction,
+            },
+          }
+        : construction);
+  }
+
+  const assertions = sourceAssertions.map((assertion) =>
+    isRecord(assertion) && assertion.predicate === "converges" && assertion.expected !== false
+      ? { ...assertion, entities: [...internalIds, focusId] }
+      : assertion);
+  return { ...raw, constructions, assertions };
+}
+
+function proofDerivedElementCenter(
+  id: string,
+  producers: ReadonlyMap<string, Record<string, unknown>>,
+): { x: number; y: number } | null {
+  const producer = producers.get(id);
+  if (!producer || !isRecord(producer.inputs)) return null;
+  const throughId = constructionEndpoint(producer.inputs, ["through"]);
+  if (throughId) return proofDerivedPoint(throughId, producers);
+  const startId = constructionEndpoint(producer.inputs, ["start", "from", "a"]);
+  const endId = constructionEndpoint(producer.inputs, ["end", "to", "b"]);
+  const start = startId ? proofDerivedPoint(startId, producers) : null;
+  const end = endId ? proofDerivedPoint(endId, producers) : null;
+  return start && end
+    ? { x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 }
+    : null;
+}
+
+function proofDerivedLengthInMeters(quantities: unknown[], pattern: RegExp): number | null {
+  const matches = quantities.flatMap((quantity) => {
+    if (!isRecord(quantity) || typeof quantity.value !== "number" || !Number.isFinite(quantity.value)) return [];
+    const semantic = `${String(quantity.id ?? "")} ${String(quantity.symbol ?? "")} ${String(quantity.label ?? "")}`
+      .replace(/[_{}-]+/g, " ");
+    if (!pattern.test(semantic)) return [];
+    const unit = String(quantity.unit ?? "").trim().toLowerCase();
+    const factor = unit === "m" || unit === "metre" || unit === "meter"
+      ? 1
+      : unit === "cm" ? 0.01
+        : unit === "mm" ? 0.001
+          : null;
+    return factor === null ? [] : [quantity.value * factor];
+  });
+  return matches.length === 1 ? matches[0]! : null;
+}
+
+function proofDerivedContactAndSurface(
+  raw: Record<string, unknown>,
+  constructions: unknown[],
+  entityById: ReadonlyMap<string, Record<string, unknown>>,
+): { contact: string; surface: string } | null {
+  if (!Array.isArray(raw.assertions)) return null;
+  const producers = constructionProducers(constructions);
+  const candidates = raw.assertions.flatMap((assertion) => {
+    if (
+      !isRecord(assertion) ||
+      assertion.predicate !== "on" ||
+      assertion.expected === false ||
+      !Array.isArray(assertion.entities)
+    ) return [];
+    const ids = assertion.entities.filter((id): id is string => typeof id === "string");
+    if (ids.length !== 2) return [];
+    const contact = ids.find((id) => producers.get(id)?.operator === "point" || producers.get(id)?.operator === "surface_intersection");
+    const surface = ids.find((id) => ["line", "segment", "circle", "arc"].includes(String(producers.get(id)?.operator ?? "")));
+    if (!contact || !surface) return [];
+    const contactEntity = entityById.get(contact);
+    const surfaceEntity = entityById.get(surface);
+    const semantic = `${contact} ${String(contactEntity?.role ?? "")} ${surface} ${String(surfaceEntity?.role ?? "")} ${String(surfaceEntity?.label ?? "")}`
+      .toLowerCase().replace(/[_-]+/g, " ");
+    const score = (/\b(?:incidence|contact|hit)\b/.test(semantic) ? 2 : 0) +
+      (/\b(?:interface|surface|boundary)\b/.test(semantic) ? 1 : 0);
+    return [{ contact, surface, score }];
+  });
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => b.score - a.score);
+  if (candidates.length > 1 && candidates[0]!.score === candidates[1]!.score) return null;
+  return { contact: candidates[0]!.contact, surface: candidates[0]!.surface };
+}
+
+function proofDerivedRefractiveIndices(
+  expected: unknown,
+  quantities: unknown[],
+): { n1: number; n2: number } | null {
+  if (isRecord(expected) && positiveFinite(expected.n1) && positiveFinite(expected.n2)) {
+    return { n1: expected.n1, n2: expected.n2 };
+  }
+  const n1 = proofDerivedQuantityValue(quantities, /\bn\s*1\b|refractive index.*(?:1|first)|index.*medium\s*1/i);
+  const n2 = proofDerivedQuantityValue(quantities, /\bn\s*2\b|refractive index.*(?:2|second)|index.*medium\s*2/i);
+  if (n1 !== null && n2 !== null && n1 > 0 && n2 > 0) return { n1, n2 };
+  const v1 = proofDerivedQuantityValue(quantities, /\bv\s*1\b|speed.*(?:1|first)|velocity.*medium\s*1/i);
+  const v2 = proofDerivedQuantityValue(quantities, /\bv\s*2\b|speed.*(?:2|second)|velocity.*medium\s*2/i);
+  return v1 !== null && v2 !== null && v1 > 0 && v2 > 0
+    ? { n1: 1, n2: v1 / v2 }
+    : null;
+}
+
+function proofDerivedIncidentAngleDeg(
+  assertions: unknown[],
+  quantities: unknown[],
+  incidentId: string,
+  normalId: string,
+): number | null {
+  const angleAssertion = assertions.find((assertion) =>
+    isRecord(assertion) &&
+    assertion.predicate === "angle_between" &&
+    assertion.expected !== false &&
+    Array.isArray(assertion.entities) &&
+    assertion.entities.includes(incidentId) &&
+    assertion.entities.includes(normalId));
+  const fromAssertion = isRecord(angleAssertion)
+    ? proofDerivedAngleToDegrees(angleAssertion.expected)
+    : null;
+  const angle = fromAssertion ?? proofDerivedQuantityAngle(
+    quantities,
+    /\btheta\s*1\b|\bθ\s*1\b|incident(?:ce)? angle|angle of incidence/i,
+  );
+  return angle !== null && angle > 0 && angle < 90 ? angle : null;
+}
+
+function proofDerivedQuantityValue(quantities: unknown[], pattern: RegExp): number | null {
+  const matches = quantities.flatMap((quantity) => {
+    if (!isRecord(quantity) || typeof quantity.value !== "number" || !Number.isFinite(quantity.value)) return [];
+    const semantic = `${String(quantity.id ?? "")} ${String(quantity.symbol ?? "")} ${String(quantity.label ?? "")}`
+      .replace(/[_{}-]+/g, " ");
+    return pattern.test(semantic) ? [quantity.value] : [];
+  });
+  return matches.length === 1 ? matches[0]! : null;
+}
+
+function proofDerivedQuantityAngle(quantities: unknown[], pattern: RegExp): number | null {
+  const matches = quantities.flatMap((quantity) => {
+    if (!isRecord(quantity) || typeof quantity.value !== "number" || !Number.isFinite(quantity.value)) return [];
+    const semantic = `${String(quantity.id ?? "")} ${String(quantity.symbol ?? "")} ${String(quantity.label ?? "")}`
+      .replace(/[_{}-]+/g, " ");
+    if (!pattern.test(semantic)) return [];
+    return [proofDerivedAngleToDegrees({ value: quantity.value, unit: quantity.unit })];
+  }).filter((value): value is number => value !== null);
+  return matches.length === 1 ? matches[0]! : null;
+}
+
+function proofDerivedAngleToDegrees(value: unknown): number | null {
+  const numeric = typeof value === "number"
+    ? value
+    : isRecord(value) && typeof value.value === "number" ? value.value : null;
+  if (numeric === null || !Number.isFinite(numeric)) return null;
+  const unit = isRecord(value) ? String(value.unit ?? "").trim().toLowerCase() : "";
+  return /^(?:rad|radian|radians)$/.test(unit)
+    ? numeric * 180 / Math.PI
+    : numeric;
+}
+
+function proofDerivedRaySpan(
+  incidentId: string,
+  refractedId: string,
+  contactId: string,
+  producers: ReadonlyMap<string, Record<string, unknown>>,
+): number {
+  const contact = proofDerivedPoint(contactId, producers);
+  const lengths = [incidentId, refractedId].flatMap((id) => {
+    const producer = producers.get(id);
+    if (!producer || !isRecord(producer.inputs) || !contact) return [];
+    const endpointIds = [
+      constructionEndpoint(producer.inputs, ["start", "from", "a", "origin"]),
+      constructionEndpoint(producer.inputs, ["end", "to", "b"]),
+    ].filter((candidate): candidate is string => Boolean(candidate));
+    return endpointIds.flatMap((endpointId) => {
+      const endpoint = proofDerivedPoint(endpointId, producers);
+      return endpoint ? [Math.hypot(endpoint.x - contact.x, endpoint.y - contact.y)] : [];
+    });
+  }).filter((length) => length > 1e-6 && Number.isFinite(length));
+  return lengths.length > 0 ? Math.max(1, ...lengths) : 3;
+}
+
+function proofDerivedTangentSign(
+  incidentId: string,
+  contactId: string,
+  surfaceId: string,
+  producers: ReadonlyMap<string, Record<string, unknown>>,
+): -1 | 1 {
+  const contact = proofDerivedPoint(contactId, producers);
+  const incident = producers.get(incidentId);
+  const surface = producers.get(surfaceId);
+  if (!contact || !incident || !surface || !isRecord(incident.inputs) || !isRecord(surface.inputs)) return 1;
+  const incidentEndpointIds = [
+    constructionEndpoint(incident.inputs, ["start", "from", "a", "origin"]),
+    constructionEndpoint(incident.inputs, ["end", "to", "b"]),
+  ].filter((candidate): candidate is string => Boolean(candidate));
+  const source = incidentEndpointIds
+    .map((id) => proofDerivedPoint(id, producers))
+    .find((point) => point && Math.hypot(point.x - contact.x, point.y - contact.y) > 1e-6);
+  if (!source) return 1;
+
+  let normal: { x: number; y: number } | null = null;
+  if (surface.operator === "line" || surface.operator === "segment") {
+    const aId = constructionEndpoint(surface.inputs, ["start", "from", "a"]);
+    const bId = constructionEndpoint(surface.inputs, ["end", "to", "b"]);
+    const a = aId ? proofDerivedPoint(aId, producers) : null;
+    const b = bId ? proofDerivedPoint(bId, producers) : null;
+    if (a && b) normal = { x: -(b.y - a.y), y: b.x - a.x };
+  } else if (surface.operator === "circle" || surface.operator === "arc" || surface.operator === "spherical_surface") {
+    const centerId = constructionEndpoint(surface.inputs, ["center"]);
+    const center = centerId ? proofDerivedPoint(centerId, producers) : null;
+    if (center) normal = { x: center.x - contact.x, y: center.y - contact.y };
+  }
+  if (!normal || Math.hypot(normal.x, normal.y) < 1e-9) return 1;
+  const magnitude = Math.hypot(normal.x, normal.y);
+  normal = { x: normal.x / magnitude, y: normal.y / magnitude };
+  const tangent = { x: -normal.y, y: normal.x };
+  const sourceDirection = { x: source.x - contact.x, y: source.y - contact.y };
+  return sourceDirection.x * tangent.x + sourceDirection.y * tangent.y >= 0 ? 1 : -1;
+}
+
+function proofDerivedPoint(
+  id: string,
+  producers: ReadonlyMap<string, Record<string, unknown>>,
+): { x: number; y: number } | null {
+  const producer = producers.get(id);
+  if (
+    producer?.operator !== "point" ||
+    !isRecord(producer.inputs) ||
+    typeof producer.inputs.x !== "number" ||
+    !Number.isFinite(producer.inputs.x) ||
+    typeof producer.inputs.y !== "number" ||
+    !Number.isFinite(producer.inputs.y)
+  ) return null;
+  return { x: producer.inputs.x, y: producer.inputs.y };
+}
+
+function positiveFinite(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+
+function normalizeNumericAngleAssertions(
+  constructions: unknown[],
+  assertions: unknown,
+  quantities: unknown,
+  entities: unknown,
+): unknown {
+  if (!Array.isArray(assertions) || !Array.isArray(quantities) || !Array.isArray(entities)) return assertions;
+  const producers = constructionProducers(constructions);
+  const entityById = new Map(entities.flatMap((entity) =>
+    isRecord(entity) && typeof entity.id === "string" ? [[entity.id, entity] as const] : []));
+  const angleQuantities = quantities.flatMap((quantity) => {
+    if (!isRecord(quantity) || typeof quantity.value !== "number" || !Number.isFinite(quantity.value)) return [];
+    const unit = String(quantity.unit ?? "").trim().toLowerCase();
+    const semantic = `${String(quantity.id ?? "")} ${String(quantity.symbol ?? "")} ${String(quantity.label ?? "")}`;
+    return unit === "°" || /^(?:deg|degree|degrees|rad|radian|radians)$/.test(unit) || /(?:theta|angle|θ)/i.test(semantic)
+      ? [{ value: quantity.value, unit: unit || "degree" }]
+      : [];
+  });
+  const fallbackAngle = angleQuantities.length === 1 ? angleQuantities[0] : null;
+  const labelAngle = (id: string): { value: number; unit: string } | null => {
+    const label = String(entityById.get(id)?.label ?? "");
+    const match = label.match(/(-?\d+(?:\.\d+)?)\s*(?:°|deg(?:ree)?s?)/i);
+    return match ? { value: Number(match[1]), unit: "degree" } : null;
+  };
+  return assertions.map((assertion) => {
+    if (!isRecord(assertion) || assertion.predicate !== "equal_angle" || !Array.isArray(assertion.entities)) return assertion;
+    if (assertion.expected === false) return assertion;
+    const ids = assertion.entities.filter((id): id is string => typeof id === "string");
+    if (ids.length === 4) return assertion;
+    const explicitExpected = typeof assertion.expected === "number" ||
+      (isRecord(assertion.expected) && typeof assertion.expected.value === "number")
+      ? assertion.expected
+      : null;
+    if (ids.length === 2 && explicitExpected !== null) {
+      return { ...assertion, predicate: "angle_between", entities: ids, expected: explicitExpected };
+    }
+    const angleMarkId = ids.find((id) => producers.get(id)?.operator === "angle_mark");
+    const angleMark = angleMarkId ? producers.get(angleMarkId) : undefined;
+    const angleInputs = angleMark && isRecord(angleMark.inputs)
+      ? [angleInputsId(angleMark.inputs.a), angleInputsId(angleMark.inputs.b)].filter((id): id is string => Boolean(id))
+      : [];
+    const pathIds = ids.filter((id) => producers.get(id)?.operator !== "angle_mark");
+    const arms = pathIds.length === 2 ? pathIds : angleInputs.length === 2 ? angleInputs : [];
+    const expected = explicitExpected ?? (angleMarkId ? labelAngle(angleMarkId) : null) ?? fallbackAngle;
+    return arms.length === 2 && expected
+      ? { ...assertion, predicate: "angle_between", entities: arms, expected }
+      : assertion;
+  });
+}
+
+function angleInputsId(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+function normalizeIncidentAssertionOrder(
+  constructions: unknown[],
+  assertions: unknown,
+): unknown {
+  if (!Array.isArray(assertions)) return assertions;
+  const producers = constructionProducers(constructions);
+  return assertions.map((assertion) => {
+    if (
+      !isRecord(assertion) ||
+      assertion.predicate !== "incident" ||
+      !Array.isArray(assertion.entities) ||
+      assertion.entities.length !== 2 ||
+      typeof assertion.entities[0] !== "string" ||
+      typeof assertion.entities[1] !== "string"
+    ) return assertion;
+    const first = producers.get(assertion.entities[0]);
+    const second = producers.get(assertion.entities[1]);
+    return isPathConstruction(first) && second?.operator === "point"
+      ? { ...assertion, entities: [assertion.entities[1], assertion.entities[0]] }
+      : assertion;
+  });
+}
+
+function normalizeSnellAssertionShape(
+  constructions: unknown[],
+  assertions: unknown,
+  quantities: unknown,
+  entities: unknown,
+): unknown {
+  if (!Array.isArray(assertions) || !Array.isArray(quantities) || !Array.isArray(entities)) return assertions;
+  const producers = constructionProducers(constructions);
+  const entityById = new Map(entities.flatMap((entity) =>
+    isRecord(entity) && typeof entity.id === "string" ? [[entity.id, entity] as const] : []));
+  const quantityById = new Map(quantities.flatMap((quantity) =>
+    isRecord(quantity) && typeof quantity.id === "string" ? [[quantity.id, quantity] as const] : []));
+  const semantic = (id: string): string => {
+    const entity = entityById.get(id);
+    return `${id} ${String(entity?.role ?? "")} ${String(entity?.label ?? "")}`
+      .toLowerCase().replace(/[_-]+/g, " ");
+  };
+  const quantityValue = (pattern: RegExp): number | null => {
+    const match = [...quantityById].find(([id, quantity]) =>
+      pattern.test(`${id} ${String(quantity.symbol ?? "")} ${String(quantity.label ?? "")}`));
+    return match && typeof match[1].value === "number" && Number.isFinite(match[1].value)
+      ? match[1].value
+      : null;
+  };
+
+  return assertions.map((assertion) => {
+    if (!isRecord(assertion) || assertion.predicate !== "snells_law" || !Array.isArray(assertion.entities)) {
+      return assertion;
+    }
+    const ids = assertion.entities.filter((id): id is string => typeof id === "string");
+    const pathIds = ids.filter((id) => isPathConstruction(producers.get(id)));
+    const incident = pathIds.find((id) => /\bincident\b/.test(semantic(id)))
+      ?? (pathIds.length === 3 ? pathIds[0] : undefined);
+    const normal = pathIds.find((id) => /\bnormal/.test(semantic(id)))
+      ?? (pathIds.length === 3 ? pathIds[1] : undefined);
+    const refracted = pathIds.find((id) => /\brefract/.test(semantic(id)))
+      ?? pathIds.find((id) => /\binternal\b/.test(semantic(id)))
+      ?? (incident && normal
+        ? pathIds.find((id) => id !== incident && id !== normal)
+        : undefined)
+      ?? (pathIds.length === 3 ? pathIds[2] : undefined);
+    const expected = isRecord(assertion.expected) ? assertion.expected : {};
+    const refractBundle = [incident, normal]
+      .flatMap((id) => id ? [producers.get(id)] : [])
+      .find((producer) => producer?.operator === "refract_at");
+    const bundleInputs = refractBundle && isRecord(refractBundle.inputs) ? refractBundle.inputs : null;
+    let n1 = typeof expected.n1 === "number" ? expected.n1 : quantityValue(/\bn\s*1\b|\bn1\b/i);
+    let n2 = typeof expected.n2 === "number" ? expected.n2 : quantityValue(/\bn\s*2\b|\bn2\b/i);
+    if (n1 === null && typeof bundleInputs?.n1 === "number") n1 = bundleInputs.n1;
+    if (n2 === null && typeof bundleInputs?.n2 === "number") n2 = bundleInputs.n2;
+    if (n1 === null || n2 === null) {
+      const index = [...quantityById].find(([id, quantity]) =>
+        /^(?:n|μ|mu)$/i.test(id) || /^(?:n|μ|mu)$/i.test(String(quantity.symbol ?? "")));
+      const n = index && typeof index[1].value === "number" && index[1].value > 0 ? index[1].value : null;
+      if (n !== null) {
+        if (n1 === null && n2 === null) {
+          n1 = 1;
+          n2 = n;
+        } else if (n2 === null) n2 = n;
+        else n1 = n;
+      }
+    }
+    if (!incident || !normal || !refracted || !(n1 !== null && n1 > 0) || !(n2 !== null && n2 > 0)) {
+      return assertion;
+    }
+    return { ...assertion, entities: [incident, normal, refracted], expected: { n1, n2 } };
+  });
+}
+
+/**
+ * Models sometimes treat a derived path as a direction and wrap it in another
+ * ray/vector. The wrapper is provably redundant when it shares the transform
+ * origin and its only direction is the transform output. Preserve the visible
+ * semantic ID by assigning it directly to the deterministic transform.
+ */
+function normalizeDerivedPathWrappers(raw: Record<string, unknown>): Record<string, unknown> {
+  if (!Array.isArray(raw.entities) || !Array.isArray(raw.constructions)) return raw;
+  const entities = raw.entities.filter(isRecord);
+  const entityById = new Map(entities.flatMap((entity) =>
+    typeof entity.id === "string" ? [[entity.id, entity] as const] : [],
+  ));
+  const constructions = raw.constructions.map((construction) =>
+    isRecord(construction) ? { ...construction } : construction,
+  );
+  const removedConstructionIds = new Set<string>();
+  const replacements = new Map<string, string>();
+
+  for (const transform of constructions) {
+    if (
+      !isRecord(transform) ||
+      (transform.operator !== "reflect_direction" && transform.operator !== "refract_direction") ||
+      !isRecord(transform.inputs) ||
+      !Array.isArray(transform.outputs) ||
+      transform.outputs.length !== 1 ||
+      typeof transform.outputs[0] !== "string" ||
+      typeof transform.inputs.origin !== "string"
+    ) continue;
+    const helperId = transform.outputs[0];
+    const originId = transform.inputs.origin;
+    const rolePattern = transform.operator === "reflect_direction" ? /\breflected\b/i : /\brefracted\b/i;
+    const wrappers = constructions.filter((candidate) => {
+      if (
+        !isRecord(candidate) ||
+        (candidate.operator !== "ray" && candidate.operator !== "vector") ||
+        !isRecord(candidate.inputs) ||
+        candidate.inputs.start !== originId ||
+        candidate.inputs.direction !== helperId ||
+        !Array.isArray(candidate.outputs) ||
+        candidate.outputs.length !== 1 ||
+        typeof candidate.outputs[0] !== "string"
+      ) return false;
+      const entity = entityById.get(candidate.outputs[0]);
+      return Boolean(entity && typeof entity.role === "string" && rolePattern.test(entity.role));
+    });
+    const visibleWrapper = wrappers.find((candidate) =>
+      isRecord(candidate) && candidate.operator === "ray" &&
+      Array.isArray(candidate.outputs) &&
+      typeof candidate.outputs[0] === "string" &&
+      entityById.get(candidate.outputs[0])?.kind === "ray",
+    );
+    if (!isRecord(visibleWrapper) || !Array.isArray(visibleWrapper.outputs)) continue;
+    const visibleId = visibleWrapper.outputs[0];
+    if (typeof visibleId !== "string") continue;
+
+    transform.outputs = [visibleId];
+    replacements.set(helperId, visibleId);
+    for (const wrapper of wrappers) {
+      if (!isRecord(wrapper) || typeof wrapper.id !== "string" || !Array.isArray(wrapper.outputs)) continue;
+      removedConstructionIds.add(wrapper.id);
+      const output = wrapper.outputs[0];
+      if (typeof output === "string" && output !== visibleId) replacements.set(output, visibleId);
+    }
+  }
+  if (replacements.size === 0) return raw;
+
+  const replaceId = (value: unknown): unknown =>
+    typeof value === "string" ? replacements.get(value) ?? value : value;
+  const replaceIds = (value: unknown): unknown =>
+    Array.isArray(value) ? [...new Set(value.map(replaceId))] : value;
+  const removedEntityIds = new Set(replacements.keys());
+  for (const value of replacements.values()) removedEntityIds.delete(value);
+
+  return {
+    ...raw,
+    entities: raw.entities.filter((entity) =>
+      !isRecord(entity) || typeof entity.id !== "string" || !removedEntityIds.has(entity.id),
+    ),
+    constructions: constructions.flatMap((construction) => {
+      if (!isRecord(construction) || (typeof construction.id === "string" && removedConstructionIds.has(construction.id))) {
+        return [];
+      }
+      return [{
+        ...construction,
+        inputs: isRecord(construction.inputs)
+          ? Object.fromEntries(Object.entries(construction.inputs).map(([key, value]) => [key, replaceId(value)]))
+          : construction.inputs,
+      }];
+    }),
+    requiredEntityIds: replaceIds(raw.requiredEntityIds),
+    revealGroups: Array.isArray(raw.revealGroups)
+      ? raw.revealGroups.map((group) => isRecord(group)
+        ? { ...group, entityIds: replaceIds(group.entityIds) }
+        : group)
+      : raw.revealGroups,
+    relations: Array.isArray(raw.relations)
+      ? raw.relations.map((relation) => isRecord(relation)
+        ? { ...relation, entities: replaceIds(relation.entities) }
+        : relation)
+      : raw.relations,
+    assertions: Array.isArray(raw.assertions)
+      ? raw.assertions.map((assertion) => isRecord(assertion)
+        ? { ...assertion, entities: replaceIds(assertion.entities) }
+        : assertion)
+      : raw.assertions,
+    annotations: Array.isArray(raw.annotations)
+      ? raw.annotations.map((annotation) => isRecord(annotation)
+        ? { ...annotation, targetIds: replaceIds(annotation.targetIds) }
+        : annotation)
+      : raw.annotations,
+    teachingTimeline: Array.isArray(raw.teachingTimeline)
+      ? raw.teachingTimeline.map((action) => isRecord(action)
+        ? { ...action, targetId: replaceId(action.targetId) }
+        : action)
+      : raw.teachingTimeline,
+  };
+}
+
+function normalizeAssertedVectorDirections(
+  constructions: unknown[],
+  assertions: unknown,
+): unknown[] {
+  if (!Array.isArray(assertions)) return constructions;
+  const producers = constructionProducers(constructions);
+  const points = new Map<string, { x: number; y: number }>();
+  for (const construction of constructions) {
+    if (
+      !isRecord(construction) ||
+      construction.operator !== "point" ||
+      !isRecord(construction.inputs) ||
+      !Array.isArray(construction.outputs) ||
+      typeof construction.outputs[0] !== "string" ||
+      typeof construction.inputs.x !== "number" ||
+      !Number.isFinite(construction.inputs.x) ||
+      typeof construction.inputs.y !== "number" ||
+      !Number.isFinite(construction.inputs.y)
+    ) continue;
+    points.set(construction.outputs[0], {
+      x: construction.inputs.x,
+      y: construction.inputs.y,
+    });
+  }
+
+  const constraints = new Map<string, { predicate: "parallel" | "perpendicular"; referenceId: string }>();
+  const assertedIncidentEndpoints = new Set<string>();
+  for (const assertion of assertions) {
+    if (
+      isRecord(assertion) &&
+      assertion.predicate === "incident" &&
+      assertion.expected !== false &&
+      Array.isArray(assertion.entities) &&
+      assertion.entities.length === 2
+    ) {
+      const [firstId, secondId] = assertion.entities;
+      if (typeof firstId === "string" && typeof secondId === "string") {
+        const first = producers.get(firstId);
+        const second = producers.get(secondId);
+        const vectorId = first?.operator === "vector" ? firstId
+          : second?.operator === "vector" ? secondId : null;
+        const pointId = points.has(firstId) ? firstId : points.has(secondId) ? secondId : null;
+        const vector = vectorId ? producers.get(vectorId) : undefined;
+        if (
+          vectorId &&
+          pointId &&
+          isRecord(vector?.inputs) &&
+          (vector.inputs.start === pointId || vector.inputs.end === pointId)
+        ) assertedIncidentEndpoints.add(vectorId);
+      }
+    }
+    if (
+      !isRecord(assertion) ||
+      (assertion.predicate !== "parallel" && assertion.predicate !== "perpendicular") ||
+      assertion.expected === false ||
+      !Array.isArray(assertion.entities) ||
+      assertion.entities.length !== 2
+    ) continue;
+    const [firstId, secondId] = assertion.entities;
+    if (typeof firstId !== "string" || typeof secondId !== "string") continue;
+    const first = producers.get(firstId);
+    const second = producers.get(secondId);
+    if (first?.operator === "vector" && second?.operator === "vector") {
+      constraints.set(secondId, { predicate: assertion.predicate, referenceId: firstId });
+    } else if (first?.operator === "vector" && isPathConstruction(second)) {
+      constraints.set(firstId, { predicate: assertion.predicate, referenceId: secondId });
+    } else if (second?.operator === "vector" && isPathConstruction(first)) {
+      constraints.set(secondId, { predicate: assertion.predicate, referenceId: firstId });
+    }
+  }
+  if (constraints.size === 0 && assertedIncidentEndpoints.size === 0) return constructions;
+
+  const directionFor = (
+    entityId: string,
+    visiting = new Set<string>(),
+  ): { x: number; y: number } | null => {
+    if (visiting.has(entityId)) return null;
+    visiting.add(entityId);
+    const construction = producers.get(entityId);
+    if (!construction || !isRecord(construction.inputs)) return null;
+    if (
+      (construction.operator === "parallel_through" || construction.operator === "perpendicular_through") &&
+      typeof construction.inputs.line === "string"
+    ) {
+      const reference = directionFor(construction.inputs.line, visiting);
+      if (!reference) return null;
+      return construction.operator === "perpendicular_through"
+        ? { x: -reference.y, y: reference.x }
+        : reference;
+    }
+    const explicit = construction.inputs.direction;
+    if (
+      Array.isArray(explicit) &&
+      explicit.length >= 2 &&
+      typeof explicit[0] === "number" &&
+      Number.isFinite(explicit[0]) &&
+      typeof explicit[1] === "number" &&
+      Number.isFinite(explicit[1])
+    ) return { x: explicit[0], y: explicit[1] };
+    const start = typeof construction.inputs.start === "string"
+      ? points.get(construction.inputs.start)
+      : undefined;
+    const end = typeof construction.inputs.end === "string"
+      ? points.get(construction.inputs.end)
+      : undefined;
+    return start && end ? { x: end.x - start.x, y: end.y - start.y } : null;
+  };
+
+  return constructions.map((construction) => {
+    if (
+      !isRecord(construction) ||
+      construction.operator !== "vector" ||
+      !isRecord(construction.inputs) ||
+      !Array.isArray(construction.outputs) ||
+      typeof construction.outputs[0] !== "string"
+    ) return construction;
+    const outputId = construction.outputs[0];
+    const endpointNormalized = assertedIncidentEndpoints.has(outputId) &&
+      Object.prototype.hasOwnProperty.call(construction.inputs, "direction")
+      ? (() => {
+          const inputs = { ...construction.inputs };
+          delete inputs.direction;
+          return { ...construction, inputs };
+        })()
+      : construction;
+    const constraint = constraints.get(outputId);
+    if (!constraint) return endpointNormalized;
+    const current = directionFor(construction.outputs[0]);
+    const reference = directionFor(constraint.referenceId);
+    if (!current || !reference) return endpointNormalized;
+    const currentLength = Math.hypot(current.x, current.y);
+    const referenceLength = Math.hypot(reference.x, reference.y);
+    if (currentLength <= 1e-9 || referenceLength <= 1e-9) return endpointNormalized;
+    const parallel = { x: reference.x / referenceLength, y: reference.y / referenceLength };
+    const basis = constraint.predicate === "perpendicular"
+      ? { x: -parallel.y, y: parallel.x }
+      : parallel;
+    const dot = current.x * basis.x + current.y * basis.y;
+    if (Math.abs(dot) <= 1e-9) return endpointNormalized;
+    const sign = dot < 0 ? -1 : 1;
+    const normalizedInputs = isRecord(endpointNormalized.inputs)
+      ? endpointNormalized.inputs
+      : construction.inputs;
+    return {
+      ...endpointNormalized,
+      inputs: {
+        ...normalizedInputs,
+        direction: [
+          basis.x * currentLength * sign,
+          basis.y * currentLength * sign,
+        ],
+      },
+    };
+  });
+}
+
+/**
+ * Coordinate-space tags affect physical proof orientation, not the raw point
+ * coordinates. Within one connected vector construction, mixed tags are a
+ * planner metadata contradiction, so normalize the component to its majority
+ * space (world wins ties) before evaluating vector constraints.
+ */
+function normalizeVectorCoordinateSpaces(constructions: unknown[]): unknown[] {
+  const pointProducer = new Map<string, { index: number; construction: Record<string, unknown> }>();
+  const vectorEdges: Array<readonly [string, string]> = [];
+  constructions.forEach((construction, index) => {
+    if (!isRecord(construction) || !isRecord(construction.inputs)) return;
+    if (
+      construction.operator === "point" &&
+      Array.isArray(construction.outputs) &&
+      typeof construction.outputs[0] === "string"
+    ) {
+      pointProducer.set(construction.outputs[0], { index, construction });
+      return;
+    }
+    if (construction.operator !== "vector") return;
+    const start = constructionEndpoint(construction.inputs, ["start", "from", "a", "origin"]);
+    const end = constructionEndpoint(construction.inputs, ["end", "to", "b"]);
+    if (start && end && start !== end) vectorEdges.push([start, end]);
+  });
+  if (vectorEdges.length === 0) return constructions;
+
+  const parent = new Map<string, string>();
+  const find = (id: string): string => {
+    const owner = parent.get(id) ?? id;
+    if (owner === id) {
+      parent.set(id, id);
+      return id;
+    }
+    const root = find(owner);
+    parent.set(id, root);
+    return root;
+  };
+  const join = (first: string, second: string): void => {
+    const firstRoot = find(first);
+    const secondRoot = find(second);
+    if (firstRoot !== secondRoot) parent.set(secondRoot, firstRoot);
+  };
+  vectorEdges.forEach(([start, end]) => join(start, end));
+
+  const pointsByComponent = new Map<string, string[]>();
+  for (const id of new Set(vectorEdges.flat())) {
+    const root = find(id);
+    pointsByComponent.set(root, [...(pointsByComponent.get(root) ?? []), id]);
+  }
+  const normalizedSpaceByPoint = new Map<string, "layout" | "world">();
+  for (const pointIds of pointsByComponent.values()) {
+    const spaces = pointIds.flatMap((id) => {
+      const inputs = pointProducer.get(id)?.construction.inputs;
+      return isRecord(inputs) && (inputs.coordinateSpace === "layout" || inputs.coordinateSpace === "world")
+        ? [inputs.coordinateSpace]
+        : [];
+    });
+    if (!spaces.includes("layout") || !spaces.includes("world")) continue;
+    const worldCount = spaces.filter((space) => space === "world").length;
+    const layoutCount = spaces.length - worldCount;
+    const selected = worldCount >= layoutCount ? "world" : "layout";
+    pointIds.forEach((id) => normalizedSpaceByPoint.set(id, selected));
+  }
+  if (normalizedSpaceByPoint.size === 0) return constructions;
+  return constructions.map((construction) => {
+    if (
+      !isRecord(construction) ||
+      construction.operator !== "point" ||
+      !isRecord(construction.inputs) ||
+      !Array.isArray(construction.outputs) ||
+      typeof construction.outputs[0] !== "string"
+    ) return construction;
+    const coordinateSpace = normalizedSpaceByPoint.get(construction.outputs[0]);
+    return coordinateSpace
+      ? { ...construction, inputs: { ...construction.inputs, coordinateSpace } }
+      : construction;
+  });
+}
+
+function constructionProducers(constructions: unknown[]): Map<string, Record<string, unknown>> {
+  const producers = new Map<string, Record<string, unknown>>();
+  for (const construction of constructions) {
+    if (!isRecord(construction) || !Array.isArray(construction.outputs)) continue;
+    for (const output of construction.outputs) {
+      if (typeof output === "string") producers.set(output, construction);
+    }
+  }
+  return producers;
+}
+
+function isPathConstruction(
+  construction: Record<string, unknown> | undefined,
+): construction is Record<string, unknown> {
+  return Boolean(
+    construction &&
+    typeof construction.operator === "string" &&
+    [
+      "segment", "connect", "line", "ray", "vector", "vector_components",
+      "parallel_through", "perpendicular_through", "normal_at",
+      "reflect_at", "refract_at",
+    ].includes(construction.operator),
+  );
+}
+
+function normalizeVectorComponentBases(
+  constructions: unknown[],
+  entities: unknown,
+): unknown[] {
+  if (!Array.isArray(entities)) return constructions;
+  const entitiesById = new Map(entities.flatMap((entity) =>
+    isRecord(entity) && typeof entity.id === "string"
+      ? [[entity.id, entity] as const]
+      : [],
+  ));
+  const surfaceCandidates = entities.flatMap((entity) => {
+    if (
+      !isRecord(entity) ||
+      typeof entity.id !== "string" ||
+      !["line", "segment", "vector"].includes(String(entity.kind))
+    ) return [];
+    const semantic = `${String(entity.role ?? "")} ${String(entity.label ?? "")}`
+      .toLowerCase()
+      .replace(/[_-]+/g, " ");
+    return /\b(?:surface|plane|ramp|slope)\b/.test(semantic) &&
+      !/\b(?:normal|perpendicular)\b/.test(semantic)
+      ? [entity.id]
+      : [];
+  });
+  if (surfaceCandidates.length !== 1) return constructions;
+  const basis = surfaceCandidates[0]!;
+
+  return constructions.map((construction) => {
+    if (
+      !isRecord(construction) ||
+      construction.operator !== "vector_components" ||
+      !isRecord(construction.inputs) ||
+      construction.inputs.basis !== undefined ||
+      construction.inputs.parallelTo !== undefined ||
+      construction.inputs.reference !== undefined ||
+      !Array.isArray(construction.outputs) ||
+      construction.outputs.length !== 2
+    ) return construction;
+
+    const semantic = (output: unknown): string => {
+      if (typeof output !== "string") return "";
+      const entity = entitiesById.get(output);
+      return `${output} ${String(entity?.role ?? "")} ${String(entity?.label ?? "")}`
+        .toLowerCase()
+        .replace(/[_-]+/g, " ");
+    };
+    const parallelId = construction.outputs.find((output) => /\bparallel\b/.test(semantic(output)));
+    const perpendicularId = construction.outputs.find((output) => /\b(?:perp|perpendicular|normal)\b/.test(semantic(output)));
+    if (
+      typeof parallelId !== "string" ||
+      typeof perpendicularId !== "string" ||
+      parallelId === perpendicularId
+    ) return construction;
+
+    return {
+      ...construction,
+      inputs: { ...construction.inputs, basis },
+      outputs: [parallelId, perpendicularId],
+    };
+  });
+}
+
+function constrainParaxialIllustrationHeight(raw: Record<string, unknown>): Record<string, unknown> {
+  if (
+    !Array.isArray(raw.entities) ||
+    !Array.isArray(raw.constructions) ||
+    !raw.constructions.some((construction) =>
+      isRecord(construction) &&
+      (construction.operator === "reflect_direction" || construction.operator === "refract_direction"),
+    )
+  ) {
+    return raw;
+  }
+
+  const sourceQuestion = isRecord(raw.source) && typeof raw.source.question === "string"
+    ? raw.source.question
+    : "";
+  const hasSpecifiedHeight = /\b(?:object|image)\s+height\b/i.test(sourceQuestion) ||
+    (Array.isArray(raw.quantities) && raw.quantities.some((quantity) =>
+      isRecord(quantity) &&
+      /(?:^|_)(?:object_?height|image_?height|h_o|h_i)(?:$|_)/i.test(
+        `${String(quantity.id ?? "")} ${String(quantity.symbol ?? "")}`,
+      ),
+    ));
+  if (hasSpecifiedHeight) return raw;
+
+  const entities = new Map(raw.entities.flatMap((entity) =>
+    isRecord(entity) && typeof entity.id === "string" ? [[entity.id, entity] as const] : [],
+  ));
+  const pointConstructionByOutput = new Map<string, Record<string, unknown>>();
+  for (const construction of raw.constructions) {
+    if (
+      !isRecord(construction) ||
+      construction.operator !== "point" ||
+      !isRecord(construction.inputs) ||
+      construction.inputs.coordinateSpace !== "world" ||
+      !Array.isArray(construction.outputs)
+    ) continue;
+    const output = construction.outputs[0];
+    if (typeof output === "string") pointConstructionByOutput.set(output, construction);
+  }
+
+  const findEntityId = (pattern: RegExp): string | null => {
+    for (const [id, entity] of entities) {
+      const semanticName = `${id} ${String(entity.role ?? "")}`.replace(/[_-]+/g, " ");
+      if (pattern.test(semanticName)) return id;
+    }
+    return null;
+  };
+  const objectBaseId = findEntityId(/\bobject (?:base|position)\b/i);
+  const objectTipId = findEntityId(/\bobject tip\b/i);
+  const imageBaseId = findEntityId(/\bimage (?:base|position)\b/i);
+  const imageTipId = findEntityId(/\bimage tip\b/i);
+  const referenceId = findEntityId(/\b(?:pole|optical center|vertex)\b/i);
+  if (!objectBaseId || !objectTipId || !referenceId) return raw;
+
+  const pointFor = (id: string | null): PointValue | null => {
+    if (!id) return null;
+    const construction = pointConstructionByOutput.get(id);
+    if (!construction || !isRecord(construction.inputs)) return null;
+    const { x, y } = construction.inputs;
+    return typeof x === "number" && Number.isFinite(x) && typeof y === "number" && Number.isFinite(y)
+      ? { x, y }
+      : null;
+  };
+  const objectBase = pointFor(objectBaseId);
+  const objectTip = pointFor(objectTipId);
+  const reference = pointFor(referenceId);
+  if (!objectBase || !objectTip || !reference) return raw;
+
+  const opticalPointIds = [
+    objectBaseId,
+    imageBaseId,
+    ...[...entities].flatMap(([id, entity]) =>
+      /\b(?:focus|focal|center of curvature|centre of curvature)\b/i.test(
+        `${id} ${String(entity.role ?? "")}`.replace(/[_-]+/g, " "),
+      ) ? [id] : [],
+    ),
+  ].filter((id): id is string => Boolean(id));
+  const referenceDistances = opticalPointIds.flatMap((id) => {
+    const point = pointFor(id);
+    if (!point) return [];
+    const distance = Math.hypot(point.x - reference.x, point.y - reference.y);
+    return distance > 1e-9 ? [distance] : [];
+  });
+  const scaleDistance = Math.min(...referenceDistances);
+  const objectHeight = Math.hypot(objectTip.x - objectBase.x, objectTip.y - objectBase.y);
+  const maxHeight = scaleDistance * 0.08;
+  if (!Number.isFinite(maxHeight) || maxHeight <= 0 || objectHeight <= 0) return raw;
+
+  // Keep an unspecified construction arrow legible without letting it become
+  // large enough to invalidate the paraxial illustration. Smaller planner
+  // heights are preserved; oversized ones are reduced deterministically.
+  const factor = objectHeight > maxHeight ? maxHeight / objectHeight : 1;
+  const scalableTipIds = [objectTipId, imageTipId].filter((id): id is string => Boolean(id));
+  const baseByTip = new Map<string, PointValue>([[objectTipId, objectBase]]);
+  const imageBase = pointFor(imageBaseId);
+  if (imageTipId && imageBase) baseByTip.set(imageTipId, imageBase);
+  const magnification = Array.isArray(raw.quantities)
+    ? raw.quantities.find((quantity) =>
+        isRecord(quantity) &&
+        typeof quantity.value === "number" &&
+        Number.isFinite(quantity.value) &&
+        /^(?:m|magnification|m_val)$/i.test(String(quantity.id ?? quantity.symbol ?? "")),
+      )
+    : undefined;
+  const magnificationValue = isRecord(magnification) && typeof magnification.value === "number"
+    ? magnification.value
+    : null;
+
+  if (factor === 1 && (!imageTipId || !imageBase || magnificationValue === null)) return raw;
+
+  return {
+    ...raw,
+    constructions: raw.constructions.map((construction) => {
+      if (!isRecord(construction) || !Array.isArray(construction.outputs)) return construction;
+      const output = construction.outputs[0];
+      if (typeof output !== "string" || !scalableTipIds.includes(output) || !isRecord(construction.inputs)) {
+        return construction;
+      }
+      const base = baseByTip.get(output);
+      const point = pointFor(output);
+      if (output === imageTipId && imageBase && magnificationValue !== null) {
+        return {
+          ...construction,
+          operator: "point",
+          inputs: {
+            x: imageBase.x + (objectTip.x - objectBase.x) * factor * magnificationValue,
+            y: imageBase.y + (objectTip.y - objectBase.y) * factor * magnificationValue,
+            coordinateSpace: "world",
+          },
+        };
+      }
+      if (!base || !point) return construction;
+      return {
+        ...construction,
+        inputs: {
+          ...construction.inputs,
+          x: base.x + (point.x - base.x) * factor,
+          y: base.y + (point.y - base.y) * factor,
+        },
+      };
+    }),
+  };
+}
+
+interface PointValue { x: number; y: number }
+
+function constructionEndpoint(
+  inputs: Record<string, unknown>,
+  keys: readonly string[],
+): string | null {
+  for (const key of keys) {
+    const value = inputs[key];
+    if (typeof value === "string") return value;
+  }
+  return null;
+}
+
+/**
+ * When two constructed legs share a vertex and `angle_between` names that
+ * interior angle, rotate the far endpoints (and collinear face points) to the
+ * asserted opening. Planner coordinates are a guess; the assertion is the
+ * contract. Line-line acute readings that are not the interior vertex angle
+ * are left alone.
+ */
+function normalizeAssertedSharedVertexAngleGeometry(raw: Record<string, unknown>): Record<string, unknown> {
+  if (!Array.isArray(raw.constructions) || !Array.isArray(raw.assertions)) return raw;
+  const constructions = raw.constructions.map((construction) =>
+    isRecord(construction)
+      ? { ...construction, inputs: isRecord(construction.inputs) ? { ...construction.inputs } : construction.inputs }
+      : construction,
+  );
+  let changed = false;
+
+  for (const assertion of raw.assertions) {
+    if (
+      !isRecord(assertion) ||
+      assertion.predicate !== "angle_between" ||
+      assertion.expected === false ||
+      !Array.isArray(assertion.entities) ||
+      assertion.entities.length !== 2
+    ) continue;
+    const firstId = assertion.entities[0];
+    const secondId = assertion.entities[1];
+    if (typeof firstId !== "string" || typeof secondId !== "string") continue;
+    const producers = constructionProducers(constructions);
+    const firstEnds = segmentEndpointIds(producers.get(firstId));
+    const secondEnds = segmentEndpointIds(producers.get(secondId));
+    if (!firstEnds || !secondEnds) continue;
+    const shared = firstEnds.filter((id) => secondEnds.includes(id));
+    if (shared.length !== 1) continue;
+    const vertexId = shared[0]!;
+    const far1Id = firstEnds.find((id) => id !== vertexId);
+    const far2Id = secondEnds.find((id) => id !== vertexId);
+    if (!far1Id || !far2Id || far1Id === far2Id) continue;
+    const vertex = proofDerivedPoint(vertexId, producers);
+    const far1 = proofDerivedPoint(far1Id, producers);
+    const far2 = proofDerivedPoint(far2Id, producers);
+    if (!vertex || !far1 || !far2) continue;
+    let expected: number;
+    try {
+      expected = assertedAngleRadians(assertion.expected);
+    } catch {
+      continue;
+    }
+    if (!(expected > 1e-6 && expected < Math.PI - 1e-6)) continue;
+    const v1 = { x: far1.x - vertex.x, y: far1.y - vertex.y };
+    const v2 = { x: far2.x - vertex.x, y: far2.y - vertex.y };
+    const len1 = Math.hypot(v1.x, v1.y);
+    const len2 = Math.hypot(v2.x, v2.y);
+    if (len1 < 1e-9 || len2 < 1e-9) continue;
+    const u1 = { x: v1.x / len1, y: v1.y / len1 };
+    const u2 = { x: v2.x / len2, y: v2.y / len2 };
+    const interior = Math.acos(Math.max(-1, Math.min(1, u1.x * u2.x + u1.y * u2.y)));
+    const acute = Math.min(interior, Math.PI - interior);
+    if (Math.abs(interior - expected) > Math.abs(acute - expected) + 1e-9) continue;
+    if (Math.abs(interior - expected) < 0.5 * Math.PI / 180) continue;
+
+    let bisector = { x: u1.x + u2.x, y: u1.y + u2.y };
+    const bisLen = Math.hypot(bisector.x, bisector.y);
+    bisector = bisLen < 1e-9
+      ? { x: -u1.y, y: u1.x }
+      : { x: bisector.x / bisLen, y: bisector.y / bisLen };
+    const signed = (from: PointValue, to: PointValue) =>
+      Math.atan2(from.x * to.y - from.y * to.x, from.x * to.x + from.y * to.y);
+    let s1 = Math.sign(signed(bisector, u1));
+    let s2 = Math.sign(signed(bisector, u2));
+    if (s1 === 0) s1 = 1;
+    if (s2 === 0 || s1 === s2) s2 = -s1;
+    const rotate = (u: PointValue, angle: number): PointValue => ({
+      x: u.x * Math.cos(angle) - u.y * Math.sin(angle),
+      y: u.x * Math.sin(angle) + u.y * Math.cos(angle),
+    });
+    const dir1 = rotate(bisector, s1 * expected / 2);
+    const dir2 = rotate(bisector, s2 * expected / 2);
+    const newFar1 = { x: vertex.x + dir1.x * len1, y: vertex.y + dir1.y * len1 };
+    const newFar2 = { x: vertex.x + dir2.x * len2, y: vertex.y + dir2.y * len2 };
+    const parameterOnLeg = (point: PointValue, far: PointValue): number | null => {
+      const dx = far.x - vertex.x;
+      const dy = far.y - vertex.y;
+      const span = dx * dx + dy * dy;
+      const t = ((point.x - vertex.x) * dx + (point.y - vertex.y) * dy) / span;
+      if (t < -1e-4 || t > 1 + 1e-4) return null;
+      const proj = { x: vertex.x + t * dx, y: vertex.y + t * dy };
+      if (Math.hypot(point.x - proj.x, point.y - proj.y) > Math.max(1e-3, Math.sqrt(span) * 1e-4)) return null;
+      return Math.min(1, Math.max(0, t));
+    };
+    const relocated = new Map<string, PointValue>([
+      [far1Id, newFar1],
+      [far2Id, newFar2],
+    ]);
+    for (const construction of constructions) {
+      if (!isRecord(construction) || construction.operator !== "point" || !isRecord(construction.inputs)) continue;
+      if (!Array.isArray(construction.outputs) || typeof construction.outputs[0] !== "string") continue;
+      const id = construction.outputs[0];
+      if (id === vertexId || id === far1Id || id === far2Id) continue;
+      const point = proofDerivedPoint(id, producers);
+      if (!point) continue;
+      const t1 = parameterOnLeg(point, far1);
+      const t2 = parameterOnLeg(point, far2);
+      if (t1 !== null && t2 === null) {
+        relocated.set(id, {
+          x: vertex.x + (newFar1.x - vertex.x) * t1,
+          y: vertex.y + (newFar1.y - vertex.y) * t1,
+        });
+      } else if (t2 !== null && t1 === null) {
+        relocated.set(id, {
+          x: vertex.x + (newFar2.x - vertex.x) * t2,
+          y: vertex.y + (newFar2.y - vertex.y) * t2,
+        });
+      }
+    }
+    for (const construction of constructions) {
+      if (!isRecord(construction) || construction.operator !== "point" || !isRecord(construction.inputs)) continue;
+      if (!Array.isArray(construction.outputs) || typeof construction.outputs[0] !== "string") continue;
+      const next = relocated.get(construction.outputs[0]);
+      if (!next) continue;
+      construction.inputs = { ...construction.inputs, x: next.x, y: next.y };
+      changed = true;
+    }
+  }
+
+  return changed ? { ...raw, constructions } : raw;
+}
+
+function segmentEndpointIds(
+  construction: Record<string, unknown> | undefined,
+): [string, string] | null {
+  if (!construction || !isRecord(construction.inputs)) return null;
+  if (!["segment", "line", "ray"].includes(String(construction.operator))) return null;
+  const start = constructionEndpoint(construction.inputs, ["start", "from", "a"]);
+  const end = constructionEndpoint(construction.inputs, ["end", "to", "b"]);
+  if (!start || !end || start === end) return null;
+  return [start, end];
+}
+
+function assertedAngleRadians(expected: unknown): number {
+  const value = typeof expected === "number"
+    ? expected
+    : isRecord(expected) && typeof expected.value === "number" ? expected.value : NaN;
+  if (!Number.isFinite(value)) throw new Error("angle_between expected must be a finite angle");
+  const unit = isRecord(expected) && typeof expected.unit === "string"
+    ? expected.unit.trim().toLowerCase()
+    : "";
+  if (unit === "degree" || unit === "degrees" || unit === "deg" || unit === "°") return value * Math.PI / 180;
+  if (unit === "radian" || unit === "radians" || unit === "rad") return value;
+  return Math.abs(value) > Math.PI * 2 ? value * Math.PI / 180 : value;
+}
+
+function canonicalTerminalPair(a: string, b: string): string {
+  return a < b ? `${a}\u0000${b}` : `${b}\u0000${a}`;
+}
+
+function assertedComponentChainTerminalPairs(
+  assertions: unknown,
+  componentTerminals: ReadonlyMap<string, readonly [string, string]>,
+): Set<string> {
+  const pairs = new Set<string>();
+  if (!Array.isArray(assertions)) return pairs;
+  for (const assertion of assertions) {
+    if (
+      !isRecord(assertion) ||
+      assertion.predicate !== "path" ||
+      assertion.expected !== true ||
+      !Array.isArray(assertion.entities)
+    ) continue;
+    const edges = assertion.entities.flatMap((id) =>
+      typeof id === "string" && componentTerminals.has(id)
+        ? [componentTerminals.get(id)!]
+        : [],
+    );
+    if (edges.length < 2 || edges.length !== assertion.entities.length) continue;
+    const degree = new Map<string, number>();
+    for (const [a, b] of edges) {
+      degree.set(a, (degree.get(a) ?? 0) + 1);
+      degree.set(b, (degree.get(b) ?? 0) + 1);
+    }
+    const endpoints = [...degree].filter(([, value]) => value === 1).map(([id]) => id);
+    if (endpoints.length === 2 && [...degree.values()].every((value) => value <= 2)) {
+      pairs.add(canonicalTerminalPair(endpoints[0]!, endpoints[1]!));
+    }
+  }
+  return pairs;
+}
+
+function isExplicitConnectorSemantic(value: string): boolean {
+  return /\b(short|bypass|jumper|loop|return|source|battery|supply|bridge|cross[- ]?view|coupling|link)\b/.test(value);
+}
+
+function normalizeLabelText(value: string): string {
+  return value.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function collectStrings(value: unknown, visit: (value: string) => void): void {
+  if (typeof value === "string") {
+    visit(value);
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectStrings(item, visit));
+    return;
+  }
+  if (isRecord(value)) {
+    Object.values(value).forEach((item) => collectStrings(item, visit));
+  }
+}
+
+function omitLabel(entity: Record<string, unknown>): Record<string, unknown> {
+  const withoutLabel = { ...entity };
+  delete withoutLabel.label;
+  return withoutLabel;
+}
+
+function shouldStripHelperPointLabel(
+  entity: Record<string, unknown>,
+  document: Record<string, unknown>,
+): boolean {
+  if (
+    entity.kind !== "point" ||
+    typeof entity.id !== "string" ||
+    typeof entity.label !== "string"
+  ) {
+    return false;
+  }
+
+  const semantic = isRecord(entity.semantic) ? entity.semantic : {};
+  if (semantic.keepLabel === true || semantic.labelRequired === true) return false;
+
+  const role = normalizeLabelText(typeof entity.role === "string" ? entity.role : "point");
+  if (/\b(vertex|midpoint|focus|focal|centre|center|pole|origin|object|image|intersection|angle|incidence|normal)\b/.test(role)) {
+    return false;
+  }
+
+  const question = isRecord(document.source) && typeof document.source.question === "string"
+    ? document.source.question
+    : "";
+  const namedInQuestion = new RegExp(`(^|[^A-Za-z0-9_])${escapeRegExp(entity.label.trim())}([^A-Za-z0-9_]|$)`, "i")
+    .test(question);
+  if (namedInQuestion) return false;
+
+  const looksGenerated = normalizeLabelText(entity.id) === normalizeLabelText(entity.label) ||
+    /^[A-Z](?:\d{0,3})?$/.test(entity.label.trim());
+  return looksGenerated && (
+    role === "point" ||
+    /\b(node|terminal|junction|endpoint|connection|branch|helper|layout|wire)\b/.test(role)
+  );
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+export function validateSceneDocument(raw: unknown): ValidationResult {
+  const overLimit = sceneTextOverLimit(raw);
+  if (overLimit) return result(null, [overLimit]);
+  const issues: SceneIssue[] = [];
+  if (!isRecord(raw)) {
+    return result(null, [{ code: "invalid_document", message: "SceneDocument must be an object", severity: "fatal", path: "$" }]);
+  }
+  const normalizedRaw: Record<string, unknown> = normalizeGenericPlannerSchema({
+    ...raw,
+    quantities: raw.quantities ?? [],
+    relations: raw.relations ?? [],
+    annotations: raw.annotations ?? [],
+  });
+  const overCount = sceneCountOverLimit(normalizedRaw);
+  if (overCount) return result(null, [overCount]);
+  if (normalizedRaw.visualDecision === "scene" || normalizedRaw.visualDecision === "text_only") {
+    normalizedRaw.visualDecision = {
+      mode: normalizedRaw.visualDecision,
+      reason: "planner visual decision",
+    };
+  }
+  if (Array.isArray(normalizedRaw.entities)) {
+    normalizedRaw.entities = normalizedRaw.entities.map((entity) =>
+      isRecord(entity) && typeof entity.kind === "string" && typeof entity.role !== "string"
+        ? { ...entity, role: entity.kind }
+        : entity,
+    );
+  }
+  if (Array.isArray(normalizedRaw.assertions)) {
+    const entityKindById = new Map(
+      (Array.isArray(normalizedRaw.entities) ? normalizedRaw.entities : []).flatMap((entity) =>
+        isRecord(entity) && typeof entity.id === "string" && typeof entity.kind === "string"
+          ? [[entity.id, entity.kind] as const]
+          : [],
+      ),
+    );
+    const assertionProducers = constructionProducers(Array.isArray(normalizedRaw.constructions) ? normalizedRaw.constructions : []);
+    normalizedRaw.assertions = normalizedRaw.assertions.flatMap((assertion) => {
+      if (!isRecord(assertion)) return [assertion];
+      if (assertion.predicate === "angle_between") {
+        const ids = Array.isArray(assertion.entities)
+          ? assertion.entities.filter((id): id is string => typeof id === "string")
+          : [];
+        // A world angle mark carries the angle it draws, so it is proved alone.
+        const worldAngleMark = ids.length === 1 &&
+          SPACE_ANGLE_MARK_OPERATORS.has(String(assertionProducers.get(ids[0]!)?.operator ?? ""));
+        if (
+          !worldAngleMark && (
+            ids.length !== 2 ||
+            ids[0] === ids[1] ||
+            ids.some((id) => entityKindById.get(id) === "axes")
+          )
+        ) {
+          return [];
+        }
+      }
+      const severity = assertion.severity === "info" || assertion.severity === "warning"
+        ? "warning"
+        : "fatal";
+      return [{ ...assertion, severity }];
+    });
+  }
+  if (Array.isArray(normalizedRaw.annotations)) {
+    normalizedRaw.annotations = normalizedRaw.annotations.map((annotation) =>
+      isRecord(annotation)
+        ? {
+            ...annotation,
+            kind: annotation.kind === "caption" || annotation.kind === "note"
+              ? "callout"
+              : annotation.kind,
+            targetIds: Array.isArray(annotation.targetIds)
+              ? annotation.targetIds
+              : typeof annotation.targetId === "string" ? [annotation.targetId] : [],
+            style: normalizeAnnotationStyle(annotation.style),
+          }
+        : annotation,
+    );
+  }
+  const annotationTargets = new Map<string, string[]>();
+  if (Array.isArray(normalizedRaw.annotations)) {
+    for (const annotation of normalizedRaw.annotations) {
+      if (
+        isRecord(annotation) &&
+        typeof annotation.id === "string" &&
+        Array.isArray(annotation.targetIds)
+      ) {
+        annotationTargets.set(
+          annotation.id,
+          annotation.targetIds.filter((target): target is string => typeof target === "string"),
+        );
+      }
+    }
+  }
+  if (Array.isArray(normalizedRaw.revealGroups)) {
+    normalizedRaw.revealGroups = normalizedRaw.revealGroups.map((group, index) =>
+      isRecord(group)
+        ? {
+            ...group,
+            id: typeof group.id === "string"
+              ? group.id
+              : typeof group.label === "string" ? group.label : `group_${index + 1}`,
+            entityIds: Array.isArray(group.entityIds) || Array.isArray(group.entities)
+              ? [...new Set((Array.isArray(group.entityIds) ? group.entityIds : group.entities as unknown[]).flatMap((id) =>
+                  typeof id === "string" && annotationTargets.has(id)
+                    ? annotationTargets.get(id)!
+                    : [id],
+                ))]
+              : [],
+            dependsOn: Array.isArray(group.dependsOn) ? group.dependsOn : [],
+            narrationCue: typeof group.narrationCue === "string"
+              ? group.narrationCue
+              : typeof group.label === "string" ? group.label : "reveal scene",
+          }
+        : group,
+    );
+  }
+  if (Array.isArray(normalizedRaw.teachingTimeline)) {
+    const groupIds = new Set(
+      (Array.isArray(normalizedRaw.revealGroups) ? normalizedRaw.revealGroups : []).flatMap((group) =>
+        isRecord(group) && typeof group.id === "string" ? [group.id] : [],
+      ),
+    );
+    const entityIdsForTimeline = new Set(
+      (Array.isArray(normalizedRaw.entities) ? normalizedRaw.entities : []).flatMap((entity) =>
+        isRecord(entity) && typeof entity.id === "string" ? [entity.id] : [],
+      ),
+    );
+    const annotationIds = new Set(
+      (Array.isArray(normalizedRaw.annotations) ? normalizedRaw.annotations : []).flatMap((annotation) =>
+        isRecord(annotation) && typeof annotation.id === "string" ? [annotation.id] : [],
+      ),
+    );
+    const isKnownTarget = (id: string) =>
+      groupIds.has(id) || entityIdsForTimeline.has(id) || annotationIds.has(id);
+    normalizedRaw.teachingTimeline = normalizedRaw.teachingTimeline.flatMap((timelineAction, index) => {
+      if (!isRecord(timelineAction)) return [timelineAction];
+      const action = typeof timelineAction.action === "string"
+        ? timelineAction.action
+        : typeof timelineAction.type === "string" ? timelineAction.type : "reveal";
+      const targetCandidates = [
+        timelineAction.targetId,
+        timelineAction.target,
+        timelineAction.groupId,
+        ...(Array.isArray(timelineAction.targetIds) ? timelineAction.targetIds : []),
+      ].filter((id): id is string => typeof id === "string");
+      const targetId = targetCandidates.find(isKnownTarget);
+      if (!targetId) return [];
+      const narrationIntent = typeof timelineAction.narrationIntent === "string"
+        ? timelineAction.narrationIntent
+        // Planner models often emit `narration` instead of `narrationIntent`.
+        : typeof timelineAction.narration === "string"
+          ? timelineAction.narration
+          : `${action} ${targetId}`;
+      return [{
+            ...timelineAction,
+            action,
+            targetId,
+            id: typeof timelineAction.id === "string" ? timelineAction.id : `timeline_${index + 1}`,
+            dependsOn: Array.isArray(timelineAction.dependsOn) ? timelineAction.dependsOn : [],
+            narrationIntent,
+          }];
+    });
+  }
+  if (Array.isArray(normalizedRaw.requiredEntityIds)) {
+    normalizedRaw.requiredEntityIds = [...new Set(normalizedRaw.requiredEntityIds.flatMap((id) =>
+      typeof id === "string" && annotationTargets.has(id)
+        ? annotationTargets.get(id)!
+        : [id],
+    ))];
+  }
+  Object.assign(normalizedRaw, promoteAngleMarkVertices(normalizedRaw));
+  reconcileConstructionOwnership(normalizedRaw);
+  if (normalizedRaw.schemaVersion !== SCENE_DOCUMENT_VERSION) {
+    issues.push({ code: "schema_version", message: `Expected ${SCENE_DOCUMENT_VERSION}`, severity: "fatal", path: "schemaVersion", expected: SCENE_DOCUMENT_VERSION, actual: normalizedRaw.schemaVersion });
+  }
+  for (const field of ARRAY_FIELDS) {
+    if (!Array.isArray(normalizedRaw[field])) issues.push({ code: "missing_array", message: `${field} must be an array`, severity: "fatal", path: field });
+  }
+  if (!isRecord(normalizedRaw.visualDecision) || (normalizedRaw.visualDecision.mode !== "scene" && normalizedRaw.visualDecision.mode !== "text_only")) {
+    issues.push({ code: "visual_decision", message: "visualDecision.mode must be scene or text_only", severity: "fatal", path: "visualDecision.mode" });
+  }
+  if (issues.some((issue) => issue.severity === "fatal")) return result(null, issues);
+
+  const document = normalizedRaw as unknown as SceneDocument;
+  const idOwners = new Map<string, string>();
+  const addIds = (values: unknown[], path: string) => values.forEach((value, index) => {
+    if (!isRecord(value) || typeof value.id !== "string" || value.id.trim() === "") {
+      issues.push({ code: "invalid_id", message: `${path}[${index}] needs a non-empty id`, severity: "fatal", path: `${path}[${index}].id` });
+      return;
+    }
+    const owner = idOwners.get(value.id);
+    if (owner) issues.push({ code: "duplicate_id", message: `Duplicate id ${value.id}`, severity: "fatal", path: `${path}[${index}].id`, actual: owner });
+    else idOwners.set(value.id, path);
+  });
+  addIds(document.quantities, "quantities");
+  addIds(document.entities, "entities");
+  addIds(document.constructions, "constructions");
+  addIds(document.relations, "relations");
+  addIds(document.assertions, "assertions");
+  addIds(document.annotations, "annotations");
+  addIds(document.revealGroups, "revealGroups");
+  addIds(document.teachingTimeline, "teachingTimeline");
+  if (issues.some((issue) => issue.severity === "fatal")) return result(null, issues, document);
+
+  const entityIds = new Set(document.entities.map((entity) => entity.id));
+  const constructionByOutput = new Map<string, SceneDocument["constructions"][number]>();
+  for (const construction of document.constructions) {
+    for (const output of construction.outputs ?? []) {
+      if (typeof output === "string") constructionByOutput.set(output, construction);
+    }
+  }
+  const solverOnlyIds = implicitSolverEntityIds(document);
+  const groupIds = new Set(document.revealGroups.map((group) => group.id));
+  const actionIds = new Set(document.teachingTimeline.map((action) => action.id));
+  const requireEntity = (id: unknown, path: string) => {
+    if (typeof id !== "string" || (!entityIds.has(id) && !solverOnlyIds.has(id))) {
+      issues.push({ code: "dangling_entity", message: `Unknown entity ${String(id)}`, severity: "fatal", path, entityIds: typeof id === "string" ? [id] : undefined });
+    }
+  };
+
+  document.entities.forEach((entity, index) => {
+    if (!entity.kind || !entity.role) issues.push({ code: "incomplete_entity", message: "Entity requires kind and role", severity: "fatal", path: `entities[${index}]`, entityIds: [entity.id] });
+    if (entity.label && !isCompactDiagramLabel(entity.label)) {
+      issues.push({
+        code: "verbose_diagram_label",
+        message: "Diagram labels must be compact identifiers or values; put descriptive properties in narration",
+        severity: "warning",
+        path: `entities[${index}].label`,
+        entityIds: [entity.id],
+        actual: entity.label,
+      });
+    }
+    const requiredOperator = requiredOperatorForDerivedRole(entity);
+    const actualOperator = constructionByOutput.get(entity.id)?.operator;
+    const expectedComponentSymbol = recognizedComponentSymbol(
+      `${entity.id} ${entity.role} ${entity.label ?? ""}`.toLowerCase().replace(/[_-]+/g, " "),
+    );
+    const declaredAsComponent = entity.kind === "component" || entity.kind === "symbol";
+    if (declaredAsComponent && expectedComponentSymbol && actualOperator && actualOperator !== "symbol") {
+      issues.push({
+        code: "component_requires_symbol_operator",
+        message: `${entity.id} is a circuit component and must use the deterministic symbol operator`,
+        severity: "fatal",
+        path: `entities[${index}].kind`,
+        entityIds: [entity.id],
+        expected: "symbol",
+        actual: actualOperator,
+      });
+    }
+    const actualComponentSymbol = constructionByOutput.get(entity.id)?.inputs.symbol;
+    if (
+      declaredAsComponent &&
+      expectedComponentSymbol &&
+      actualOperator === "symbol" &&
+      actualComponentSymbol !== expectedComponentSymbol
+    ) {
+      issues.push({
+        code: "component_symbol_semantic_mismatch",
+        message: `${entity.id} must use the ${expectedComponentSymbol} symbol`,
+        severity: "fatal",
+        path: `entities[${index}].role`,
+        entityIds: [entity.id],
+        expected: expectedComponentSymbol,
+        actual: actualComponentSymbol,
+      });
+    }
+    // A principal ray in a paraxial mirror/lens construction is computed from
+    // the mirror or lens formula, not traced with the exact surface law — the
+    // exact spherical law cannot pass through the paraxial image point at all
+    // (that difference is spherical aberration). Such a ray may be drawn with
+    // segment/ray provided the construction says so, so the approximation is
+    // declared on the construction where this validator can see it rather than
+    // hidden by wording the role around the check.
+    const producer = constructionByOutput.get(entity.id);
+    const paraxialConstruction = (producer?.operator === "segment" || producer?.operator === "ray")
+      && isRecord(producer.inputs)
+      && producer.inputs.approximation === "paraxial";
+    // A tangent to a circle is derived by circle_tangent_at: its circle input
+    // must be a constructed circle and the compiler places the line through a
+    // point proven on it, perpendicular to the radius. tangent_line stays the
+    // derivation for a function, parametric or polar curve.
+    const derivedOperatorAccepted = paraxialConstruction
+      || (requiredOperator === "reflect_direction"
+        ? actualOperator === "reflect_direction" || actualOperator === "reflect_at"
+        : requiredOperator === "refract_direction"
+          ? actualOperator === "refract_direction" || actualOperator === "refract_at"
+          : requiredOperator === "tangent_line"
+            ? actualOperator === "tangent_line" || actualOperator === "circle_tangent_at"
+            : actualOperator === requiredOperator);
+    if (requiredOperator && actualOperator && !derivedOperatorAccepted) {
+      const tangentFit = requiredOperator === "tangent_line" ? tangentOperatorForCurveKind(document, entity) : null;
+      issues.push({
+        code: "derived_role_operator_mismatch",
+        message: tangentFit
+          ? `${entity.role} must be derived with ${tangentFit.advice}, not guessed with ${actualOperator}`
+          : `${entity.role} must be derived with ${requiredOperator}, not guessed with ${actualOperator}`,
+        severity: "fatal",
+        path: `entities[${index}].role`,
+        entityIds: [entity.id],
+        expected: tangentFit?.expected ?? requiredOperator,
+        actual: actualOperator,
+      });
+    }
+  });
+  document.constructions.forEach((construction, index) => {
+    if (!isSupportedSceneOperator(construction.operator)) issues.push({ code: "unsupported_operator", message: `Unsupported operator ${construction.operator}`, severity: "fatal", path: `constructions[${index}].operator` });
+    if (!isRecord(construction.inputs)) issues.push({ code: "invalid_inputs", message: "Construction inputs must be an object", severity: "fatal", path: `constructions[${index}].inputs` });
+    if (!Array.isArray(construction.outputs) || construction.outputs.length === 0) issues.push({ code: "missing_outputs", message: "Construction must declare outputs", severity: "fatal", path: `constructions[${index}].outputs` });
+    else construction.outputs.forEach((id, outputIndex) => requireEntity(id, `constructions[${index}].outputs[${outputIndex}]`));
+    if (construction.operator === "label") {
+      const target = construction.inputs.target ?? construction.inputs.at ?? construction.inputs.point;
+      requireEntity(target, `constructions[${index}].inputs.target`);
+      const text = construction.inputs.text;
+      const output = construction.outputs[0];
+      const entity = document.entities.find((candidate) => candidate.id === output);
+      if (
+        construction.outputs.length !== 1 ||
+        entity?.kind !== "label" ||
+        typeof text !== "string" ||
+        !isCompactDiagramLabel(text) ||
+        entity.label !== text
+      ) {
+        issues.push({
+          code: "invalid_label_construction",
+          message: "label requires one label output whose compact entity label matches inputs.text",
+          severity: "fatal",
+          path: `constructions[${index}]`,
+          entityIds: typeof output === "string" ? [output] : undefined,
+        });
+      }
+      if (typeof target === "string" && document.entities.find((candidate) => candidate.id === target)?.kind === "axes") {
+        issues.push({
+          code: "label_targets_axes",
+          message: `label ${String(output)} targets axes ${target}: an axes object has no point for a label, so the text would float in the middle of the plot and name neither axis. Remove this label construction and its label entity. To name the axes, use inputs xLabel and yLabel on the axes construction: only the bare coordinate names draw at the arrow tips ({"xLabel":"x","yLabel":"y"}, in a turn whose quantities are all x or y). Any other axis title, such as "V" or "P", is omitted, so name those quantities in the narration or on the curve instead.`,
+          severity: "fatal",
+          path: `constructions[${index}].inputs.target`,
+          entityIds: typeof output === "string" ? [output, target] : [target],
+        });
+      }
+    }
+    if (isRecord(construction.inputs)) {
+      if (COMPLEX_CONSTRUCTIONS.has(construction.operator)) validateComplexConstruction(construction, index, document, constructionByOutput, issues);
+      if (MAGNETIC_CONSTRUCTIONS.has(construction.operator)) validateMagneticConstruction(construction, index, document, constructionByOutput, issues);
+      if (RELATIVE_MOTION_CONSTRUCTIONS.has(construction.operator)) validateRelativeMotionConstruction(construction, index, document, constructionByOutput, issues);
+      if (NETWORK_CONSTRUCTIONS.has(construction.operator)) validateNetworkConstruction(construction, index, document, constructionByOutput, issues);
+      if (MECHANICS_DIAGRAM_CONSTRUCTIONS.has(construction.operator)) validateMechanicsDiagramConstruction(construction, index, document, constructionByOutput, issues);
+      if (CURRENT_FIELD_CONSTRUCTIONS.has(construction.operator)) validateCurrentFieldConstruction(construction, index, document, constructionByOutput, issues);
+      if (CHAPTER_REMAINDER_CONSTRUCTIONS.has(construction.operator)) validateChapterRemainderConstruction(construction, index, document, constructionByOutput, issues);
+      if (CHAPTER_INSTRUMENT_CONSTRUCTIONS.has(construction.operator)) validateChapterInstrumentConstruction(construction, index, document, constructionByOutput, issues);
+      if (FLUID_CONSTRUCTIONS.has(construction.operator)) validateFluidConstruction(construction, index, document, constructionByOutput, issues);
+      if (HARMONIC_MOTION_CONSTRUCTIONS.has(construction.operator)) validateHarmonicMotionConstruction(construction, index, document, constructionByOutput, issues);
+      if (GRAVITY_CONSTRUCTIONS.has(construction.operator)) validateGravityConstruction(construction, index, document, constructionByOutput, issues);
+      if (COMBINATORICS_CONSTRUCTIONS.has(construction.operator)) validateCombinatoricsConstruction(construction, index, document, constructionByOutput, issues);
+      if (ELASTICITY_CONSTRUCTIONS.has(construction.operator)) validateElasticityConstruction(construction, index, document, constructionByOutput, issues);
+      if (SET_CONSTRUCTIONS.has(construction.operator)) validateSetConstruction(construction, index, document, constructionByOutput, issues);
+      if (INDUCTION_CONSTRUCTIONS.has(construction.operator)) validateInductionConstruction(construction, index, document, constructionByOutput, issues);
+      if (ROTATION_CONSTRUCTIONS.has(construction.operator)) validateRotationConstruction(construction, index, document, constructionByOutput, issues);
+      if (STATISTICAL_CONSTRUCTIONS.has(construction.operator)) validateStatisticsConstruction(construction, index, document, constructionByOutput, issues);
+      if (TRIANGLE_CONSTRUCTIONS.has(construction.operator)) validateTriangleConstruction(construction, index, document, constructionByOutput, issues);
+      if (CONIC_CONSTRUCTIONS.has(construction.operator)) validateConicConstruction(construction, index, document, constructionByOutput, issues);
+      if (SPACE_DERIVATION_CONSTRUCTIONS.has(construction.operator)) validateSpaceDerivationConstruction(construction, index, document, constructionByOutput, issues, planSpaceView(document)?.projection);
+      if (PROBABILITY_CONSTRUCTIONS.has(construction.operator)) validateProbabilityConstruction(construction, index, document, constructionByOutput, issues);
+      if (FIELD_CONSTRUCTIONS.has(construction.operator)) validateFieldConstruction(construction, index, document, constructionByOutput, issues);
+      if (DIPOLE_FIELD_CONSTRUCTIONS.has(construction.operator)) validateDipoleFieldConstruction(construction, index, document, constructionByOutput, issues);
+      if (COORDINATE_LINE_CONSTRUCTIONS.has(construction.operator)) validateCoordinateLineConstruction(construction, index, document, constructionByOutput, issues);
+      if (RIGID_MASS_CONSTRUCTIONS.has(construction.operator)) validateRigidMassConstruction(construction, index, document, constructionByOutput, issues);
+      if (MATRIX_ARRAY_CONSTRUCTIONS.has(construction.operator)) validateMatrixArrayConstruction(construction, index, document, constructionByOutput, issues);
+      if (construction.operator === "block_flow") validateBlockFlowConstruction(construction, index, issues);
+      if ((LINEAR_REGION_OPERATORS as readonly string[]).includes(construction.operator)) validateLinearRegionConstruction(construction, index, document, issues);
+      if (CIRCLE_CONSTRUCTIONS.has(construction.operator)) validateCircleConstruction(construction, index, document, constructionByOutput, issues);
+      if (AFFINE_CONSTRUCTIONS.has(construction.operator)) validateAffineConstruction(construction, index, document, constructionByOutput, issues);
+      if (VECTOR_CONSTRUCTIONS.has(construction.operator)) validateVectorConstruction(construction, index, document, constructionByOutput, issues);
+      if (KINEMATICS_CONSTRUCTIONS.has(construction.operator)) validateKinematicsConstruction(construction, index, document, constructionByOutput, issues);
+      if (CALCULUS_CONSTRUCTIONS.has(construction.operator)) validateDerivedCurveConstruction(construction, index, document, constructionByOutput, issues);
+      if (AC_CONSTRUCTIONS.has(construction.operator)) validateAcConstruction(construction, index, document, constructionByOutput, issues);
+      if (WAVES_CONSTRUCTIONS.has(construction.operator)) validateWavesConstruction(construction, index, document, constructionByOutput, issues);
+      if (GEOMETRIC_OPTICS_CONSTRUCTIONS.has(construction.operator)) validateGeometricOpticsConstruction(construction, index, document, constructionByOutput, issues);
+      if (THERMODYNAMICS_CONSTRUCTIONS.has(construction.operator)) validateThermodynamicsConstruction(construction, index, document, constructionByOutput, issues);
+      if (construction.operator === "pv_process") validatePvProcessConstruction(construction, index, document, issues);
+      if (DISTRIBUTED_FIELDS_CONSTRUCTIONS.has(construction.operator)) validateDistributedFieldsConstruction(construction, index, document, constructionByOutput, issues);
+    }
+    if (construction.operator === "function_curve" && isRecord(construction.inputs)) {
+      validateFunctionCurveInputs(construction.inputs, index, document, issues);
+      if (!Array.isArray(construction.outputs) || construction.outputs.length !== 1) {
+        issues.push({
+          code: "invalid_function_curve_outputs",
+          message: "function_curve must produce exactly one curve entity",
+          severity: "fatal",
+          path: `constructions[${index}].outputs`,
+          actual: Array.isArray(construction.outputs) ? construction.outputs.length : construction.outputs,
+        });
+      }
+    }
+    if (construction.operator === "function_region" && isRecord(construction.inputs)) {
+      validateFunctionRegionConstruction(
+        construction,
+        index,
+        document,
+        constructionByOutput,
+        issues,
+      );
+    }
+    if (CALCULUS_OPERATORS.has(construction.operator) && isRecord(construction.inputs)) {
+      validateCalculusConstruction(
+        construction,
+        index,
+        document,
+        constructionByOutput,
+        issues,
+      );
+    }
+    if (MENSURATION_OPERATORS.has(construction.operator) && isRecord(construction.inputs)) {
+      validateMensurationConstruction(
+        construction,
+        index,
+        document,
+        constructionByOutput,
+        issues,
+      );
+    }
+    if (SPACE_OPERATORS.has(construction.operator) && isRecord(construction.inputs)) {
+      validateSpaceConstruction(
+        construction,
+        index,
+        document,
+        constructionByOutput,
+        issues,
+      );
+    }
+    if (WAVE_VISUAL_OPERATORS.has(construction.operator) && isRecord(construction.inputs)) {
+      validateWaveVisualConstruction(construction, index, document, constructionByOutput, issues);
+    }
+    if (SURFACE_RAY_OPERATORS.has(construction.operator) && isRecord(construction.inputs)) {
+      validateSurfaceRayConstruction(construction, index, document, constructionByOutput, issues);
+    }
+    if (construction.operator === "optical_train" && isRecord(construction.inputs)) {
+      validateOpticalTrainConstruction(construction, index, constructionByOutput, issues);
+    }
+    if (construction.operator === "spherical_surface" && isRecord(construction.inputs)) {
+      validateSphericalSurfaceConstruction(construction, index, constructionByOutput, issues);
+    }
+    if (construction.operator === "lens_section" && isRecord(construction.inputs)) {
+      validateLensSectionConstruction(construction, index, constructionByOutput, issues);
+    }
+    if (construction.operator === "polygon" && Array.isArray(construction.outputs)) {
+      const output = construction.outputs[0];
+      if (
+        polygonHasRegionRole(construction, document) &&
+        polygonClaimsGraphRegion(construction, document, constructionByOutput) &&
+        !polygonIsGraphRegion(construction, document, constructionByOutput)
+      ) {
+        issues.push({
+          code: "function_region_requires_deterministic_operator",
+          message: "A region bounded by a graph must use function_region with that graph as a boundary; a polygon is accepted only when it is exactly the region under the graph's own points",
+          severity: "fatal",
+          path: `constructions[${index}].operator`,
+          entityIds: typeof output === "string" ? [output] : undefined,
+        });
+      }
+    }
+  });
+  const directionTransforms = document.constructions.filter((construction) =>
+    construction.operator === "reflect_direction" || construction.operator === "refract_direction",
+  );
+  if (directionTransforms.length > 0) {
+    directionTransforms.forEach((construction) => {
+      if (typeof construction.inputs.normal !== "string") {
+        issues.push({
+          code: "normal_must_be_constructed",
+          message: `${construction.id} must reference constructed normal geometry instead of a guessed vector`,
+          severity: "fatal",
+          path: `constructions.${construction.id}.inputs.normal`,
+          actual: construction.inputs.normal,
+        });
+      }
+    });
+    const usedIncomingIds = new Set(
+      directionTransforms
+        .map((construction) => construction.inputs.incoming)
+        .filter((value): value is string => typeof value === "string"),
+    );
+    document.entities.forEach((entity, index) => {
+      const pathLike = ["ray", "vector", "line", "segment", "polyline"].includes(entity.kind);
+      if (pathLike && /\bincident[ _-]?ray\b/i.test(entity.role) && !usedIncomingIds.has(entity.id)) {
+        issues.push({
+          code: "incident_ray_not_used",
+          message: `${entity.id} is drawn as an incident ray but is not the incoming geometry of any reflection or refraction`,
+          severity: "fatal",
+          path: `entities[${index}].role`,
+          entityIds: [entity.id],
+        });
+      }
+    });
+  }
+  document.relations.forEach((relation, index) => relation.entities.forEach((id, ref) => requireEntity(id, `relations[${index}].entities[${ref}]`)));
+  document.assertions.forEach((assertion, index) => {
+    assertion.entities.forEach((id, ref) => requireEntity(id, `assertions[${index}].entities[${ref}]`));
+    if (assertion.predicate === "function_value") {
+      const operator = constructionByOutput.get(assertion.entities[0] ?? "")?.operator;
+      if (
+        assertion.entities.length !== 1 ||
+        (!SAMPLED_CURVE_OPERATORS.has(String(operator ?? "")) && !GRAPH_POLYLINE_OPERATORS.has(String(operator ?? ""))) ||
+        !isRecord(assertion.expected) ||
+        typeof assertion.expected.x !== "number" ||
+        !Number.isFinite(assertion.expected.x) ||
+        typeof assertion.expected.y !== "number" ||
+        !Number.isFinite(assertion.expected.y)
+      ) {
+        issues.push({
+          code: "invalid_function_assertion",
+          message: "function_value requires one sampled curve or polyline graph entity and finite expected {x, y}",
+          severity: "fatal",
+          path: `assertions[${index}]`,
+        });
+      }
+    }
+    if (assertion.predicate === "root") {
+      const expectedX = typeof assertion.expected === "number"
+        ? assertion.expected
+        : isRecord(assertion.expected) ? assertion.expected.x : undefined;
+      if (
+        assertion.entities.length !== 1 ||
+        constructionByOutput.get(assertion.entities[0] ?? "")?.operator !== "function_curve" ||
+        typeof expectedX !== "number" ||
+        !Number.isFinite(expectedX)
+      ) {
+        issues.push({
+          code: "invalid_function_assertion",
+          message: "root requires one curve entity and a finite expected x or {x}",
+          severity: "fatal",
+          path: `assertions[${index}]`,
+        });
+      }
+    }
+  });
+  validateOpticalInstrumentProofContract(document, issues);
+  document.annotations.forEach((annotation, index) => {
+    if (annotation.labelMode !== undefined &&
+        ((annotation.labelMode !== "append" && annotation.labelMode !== "replace") || annotation.kind !== "label" ||
+          (annotation.labelMode === "append" && (annotation.quantityId !== undefined || annotation.targetIds.length !== 1 || !annotation.text?.trim())))) {
+      issues.push({ code: "invalid_annotation_label_mode", message: "labelMode is append or replace on labels; append requires one target, literal text and no quantityId", severity: "fatal", path: `annotations[${index}].labelMode`, entityIds: annotation.targetIds });
+    }
+    annotation.targetIds.forEach((id, ref) => requireEntity(id, `annotations[${index}].targetIds[${ref}]`));
+    if (!(SCENE_ANNOTATION_KINDS as readonly string[]).includes(annotation.kind)) {
+      issues.push({
+        code: "unknown_annotation_kind",
+        message: `Unsupported annotation kind ${annotation.kind}`,
+        severity: "fatal",
+        path: `annotations[${index}].kind`,
+        entityIds: [annotation.id],
+      });
+    }
+    if (annotation.kind === "label" && annotation.text && !isCompactDiagramLabel(annotation.text)) {
+      issues.push({
+        code: "verbose_diagram_label",
+        message: "Diagram labels must be compact identifiers or values; use a callout or narration for prose",
+        severity: "warning",
+        path: `annotations[${index}].text`,
+        entityIds: annotation.targetIds,
+        actual: annotation.text,
+      });
+    }
+  });
+  document.requiredEntityIds.forEach((id, index) => requireEntity(id, `requiredEntityIds[${index}]`));
+
+  const grouped = new Set<string>();
+  document.revealGroups.forEach((group, index) => {
+    group.entityIds.forEach((id, ref) => { requireEntity(id, `revealGroups[${index}].entityIds[${ref}]`); grouped.add(id); });
+    group.dependsOn.forEach((id, ref) => {
+      if (!groupIds.has(id)) issues.push({ code: "dangling_group_dependency", message: `Unknown reveal group ${id}`, severity: "fatal", path: `revealGroups[${index}].dependsOn[${ref}]` });
+    });
+  });
+  document.requiredEntityIds.forEach((id) => {
+    if (!grouped.has(id)) issues.push({ code: "unrevealed_required_entity", message: `Required entity ${id} is not in a reveal group`, severity: "fatal", entityIds: [id] });
+  });
+  const required = new Set(document.requiredEntityIds);
+  document.entities.forEach((entity, index) => {
+    if (solverOnlyIds.has(entity.id) || entity.kind === "group") return;
+    if (!required.has(entity.id)) {
+      issues.push({
+        code: "unrequired_entity",
+        message: `Entity ${entity.id} is not declared in requiredEntityIds; add ${entity.id} to requiredEntityIds, since every declared or constructed entity is drawn`,
+        severity: "fatal",
+        path: `entities[${index}]`,
+        entityIds: [entity.id],
+      });
+    }
+    if (!grouped.has(entity.id)) {
+      issues.push({
+        code: "ungrouped_entity",
+        message: `Entity ${entity.id} is not assigned to a reveal group; add ${entity.id} to the entityIds of one reveal group`,
+        severity: "fatal",
+        path: `entities[${index}]`,
+        entityIds: [entity.id],
+      });
+    }
+  });
+  document.teachingTimeline.forEach((action, index) => {
+    const validTarget = groupIds.has(action.targetId) || entityIds.has(action.targetId) || document.annotations.some((annotation) => annotation.id === action.targetId);
+    if (!validTarget) issues.push({ code: "dangling_timeline_target", message: `Unknown timeline target ${action.targetId}`, severity: "fatal", path: `teachingTimeline[${index}].targetId` });
+    action.dependsOn.forEach((id, ref) => {
+      if (!actionIds.has(id)) issues.push({ code: "dangling_action_dependency", message: `Unknown teaching action ${id}`, severity: "fatal", path: `teachingTimeline[${index}].dependsOn[${ref}]` });
+    });
+  });
+  checkAcyclic(document.revealGroups.map((item) => ({ id: item.id, deps: item.dependsOn })), "revealGroups", issues);
+  checkAcyclic(document.teachingTimeline.map((item) => ({ id: item.id, deps: item.dependsOn })), "teachingTimeline", issues);
+
+  if (document.visualDecision.mode === "text_only") {
+    const structuralCount = document.entities.length + document.constructions.length + document.revealGroups.length;
+    if (structuralCount !== 0) issues.push({ code: "text_only_has_scene", message: "text_only documents must not contain scene geometry", severity: "fatal", actual: structuralCount });
+  } else if (document.requiredEntityIds.length === 0) {
+    issues.push({ code: "empty_required_scene", message: "A scene must declare requiredEntityIds", severity: "fatal", path: "requiredEntityIds" });
+  }
+
+  if (!issues.some((issue) => issue.severity === "fatal")) issues.push(...validateMatrixSourceBinding(document));
+
+  return result(issues.some((issue) => issue.severity === "fatal") ? null : document, issues, document);
+}
+
+function constructionByOutput(
+  constructions: unknown[],
+  id: unknown,
+): Record<string, unknown> | null {
+  if (typeof id !== "string") return null;
+  for (const construction of constructions) {
+    if (!isRecord(construction) || !Array.isArray(construction.outputs)) continue;
+    if (construction.outputs.includes(id)) return construction;
+  }
+  return null;
+}
+
+function inferRevolutionSliceMethod(
+  inputs: Record<string, unknown>,
+  constructions: unknown[],
+): "disk" | "washer" | null {
+  const atX = typeof (inputs.atX ?? inputs.x ?? inputs.at) === "number"
+    ? Number(inputs.atX ?? inputs.x ?? inputs.at)
+    : null;
+  const axisY = inputs.axisY === undefined ? 0
+    : typeof inputs.axisY === "number" ? inputs.axisY
+    : null;
+  if (atX === null || !Number.isFinite(atX) || axisY === null || !Number.isFinite(axisY)) return null;
+  const upper = constructionByOutput(constructions, inputs.upper ?? inputs.top);
+  const lower = constructionByOutput(constructions, inputs.lower ?? inputs.bottom);
+  if (upper?.operator !== "function_curve" || lower?.operator !== "function_curve") return null;
+  if (!isRecord(upper.inputs) || !isRecord(lower.inputs)) return null;
+  try {
+    const upperY = parseMathExpression(String(upper.inputs.expression)).evaluate(atX);
+    const lowerY = parseMathExpression(String(lower.inputs.expression)).evaluate(atX);
+    const inner = Math.min(Math.abs(upperY - axisY), Math.abs(lowerY - axisY));
+    const outer = Math.max(Math.abs(upperY - axisY), Math.abs(lowerY - axisY));
+    if (!(outer > inner + 1e-6)) return null;
+    return inner <= 1e-6 ? "disk" : "washer";
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Normalize unambiguous JSON-shape drift at the model boundary. This keeps the
+ * scene contract semantic: aliases are repaired, while geometry and proofs
+ * remain subject to the normal deterministic validator/compiler.
+ */
+function normalizeGenericPlannerSchema(raw: Record<string, unknown>): Record<string, unknown> {
+  const entities: unknown[] = Array.isArray(raw.entities)
+    ? raw.entities.map((entity) => {
+        if (!isRecord(entity)) return entity;
+        const kind = entity.kind === "curve" || entity.kind === "graph"
+          ? "polyline"
+          : entity.kind === "symbol" ? "component"
+          : entity.kind;
+        const role = typeof entity.role === "string" && entity.role.trim()
+          ? entity.role
+          : kind === "polyline" && (entity.kind === "curve" || entity.kind === "graph")
+            ? "function graph"
+            : typeof kind === "string" ? kind.replace(/_/g, " ") : "helper";
+        return { ...entity, kind, role };
+      })
+    : [];
+  const entityIds = new Set(entities.flatMap((entity) =>
+    isRecord(entity) && typeof entity.id === "string" ? [entity.id] : [],
+  ));
+  const constructions: unknown[] = Array.isArray(raw.constructions)
+    ? raw.constructions.map((construction) => {
+        if (!isRecord(construction)) return construction;
+        const outputs = typeof construction.outputs === "string"
+          ? [construction.outputs]
+          : Array.isArray(construction.outputs) ? construction.outputs : [];
+        return {
+          ...construction,
+          outputs,
+          id: typeof construction.id === "string"
+            ? construction.id
+            : typeof outputs[0] === "string" ? `construct_${outputs[0]}` : construction.id,
+        };
+      })
+    : [];
+  if (Array.isArray(entities) && Array.isArray(constructions)) {
+    const sampledCurveOperators = new Set(["function_curve", "parametric_curve", "polar_curve", "implicit_curve"]);
+    const sampledCurveKinds = new Set([
+      "curve", "graph", "line", "segment", "path",
+      "function_curve", "parametric_curve", "polar_curve", "implicit_curve",
+    ]);
+    for (const construction of constructions) {
+      if (!isRecord(construction) || !sampledCurveOperators.has(String(construction.operator ?? ""))) continue;
+      const outputs = Array.isArray(construction.outputs) ? construction.outputs : [];
+      for (const output of outputs) {
+        if (typeof output !== "string") continue;
+        const entity = entities.find((candidate) => isRecord(candidate) && candidate.id === output);
+        if (isRecord(entity) && (sampledCurveKinds.has(String(entity.kind ?? "")) || entity.kind !== "polyline")) {
+          entity.kind = "polyline";
+          if (typeof entity.role !== "string" || entity.role.trim() === "" || sampledCurveKinds.has(String(entity.role))) {
+            entity.role = `${String(construction.operator).replace(/_/g, " ")} graph`;
+          }
+        }
+      }
+    }
+    const sliceOutputKinds = new Set(["region", "segment", "line", "path", "curve", "polygon"]);
+    const question = isRecord(raw.source) && typeof raw.source.question === "string"
+      ? raw.source.question
+      : "";
+    const revolutionAsked = /\b(?:disk|disc|washer|revolv(?:e|ed|ing)?|solid of revolution|volume of revolution)\b/i.test(question);
+    for (const construction of constructions) {
+      if (!isRecord(construction) || String(construction.operator ?? "") !== "representative_slice") continue;
+      const inputs = isRecord(construction.inputs) ? { ...construction.inputs } : {};
+      construction.inputs = inputs;
+      if (revolutionAsked && (inputs.method === undefined || inputs.method === "strip")) {
+        const inferred = inferRevolutionSliceMethod(inputs, constructions);
+        if (inferred) {
+          inputs.method = inferred;
+          if (inputs.axisY === undefined) inputs.axisY = 0;
+        }
+      }
+      const diskLike = inputs.method === "disk" || inputs.method === "washer";
+      const outputs = Array.isArray(construction.outputs) ? construction.outputs : [];
+      for (const output of outputs) {
+        if (typeof output !== "string") continue;
+        const entity = entities.find((candidate) => isRecord(candidate) && candidate.id === output);
+        if (isRecord(entity) && sliceOutputKinds.has(String(entity.kind ?? ""))) {
+          entity.kind = diskLike ? "polyline" : "segment";
+        }
+      }
+    }
+    for (const construction of constructions) {
+      if (!isRecord(construction) || String(construction.operator ?? "") !== "solid_of_revolution") continue;
+      const outputs = Array.isArray(construction.outputs) ? construction.outputs : [];
+      for (const output of outputs) {
+        if (typeof output !== "string") continue;
+        const entity = entities.find((candidate) => isRecord(candidate) && candidate.id === output);
+        const kind = isRecord(entity) ? String(entity.kind ?? "") : "";
+        if (isRecord(entity) && ["solid", "region", "path", "curve"].includes(kind)) {
+          entity.kind = "polygon";
+        }
+      }
+    }
+    for (const construction of constructions) {
+      if (!isRecord(construction) || !Array.isArray(construction.outputs)) continue;
+      for (const output of construction.outputs) {
+        if (typeof output !== "string" || entityIds.has(output)) continue;
+        const operator = String(construction.operator ?? "");
+        const kind = operator === "function_curve" || operator === "parametric_curve" || operator === "polar_curve" || operator === "implicit_curve" ? "polyline"
+          : operator === "axes" ? "axes"
+            : operator === "label" ? "label"
+              : operator === "polygon" ? "polygon"
+                : operator === "polyline" ? "polyline"
+                  : operator === "circle" ? "circle"
+                    : operator === "arc" || operator === "spherical_surface" ? "arc"
+                      : operator === "lens_section" ? "polygon"
+                      : operator === "point" || operator === "solid_anchor" ? "point"
+                            : operator === "vector" ? "vector"
+                            : operator === "dimension" ? "dimension"
+                              : operator === "sign_badge" ? "vector"
+                              : operator === "function_region" || operator === "solid_of_revolution" ? "polygon"
+                                : operator === "solid_projection" || operator === "solid_cross_section" ? "polyline"
+                                : operator === "space_frame" ? "polyline"
+                                : operator === "space_point" ? "point"
+                                : operator === "space_line" ? "line"
+                                : operator === "plane" ? "polygon"
+                                : operator === "tangent_line" || operator === "normal_line" ? "segment"
+                                  : operator === "representative_slice"
+                                    ? (isRecord(construction.inputs) && (construction.inputs.method === "disk" || construction.inputs.method === "washer") ? "polyline" : "segment")
+                            : "segment";
+        entities.push({
+          id: output,
+          kind,
+          role: operator === "point" ? "construction helper" : `${operator.replace(/_/g, " ")} geometry`,
+          [INFERRED_CONSTRUCTION_ENTITY]: true,
+        });
+        entityIds.add(output);
+      }
+    }
+  }
+  normalizeBareSpaceFrameAnchor(constructions);
+  return {
+    ...raw,
+    entities,
+    constructions: normalizeOperatorInputAliases(constructions, raw.quantities),
+  };
+}
+
+/**
+ * A space_frame origin is only the page anchor of a projected 3D frame; every
+ * world coordinate, angle and proof is measured inside the frame. When the
+ * document has exactly one frame, its anchor point gives no coordinates at
+ * all, and the whole figure lives in that frame, anchor it at (0, 0). A second
+ * frame or any other 2D construction makes the anchor meaningful, so the
+ * document is left for the validator.
+ */
+function normalizeBareSpaceFrameAnchor(constructions: unknown[]): void {
+  const frames = constructions.filter((construction) => isRecord(construction) && construction.operator === "space_frame");
+  if (frames.length !== 1) return;
+  const frameInputs = (frames[0] as Record<string, unknown>).inputs;
+  const originId = isRecord(frameInputs) ? frameInputs.origin ?? frameInputs.center : undefined;
+  if (typeof originId !== "string") return;
+  const frameOperators = new Set(["space_frame", "space_point", "space_line", "plane", ...SPACE_DERIVATION_OPERATORS]);
+  let anchor: Record<string, unknown> | null = null;
+  for (const construction of constructions) {
+    if (!isRecord(construction)) return;
+    const outputs = Array.isArray(construction.outputs) ? construction.outputs : [];
+    if (anchor === null && construction.operator === "point" && outputs.length === 1 && outputs[0] === originId) {
+      anchor = construction;
+      continue;
+    }
+    if (!frameOperators.has(String(construction.operator ?? ""))) return;
+  }
+  if (!anchor || !isRecord(anchor.inputs) || anchor.inputs.x !== undefined || anchor.inputs.y !== undefined) return;
+  anchor.inputs = { ...anchor.inputs, x: 0, y: 0 };
+}
+
+export function implicitSolverEntityIds(document: SceneDocument): Set<string> {
+  const required = new Set(document.requiredEntityIds);
+  const grouped = new Set(document.revealGroups.flatMap((group) => group.entityIds));
+  const referenced = new Set<string>();
+  for (const construction of document.constructions) {
+    collectStrings(construction.inputs, (value) => referenced.add(value));
+  }
+  for (const assertion of document.assertions) {
+    assertion.entities.forEach((id) => referenced.add(id));
+  }
+  for (const relation of document.relations) {
+    relation.entities.forEach((id) => referenced.add(id));
+  }
+
+  return new Set(document.constructions.flatMap((construction) => {
+    if (construction.operator === "normal_at") {
+      return construction.outputs.filter((output) => {
+        const entity = document.entities.find((candidate) => candidate.id === output);
+        // The operator serves both invisible optical normals and visible
+        // contact forces. A required reaction vector must keep its ink.
+        const reaction = entity?.kind === "vector"
+          && /\b(?:force|reaction)\b/i.test(entity.role ?? "")
+          && (required.has(output) || grouped.has(output));
+        return !reaction;
+      });
+    }
+    if (construction.operator === "reflect_at" || construction.operator === "refract_at") {
+      const normalId = construction.outputs[1];
+      return normalId && !required.has(normalId) ? [normalId] : [];
+    }
+    if (construction.operator === "surface_contact") {
+      const hitPointId = construction.outputs[0];
+      return hitPointId && !required.has(hitPointId) ? [hitPointId] : [];
+    }
+    if (
+      construction.operator === "point" ||
+      construction.operator === "solid_anchor" ||
+      construction.operator === "midpoint" ||
+      construction.operator === "rotate" ||
+      construction.operator === "project"
+    ) {
+      const output = construction.outputs[0];
+      return output && isImplicitConstructionPoint(output, document) ? [output] : [];
+    }
+    if (
+      !["line", "parallel_through", "perpendicular_through"].includes(construction.operator)
+    ) return [];
+    return construction.outputs.filter((output) => {
+      if (required.has(output) || grouped.has(output) || !referenced.has(output)) return false;
+      const entity = document.entities.find((candidate) => candidate.id === output);
+      if (entity?.label) return false;
+      if (document.annotations.some((annotation) => annotation.targetIds.includes(output))) return false;
+      return true;
+    });
+  }));
+}
+
+/**
+ * Construction outputs are semantic declarations. Recover visible incident
+ * paths and reconcile explicit reveal ownership before strict validation, so
+ * planner bookkeeping omissions do not hide otherwise verifiable geometry.
+ */
+function reconcileConstructionOwnership(raw: Record<string, unknown>): void {
+  if (
+    !Array.isArray(raw.entities) ||
+    !Array.isArray(raw.constructions) ||
+    !Array.isArray(raw.requiredEntityIds) ||
+    !Array.isArray(raw.revealGroups)
+  ) return;
+
+  const entities = raw.entities;
+  const entityIds = new Set(entities.flatMap((entity) =>
+    isRecord(entity) && typeof entity.id === "string" ? [entity.id] : [],
+  ));
+  const entityById = new Map(entities.flatMap((entity) =>
+    isRecord(entity) && typeof entity.id === "string"
+      ? [[entity.id, entity] as const]
+      : [],
+  ));
+  const required = new Set(raw.requiredEntityIds.filter((id): id is string => typeof id === "string"));
+  for (const id of required) {
+    if (entityById.get(id)?.kind === "group") required.delete(id);
+  }
+  const groups = raw.revealGroups.filter(isRecord);
+
+  const assignOwnerGroup = (entityId: string, construction?: Record<string, unknown>): void => {
+    if (groups.some((group) => Array.isArray(group.entityIds) && group.entityIds.includes(entityId))) return;
+    const referencedInputs = new Set<string>();
+    if (construction && isRecord(construction.inputs)) {
+      collectStrings(construction.inputs, (value) => referencedInputs.add(value));
+    }
+    const candidates = groups.filter((group) =>
+      Array.isArray(group.entityIds) && group.entityIds.some((id) =>
+        typeof id === "string" && referencedInputs.has(id)),
+    );
+    const owner = candidates.length === 1
+      ? candidates[0]
+      : groups[0];
+    if (owner && Array.isArray(owner.entityIds)) owner.entityIds.push(entityId);
+  };
+
+  for (const group of groups) {
+    if (!Array.isArray(group.entityIds)) continue;
+    for (const id of group.entityIds) {
+      if (
+        typeof id === "string" &&
+        entityIds.has(id) &&
+        entityById.get(id)?.kind !== "group"
+      ) required.add(id);
+    }
+  }
+
+
+  const producerByOutput = new Map<string, Record<string, unknown>>();
+  for (const construction of raw.constructions) {
+    if (!isRecord(construction) || !Array.isArray(construction.outputs)) continue;
+    for (const output of construction.outputs) {
+      if (typeof output === "string") producerByOutput.set(output, construction);
+    }
+    const kind = visibleConstructionKind(construction);
+    if (!kind) continue;
+    for (const output of construction.outputs) {
+      if (typeof output !== "string") continue;
+      const declared = entityIds.has(output);
+      if (!declared) {
+        entities.push({ id: output, kind, role: kind === "connector" ? "connection" : kind });
+        entityIds.add(output);
+        entityById.set(output, entities.at(-1) as Record<string, unknown>);
+      }
+      const entity = entityById.get(output);
+      if (entity?.[INFERRED_CONSTRUCTION_ENTITY] === true || !declared) {
+        required.add(output);
+        assignOwnerGroup(output, construction);
+      }
+    }
+  }
+  for (const id of required) assignOwnerGroup(id, producerByOutput.get(id));
+
+  for (const construction of raw.constructions) {
+    if (
+      !isRecord(construction) ||
+      construction.operator !== "surface_contact" ||
+      !Array.isArray(construction.outputs)
+    ) continue;
+    const incidentId = construction.outputs[1];
+    if (typeof incidentId !== "string") continue;
+    if (!entityIds.has(incidentId)) {
+      entities.push({ id: incidentId, kind: "vector", role: "incident ray" });
+      entityIds.add(incidentId);
+    }
+    required.add(incidentId);
+
+    const consumer = raw.constructions.find((candidate) =>
+      isRecord(candidate) &&
+      (candidate.operator === "reflect_direction" || candidate.operator === "refract_direction") &&
+      isRecord(candidate.inputs) &&
+      candidate.inputs.incoming === incidentId,
+    );
+    const resultId = isRecord(consumer) && Array.isArray(consumer.outputs) && typeof consumer.outputs[0] === "string"
+      ? consumer.outputs[0]
+      : undefined;
+    const ownerGroup = groups.find((group) =>
+      Array.isArray(group.entityIds) && resultId && group.entityIds.includes(resultId),
+    ) ?? groups.find((group) => {
+      if (!Array.isArray(group.entityIds) || !isRecord(construction.inputs)) return false;
+      const groupEntityIds = group.entityIds;
+      return [construction.inputs.origin, construction.inputs.surface]
+        .some((id) => typeof id === "string" && groupEntityIds.includes(id));
+    });
+    if (ownerGroup && Array.isArray(ownerGroup.entityIds) && !ownerGroup.entityIds.includes(incidentId)) {
+      ownerGroup.entityIds.push(incidentId);
+    }
+  }
+
+  for (const annotation of Array.isArray(raw.annotations) ? raw.annotations : []) {
+    if (!isRecord(annotation) || !Array.isArray(annotation.targetIds)) continue;
+    for (const targetId of annotation.targetIds) {
+      if (typeof targetId !== "string") continue;
+      const target = entities.find((entity) =>
+        isRecord(entity) && entity.id === targetId,
+      );
+      if (
+        !isRecord(target) ||
+        target.kind !== "point" ||
+        typeof target.role !== "string" ||
+        typeof target.label === "string"
+      ) continue;
+      const consumerOutputs = raw.constructions.flatMap((construction) =>
+        isRecord(construction) &&
+        isRecord(construction.inputs) &&
+        referencesEntityId(construction.inputs, targetId) &&
+        Array.isArray(construction.outputs)
+          ? construction.outputs.filter((id): id is string => typeof id === "string")
+          : [],
+      );
+      const ownerGroup = groups.find((group) => {
+        const entityIds = group.entityIds;
+        return Array.isArray(entityIds) &&
+          consumerOutputs.some((output) => entityIds.includes(output));
+      }) ?? (groups.length === 1 ? groups[0] : undefined);
+      if (!ownerGroup || !Array.isArray(ownerGroup.entityIds)) continue;
+      required.add(targetId);
+      if (!ownerGroup.entityIds.includes(targetId)) ownerGroup.entityIds.push(targetId);
+    }
+  }
+  for (const entity of entities) {
+    if (isRecord(entity)) delete entity[INFERRED_CONSTRUCTION_ENTITY];
+    if (
+      !isRecord(entity) ||
+      entity.kind !== "group" ||
+      typeof entity.id !== "string"
+    ) continue;
+    const entityKeys = [entity.id, entity.role]
+      .filter((value): value is string => typeof value === "string")
+      .map(normalizeSemanticGroupKey)
+      .filter(Boolean);
+    const ownerGroup = groups.find((group) =>
+      typeof group.id === "string" &&
+      entityKeys.includes(normalizeSemanticGroupKey(group.id)),
+    );
+    if (
+      ownerGroup &&
+      Array.isArray(ownerGroup.entityIds) &&
+      !ownerGroup.entityIds.includes(entity.id)
+    ) {
+      ownerGroup.entityIds.push(entity.id);
+    }
+  }
+  raw.requiredEntityIds = [...required];
+}
+
+function normalizeSemanticGroupKey(value: string): string {
+  return value.toLowerCase()
+    .replace(/(?:group|frame|view|diagram)/g, "")
+    .replace(/[^a-z0-9]+/g, "");
+}
+
+function referencesEntityId(value: unknown, entityId: string): boolean {
+  if (value === entityId) return true;
+  if (Array.isArray(value)) return value.some((item) => referencesEntityId(item, entityId));
+  if (isRecord(value)) return Object.values(value).some((item) => referencesEntityId(item, entityId));
+  return false;
+}
+
+function checkAcyclic(nodes: Array<{ id: string; deps: string[] }>, path: string, issues: SceneIssue[]): void {
+  const state = new Map<string, number>();
+  const visit = (id: string): boolean => {
+    if (state.get(id) === 1) return false;
+    if (state.get(id) === 2) return true;
+    state.set(id, 1);
+    const node = nodes.find((candidate) => candidate.id === id);
+    for (const dep of node?.deps ?? []) if (!visit(dep)) return false;
+    state.set(id, 2);
+    return true;
+  };
+  for (const node of nodes) if (!visit(node.id)) { issues.push({ code: "dependency_cycle", message: `${path} contains a dependency cycle`, severity: "fatal", path }); break; }
+}
+
+function result(document: SceneDocument | null, issues: SceneIssue[], statsDocument?: SceneDocument): ValidationResult {
+  const source = statsDocument ?? document;
+  const diagnosticIssues = issues.map((issue) => {
+    const assertionIndex = issue.path?.match(/^assertions\[(\d+)\]/)?.[1];
+    const constructionIndex = issue.path?.match(/^constructions\[(\d+)\]/)?.[1];
+    const assertionId = assertionIndex === undefined ? undefined : source?.assertions?.[Number(assertionIndex)]?.id;
+    const constructionId = constructionIndex === undefined ? undefined : source?.constructions?.[Number(constructionIndex)]?.id;
+    return { ...issue,
+      ...(typeof assertionId === "string" ? { assertionId } : {}),
+      ...(typeof constructionId === "string" ? { constructionId } : {}),
+    };
+  });
+  const report: ValidationReport = {
+    engineVersion: SCENE_ENGINE_VERSION,
+    valid: !issues.some((issue) => issue.severity === "fatal"),
+    issues: diagnosticIssues,
+    stats: { entityCount: source?.entities.length ?? 0, constructionCount: source?.constructions.length ?? 0, primitiveCount: 0, assertionCount: source?.assertions.length ?? 0 },
+  };
+  return { document, report };
+}
+
+function validateCalculusConstruction(
+  construction: SceneDocument["constructions"][number],
+  index: number,
+  document: SceneDocument,
+  constructionByOutput: Map<string, SceneDocument["constructions"][number]>,
+  issues: SceneIssue[],
+): void {
+  const operator = construction.operator;
+  const inputs = construction.inputs;
+  if (construction.outputs.length !== 1) {
+    issues.push({
+      code: `invalid_${operator}_outputs`,
+      message: `${operator} must produce exactly one visible entity`,
+      severity: "fatal",
+      path: `constructions[${index}].outputs`,
+      actual: construction.outputs.length,
+    });
+  }
+
+  const output = construction.outputs[0];
+  const outputKind = document.entities.find((entity) => entity.id === output)?.kind;
+  const allowedOutputKinds = operator === "solid_of_revolution"
+    ? ["polygon", "polyline"]
+    : operator === "parametric_curve" || operator === "polar_curve" || operator === "implicit_curve"
+      ? ["polyline"]
+      : operator === "representative_slice"
+        ? ["segment", "line", "polyline"]
+        : ["line", "segment", "polyline"];
+  if (output && outputKind && !allowedOutputKinds.includes(outputKind)) {
+    issues.push({
+      code: `invalid_${operator}_output_kind`,
+      message: `${operator} output must use entity kind ${allowedOutputKinds.join(" or ")}`,
+      severity: "fatal",
+      path: `constructions[${index}].outputs[0]`,
+      entityIds: [output],
+      expected: allowedOutputKinds,
+      actual: outputKind,
+    });
+  }
+
+  if (operator === "parametric_curve") {
+    validateParameterizedCurveInputs(inputs, index, document, issues, {
+      operator,
+      parameter: "t",
+      minKey: "tMin",
+      maxKey: "tMax",
+      expressions: ["xExpression", "yExpression"],
+    });
+    return;
+  }
+  if (operator === "polar_curve") {
+    validateParameterizedCurveInputs(inputs, index, document, issues, {
+      operator,
+      parameter: "theta",
+      minKey: "thetaMin",
+      maxKey: "thetaMax",
+      expressions: ["radiusExpression"],
+    });
+    return;
+  }
+  if (operator === "implicit_curve") {
+    validateImplicitCurveInputs(inputs, index, document, issues);
+    return;
+  }
+
+  const producerFor = (value: unknown) => typeof value === "string" ? constructionByOutput.get(value) : undefined;
+  const addBadReference = (key: string, expected: string, value: unknown, hint = "") => issues.push({
+    code: `invalid_${operator}_curve_reference`,
+    message: `${operator} ${key} must reference ${expected}${hint}`,
+    severity: "fatal" as const,
+    path: `constructions[${index}].inputs.${key}`,
+    entityIds: typeof value === "string" ? [value] : undefined,
+    actual: value,
+  });
+
+  if (operator === "tangent_line" || operator === "normal_line") {
+    const curveId = inputs.curve ?? inputs.target;
+    const producer = producerFor(curveId);
+    if (producer && ANALYTIC_TANGENT_CURVE_OPERATORS.has(producer.operator)) {
+      validateCurveAnalyticLineConstruction(construction, index, document, constructionByOutput, issues);
+      return;
+    }
+    if (!producer || !SAMPLED_CURVE_OPERATORS.has(producer.operator)) {
+      addBadReference(
+        "curve",
+        "a function_curve, parametric_curve, or polar_curve",
+        curveId,
+        operator === "tangent_line" ? "; for a tangent to a circle use circle_tangent_at with the circle, a point on it and a span" : "",
+      );
+      return;
+    }
+    const domain = sampledCurveDomain(producer, document);
+    const at = validationNumber(inputs.at ?? inputs.parameter ?? inputs.atX, document);
+    if (!domain || at === null || !(at > domain.min && at < domain.max)) {
+      issues.push({
+        code: `invalid_${operator}_parameter`,
+        message: `${operator} requires a finite parameter strictly inside the curve domain`,
+        severity: "fatal",
+        path: `constructions[${index}].inputs.at`,
+        expected: domain,
+        actual: inputs.at ?? inputs.parameter ?? inputs.atX,
+      });
+    }
+    const span = inputs.span === undefined ? 1 : validationNumber(inputs.span, document);
+    if (span === null || !(span > 0)) {
+      issues.push({
+        code: `invalid_${operator}_span`,
+        message: `${operator} span must be a positive finite number`,
+        severity: "fatal",
+        path: `constructions[${index}].inputs.span`,
+        actual: inputs.span,
+      });
+    }
+    return;
+  }
+
+  if (operator === "representative_slice") {
+    const upperId = inputs.upper ?? inputs.top;
+    const lowerId = inputs.lower ?? inputs.bottom;
+    const upper = producerFor(upperId);
+    const lower = producerFor(lowerId);
+    if (upper?.operator !== "function_curve") addBadReference("upper", "a function_curve", upperId);
+    if (lower?.operator !== "function_curve") addBadReference("lower", "a function_curve", lowerId);
+    const atX = validationNumber(inputs.atX ?? inputs.x ?? inputs.at, document);
+    const axisY = inputs.axisY === undefined ? 0 : validationNumber(inputs.axisY, document);
+    const method = inputs.method === undefined ? "strip" : inputs.method;
+    if (method !== "strip" && method !== "disk" && method !== "washer") {
+      issues.push({
+        code: "invalid_representative_slice_method",
+        message: "representative_slice method must be strip, disk, or washer",
+        severity: "fatal",
+        path: `constructions[${index}].inputs.method`,
+        actual: inputs.method,
+      });
+    }
+    if (axisY === null) {
+      issues.push({
+        code: "invalid_representative_slice_axis",
+        message: "representative_slice axisY must be a finite number",
+        severity: "fatal",
+        path: `constructions[${index}].inputs.axisY`,
+        actual: inputs.axisY,
+      });
+    }
+    const upperDomain = upper ? sampledCurveDomain(upper, document) : null;
+    const lowerDomain = lower ? sampledCurveDomain(lower, document) : null;
+    if (
+      atX === null ||
+      !upperDomain || !lowerDomain ||
+      atX < upperDomain.min || atX > upperDomain.max ||
+      atX < lowerDomain.min || atX > lowerDomain.max
+    ) {
+      issues.push({
+        code: "invalid_representative_slice_domain",
+        message: "representative_slice atX must lie in both function domains",
+        severity: "fatal",
+        path: `constructions[${index}].inputs.atX`,
+        actual: inputs.atX ?? inputs.x ?? inputs.at,
+      });
+    } else if (upper && lower) {
+      try {
+        const upperY = parseMathExpression(String(upper.inputs.expression)).evaluate(atX);
+        const lowerY = parseMathExpression(String(lower.inputs.expression)).evaluate(atX);
+        if (!(upperY > lowerY + 1e-6)) {
+          issues.push({
+            code: "invalid_representative_slice_order",
+            message: "representative_slice upper curve must be strictly above lower curve at atX",
+            severity: "fatal",
+            path: `constructions[${index}].inputs`,
+            expected: "upper(atX) > lower(atX)",
+            actual: { upperY, lowerY },
+          });
+        } else if ((method === "disk" || method === "washer") && axisY !== null) {
+          const inner = Math.min(Math.abs(upperY - axisY), Math.abs(lowerY - axisY));
+          const outer = Math.max(Math.abs(upperY - axisY), Math.abs(lowerY - axisY));
+          if (method === "disk" && inner > 1e-6) {
+            issues.push({
+              code: "invalid_representative_slice_disk",
+              message: "representative_slice method disk requires the inner curve to meet the axis",
+              severity: "fatal",
+              path: `constructions[${index}].inputs`,
+              expected: "min(|upper-axisY|, |lower-axisY|) ≈ 0",
+              actual: { inner, outer, axisY },
+            });
+          }
+          if (method === "washer" && (inner <= 1e-6 || outer - inner <= 1e-6)) {
+            issues.push({
+              code: "invalid_representative_slice_washer",
+              message: "representative_slice method washer requires distinct positive inner and outer radii",
+              severity: "fatal",
+              path: `constructions[${index}].inputs`,
+              expected: "0 < inner < outer",
+              actual: { inner, outer, axisY },
+            });
+          }
+        }
+      } catch {
+        // The referenced function_curve validator reports malformed expressions.
+      }
+    }
+    return;
+  }
+
+  if (operator === "solid_of_revolution") {
+    const profileId = inputs.profile ?? inputs.curve;
+    const profile = producerFor(profileId);
+    if (profile?.operator !== "function_curve") {
+      addBadReference("profile", "a function_curve", profileId);
+      return;
+    }
+    const domain = sampledCurveDomain(profile, document);
+    const xMin = inputs.xMin === undefined ? domain?.min ?? null : validationNumber(inputs.xMin, document);
+    const xMax = inputs.xMax === undefined ? domain?.max ?? null : validationNumber(inputs.xMax, document);
+    const axisY = inputs.axisY === undefined ? 0 : validationNumber(inputs.axisY, document);
+    if (
+      !domain || xMin === null || xMax === null || !(xMin < xMax) ||
+      xMin < domain.min || xMax > domain.max
+    ) {
+      issues.push({
+        code: "invalid_solid_of_revolution_domain",
+        message: "solid_of_revolution requires xMin < xMax within the function profile domain",
+        severity: "fatal",
+        path: `constructions[${index}].inputs`,
+        expected: domain,
+        actual: { xMin: inputs.xMin, xMax: inputs.xMax },
+      });
+    }
+    if (axisY === null) {
+      issues.push({
+        code: "invalid_solid_of_revolution_axis",
+        message: "solid_of_revolution axisY must be a finite number",
+        severity: "fatal",
+        path: `constructions[${index}].inputs.axisY`,
+        actual: inputs.axisY,
+      });
+    }
+    validateCurveSamples(inputs.samples, index, document, issues, operator);
+    if (domain && xMin !== null && xMax !== null && xMin < xMax && axisY !== null) {
+      try {
+        const expression = parseMathExpression(String(profile.inputs.expression));
+        const signedRadii = Array.from({ length: 65 }, (_, sampleIndex) =>
+          expression.evaluate(xMin + (xMax - xMin) * sampleIndex / 64) - axisY,
+        );
+        const nonzero = signedRadii.filter((radius) => Math.abs(radius) > 1e-6);
+        const side = nonzero.length > 0 ? Math.sign(nonzero[0]!) : 0;
+        const interiorAxisContact = signedRadii.some((radius, sampleIndex) =>
+          Math.abs(radius) <= 1e-6 && sampleIndex > 0 && sampleIndex < signedRadii.length - 1,
+        );
+        if (
+          side === 0 ||
+          interiorAxisContact ||
+          nonzero.some((radius) => Math.sign(radius) !== side)
+        ) {
+          issues.push({
+            code: "invalid_solid_of_revolution_profile",
+            message: "solid_of_revolution profile must remain on one side of axisY and may meet it only at endpoints",
+            severity: "fatal",
+            path: `constructions[${index}].inputs`,
+          });
+        }
+      } catch {
+        // The referenced function_curve validator reports malformed expressions.
+      }
+    }
+  }
+}
+
+function validateFunctionRegionConstruction(
+  construction: SceneDocument["constructions"][number],
+  index: number,
+  document: SceneDocument,
+  constructionByOutput: Map<string, SceneDocument["constructions"][number]>,
+  issues: SceneIssue[],
+): void {
+  const inputs = construction.inputs;
+  const upperId = inputs.upper ?? inputs.top ?? inputs.above;
+  const lowerId = inputs.lower ?? inputs.bottom ?? inputs.below;
+  const upper = typeof upperId === "string" ? constructionByOutput.get(upperId) : undefined;
+  const lower = typeof lowerId === "string" ? constructionByOutput.get(lowerId) : undefined;
+  const output = construction.outputs[0];
+  const outputKind = document.entities.find((entity) => entity.id === output)?.kind;
+  if (
+    construction.outputs.length !== 1 ||
+    (outputKind !== "polygon" && outputKind !== "function_region")
+  ) {
+    issues.push({
+      code: "invalid_function_region_output",
+      message: "function_region must produce exactly one polygon or semantic function_region entity",
+      severity: "fatal",
+      path: `constructions[${index}].outputs`,
+      entityIds: output ? [output] : undefined,
+    });
+  }
+  const isGraph = (candidate: SceneDocument["constructions"][number] | undefined): boolean =>
+    candidate?.operator === "function_curve" || GRAPH_POLYLINE_OPERATORS.has(String(candidate?.operator ?? ""));
+  if (!isGraph(upper) || !isGraph(lower)) {
+    issues.push({
+      code: "invalid_function_region_reference",
+      message: "function_region upper and lower must reference constructed function curves or polyline graphs",
+      severity: "fatal",
+      path: `constructions[${index}].inputs`,
+      entityIds: [upperId, lowerId].filter((id): id is string => typeof id === "string"),
+    });
+    return;
+  }
+  if ([upper!, lower!].some((candidate) => motionGraphPlacement(candidate, document, constructionByOutput) === "scaled")) {
+    issues.push({
+      code: "invalid_function_region_reference",
+      message: "a motion_graph bounds a function_region only at timeScale 1 with its origin at (0, 0): the other boundary and xMin/xMax are written in seconds, while the graph is drawn at origin + t * timeScale",
+      severity: "fatal",
+      path: `constructions[${index}].inputs`,
+      entityIds: [upperId, lowerId].filter((id): id is string => typeof id === "string"),
+    });
+    return;
+  }
+  const upperGraph = validationGraphBoundary(upper!, document, constructionByOutput);
+  const lowerGraph = validationGraphBoundary(lower!, document, constructionByOutput);
+  if (upperGraph === "invalid" || lowerGraph === "invalid") {
+    issues.push({
+      code: "invalid_function_region_reference",
+      message: "a polyline bounding a function_region must be a graph whose vertices strictly increase in x",
+      severity: "fatal",
+      path: `constructions[${index}].inputs`,
+      entityIds: [upperId, lowerId].filter((id): id is string => typeof id === "string"),
+    });
+    return;
+  }
+  // A polyline whose vertices are themselves derived (an intersection, say)
+  // cannot be read statically; the compiler reads it and fails closed.
+  if (upperGraph === "unresolved" || lowerGraph === "unresolved") {
+    validateCurveSamples(inputs.samples, index, document, issues, "function_region");
+    return;
+  }
+  const xMin = inputs.xMin === undefined
+    ? Math.max(upperGraph.min, lowerGraph.min)
+    : validationNumber(inputs.xMin, document);
+  const xMax = inputs.xMax === undefined
+    ? Math.min(upperGraph.max, lowerGraph.max)
+    : validationNumber(inputs.xMax, document);
+  if (
+    xMin === null || xMax === null || !(xMin < xMax) ||
+    xMin < upperGraph.min || xMax > upperGraph.max ||
+    xMin < lowerGraph.min || xMax > lowerGraph.max
+  ) {
+    issues.push({
+      code: "invalid_function_region_domain",
+      message: "function_region requires a non-empty interval inside both function domains",
+      severity: "fatal",
+      path: `constructions[${index}].inputs`,
+      actual: { xMin: inputs.xMin, xMax: inputs.xMax },
+    });
+    return;
+  }
+  validateCurveSamples(inputs.samples, index, document, issues, "function_region");
+  const reversedAt = regionGrid(upperGraph, lowerGraph, xMin, xMax, 65)
+    .find((x) => upperGraph.evaluate(x) + 1e-6 < lowerGraph.evaluate(x));
+  if (reversedAt !== undefined) {
+    issues.push({
+      code: "invalid_function_region_order",
+      message: "function_region upper curve must not fall below its lower curve in the requested interval",
+      severity: "fatal",
+      path: `constructions[${index}].inputs`,
+      expected: "upper(x) >= lower(x)",
+      actual: { x: reversedAt },
+    });
+  }
+}
+
+/**
+ * A graph y = f(x) read statically from the document: a function_curve over
+ * its stated domain, or a polyline or motion_graph whose vertices are literal
+ * world points. `unresolved` means the vertices are derived and only the
+ * compiler can read them; `invalid` means the vertices do not increase in x.
+ */
+function validationGraphBoundary(
+  construction: SceneDocument["constructions"][number],
+  document: SceneDocument,
+  constructionByOutput: Map<string, SceneDocument["constructions"][number]>,
+): GraphBoundary | "unresolved" | "invalid" {
+  if (construction.operator === "function_curve") {
+    // A curve without a readable domain has an empty one, so the region
+    // domain check rejects it; an unparsable expression is reported by the
+    // curve's own validation and simply never orders the region.
+    const domain = sampledCurveDomain(construction, document) ?? { min: Number.NaN, max: Number.NaN };
+    let evaluate: (x: number) => number = () => Number.NaN;
+    try {
+      const expression = parseMathExpression(String(construction.inputs.expression));
+      evaluate = (x: number) => expression.evaluate(x);
+    } catch {
+      // Referenced function_curve validation owns expression diagnostics.
+    }
+    return { min: domain.min, max: domain.max, breakpoints: [], evaluate };
+  }
+  const points = validationGraphVertices(construction, document, constructionByOutput);
+  if (!points) return "unresolved";
+  return piecewiseLinearGraph(points) ?? "invalid";
+}
+
+/**
+ * Where a motion graph sits on the board. Its samples are drawn at
+ * origin + t * timeScale, so only timeScale 1 with the origin at (0, 0) keeps
+ * its x in the seconds a region's other boundary and xMin/xMax are written
+ * in. `unresolved` leaves the decision to the compiler, which checks the same.
+ */
+function motionGraphPlacement(
+  construction: SceneDocument["constructions"][number],
+  document: SceneDocument,
+  constructionByOutput: Map<string, SceneDocument["constructions"][number]>,
+): "identity" | "scaled" | "unresolved" | "none" {
+  if (construction.operator !== "motion_graph") return "none";
+  const timeScale = validationNumber(construction.inputs.timeScale, document);
+  const origin = construction.inputs.origin === undefined
+    ? { x: 0, y: 0 }
+    : validationWorldPoint(construction.inputs.origin, document, constructionByOutput);
+  if (timeScale === null || !origin) return "unresolved";
+  return timeScale === 1 && origin.x === 0 && origin.y === 0 ? "identity" : "scaled";
+}
+
+function validationGraphVertices(
+  construction: SceneDocument["constructions"][number],
+  document: SceneDocument,
+  constructionByOutput: Map<string, SceneDocument["constructions"][number]>,
+): GraphPoint[] | null {
+  const inputs = construction.inputs;
+  if (construction.operator === "polyline" || construction.operator === "polygon") {
+    const ids = inputs.points ?? inputs.vertices;
+    if (!Array.isArray(ids) || ids.length < 2) return null;
+    const points = ids.map((id) => validationWorldPoint(id, document, constructionByOutput));
+    return points.every((point): point is GraphPoint => point !== null) ? points : null;
+  }
+  if (construction.operator === "motion_graph") {
+    const timeScale = validationNumber(inputs.timeScale, document);
+    const ordinateScale = validationNumber(inputs.ordinateScale, document);
+    const origin = inputs.origin === undefined ? { x: 0, y: 0 } : validationWorldPoint(inputs.origin, document, constructionByOutput);
+    if (timeScale === null || ordinateScale === null || !origin || !Array.isArray(inputs.points)) return null;
+    const points = inputs.points.map((sample) => {
+      const pairValue = Array.isArray(sample) && sample.length === 2 ? { t: sample[0], value: sample[1] } : sample;
+      if (!isRecord(pairValue)) return null;
+      const t = validationNumber(pairValue.t, document);
+      const value = validationNumber(pairValue.value, document);
+      return t === null || value === null ? null : { x: origin.x + t * timeScale, y: origin.y + value * ordinateScale };
+    });
+    return points.every((point): point is GraphPoint => point !== null) ? points : null;
+  }
+  return null;
+}
+
+function validationWorldPoint(
+  value: unknown,
+  document: SceneDocument,
+  constructionByOutput: Map<string, SceneDocument["constructions"][number]>,
+): GraphPoint | null {
+  if (Array.isArray(value) && value.length === 2) {
+    const x = validationNumber(value[0], document);
+    const y = validationNumber(value[1], document);
+    return x === null || y === null ? null : { x, y };
+  }
+  if (isRecord(value)) {
+    const x = validationNumber(value.x, document);
+    const y = validationNumber(value.y, document);
+    return x === null || y === null ? null : { x, y };
+  }
+  if (typeof value !== "string") return null;
+  const producer = constructionByOutput.get(value);
+  if (producer?.operator !== "point") return null;
+  const space = producer.inputs.coordinateSpace ?? "world";
+  if (space !== "world") return null;
+  const x = validationNumber(producer.inputs.x, document);
+  const y = validationNumber(producer.inputs.y, document);
+  return x === null || y === null ? null : { x, y };
+}
+
+/** Whether a polygon's entity names a region, an area or a displacement. */
+function polygonHasRegionRole(
+  polygon: SceneDocument["constructions"][number],
+  document: SceneDocument,
+): boolean {
+  const output = polygon.outputs[0];
+  const entity = document.entities.find((candidate) => candidate.id === output);
+  return GRAPH_REGION_ROLE.test(`${String(entity?.role ?? "")} ${String(entity?.label ?? "")}`.toLowerCase());
+}
+
+/**
+ * Whether a region polygon sits on a graph: the document draws a function
+ * curve or a motion graph, or the polygon claims a polyline graph on axes.
+ * It claims the graph when two of its vertices lie on it, or when its x span
+ * stays inside the graph's domain: the rectangle under the last point of a
+ * graph that starts above zero touches it once, and a rectangle too tall or
+ * too short for the graph touches it nowhere. A vertex lies on the graph by
+ * sharing a point id with it or by sitting at the graph's coordinates under
+ * a new id. The caller asks only for a polygon with a region role, so a
+ * triangle that merely shares a corner with a median, and reaches past the
+ * median's x span, is never claimed. Such a polygon must then be the region
+ * under that graph.
+ */
+function polygonClaimsGraphRegion(
+  polygon: SceneDocument["constructions"][number],
+  document: SceneDocument,
+  constructionByOutput: Map<string, SceneDocument["constructions"][number]>,
+): boolean {
+  if (document.constructions.some((candidate) => candidate.operator === "function_curve" || candidate.operator === "motion_graph")) return true;
+  if (!document.constructions.some((candidate) => candidate.operator === "axes")) return false;
+  const ids = polygon.inputs.points ?? polygon.inputs.vertices;
+  if (!Array.isArray(ids)) return false;
+  const vertices = ids.map((id) => ({ id, point: validationWorldPoint(id, document, constructionByOutput) }));
+  const resolved = vertices.map((vertex) => vertex.point).filter((point): point is GraphPoint => point !== null);
+  const xMin = Math.min(...resolved.map((point) => point.x));
+  const xMax = Math.max(...resolved.map((point) => point.x));
+  return document.constructions.some((candidate) => {
+    if (candidate.operator !== "polyline") return false;
+    const graph = validationGraphBoundary(candidate, document, constructionByOutput);
+    if (typeof graph !== "object") return false;
+    const graphIds = new Set((candidate.inputs.points ?? candidate.inputs.vertices) as unknown[]);
+    const onGraph = vertices.filter(({ id, point }) => {
+      if (typeof id === "string" && graphIds.has(id)) return true;
+      if (!point) return false;
+      // Points redeclared at the graph's coordinates under new ids.
+      const y = graph.evaluate(point.x);
+      return Number.isFinite(y) && Math.abs(y - point.y) <= Math.max(1, graph.max - graph.min, Math.abs(y)) * 1e-6;
+    }).length;
+    if (onGraph >= 2) return true;
+    const span = Math.max(1e-9, (graph.max - graph.min) * 1e-6);
+    // With no vertex on the graph, every vertex must be read before its x
+    // span can be said to sit inside the graph's domain.
+    const spanRead = onGraph === 1 ? resolved.length > 0 : resolved.length > 0 && resolved.length === vertices.length;
+    return spanRead && xMin >= graph.min - span && xMax <= graph.max + span;
+  });
+}
+
+/**
+ * Whether a polygon with a region role is exactly the region between one
+ * graph of the document and its baseline, the axis y = 0 or a motion graph's
+ * own zero line (a curve that is identically zero draws the axis), over the
+ * polygon's own x span, with no other graph of
+ * the document passing through it. Such a polygon is built from the graph's
+ * own points. A shape between two graphs, or between a guide line and the
+ * axis with the real graph running through it, is a guess: the area between
+ * curves must use function_region. The one exception is a straight graph's
+ * area split along its own first or last height, read by
+ * `polygonIsSplitGraphRegion`.
+ */
+function polygonIsGraphRegion(
+  polygon: SceneDocument["constructions"][number],
+  document: SceneDocument,
+  constructionByOutput: Map<string, SceneDocument["constructions"][number]>,
+): boolean {
+  const vertices = validationGraphVertices(polygon, document, constructionByOutput);
+  if (!vertices || vertices.length < 3) return false;
+  const graphs = document.constructions
+    .filter((candidate) => candidate !== polygon && (candidate.operator === "function_curve" || GRAPH_POLYLINE_OPERATORS.has(candidate.operator)))
+    .map((candidate) => ({
+      operator: candidate.operator,
+      boundary: validationGraphBoundary(candidate, document, constructionByOutput),
+      baseline: graphBaseline(candidate, document, constructionByOutput),
+    }))
+    .filter((graph): graph is DocumentGraph =>
+      typeof graph.boundary === "object" && graph.baseline !== null);
+  // A graph below the axis (a negative velocity) bounds its region from below.
+  const underGraph = graphs.some(({ operator, boundary, baseline }) => {
+    // A motion graph is a declared quantity against time, never a guide, so
+    // the area under it stays that area when a second graph (another car)
+    // passes beneath. A polyline or a function curve may be a guide line,
+    // so the region under it must be one cell no other graph cuts.
+    const others = operator === "motion_graph"
+      ? []
+      : graphs.filter((other) => other.boundary !== boundary).map((other) => other.boundary);
+    return polygonMatchesGraphRegion(vertices, boundary, baseline, others) ||
+      polygonMatchesGraphRegion(vertices, baseline, boundary, others);
+  });
+  return underGraph || polygonIsSplitGraphRegion(polygon, vertices, graphs, document, constructionByOutput);
+}
+
+interface DocumentGraph {
+  operator: string;
+  boundary: GraphBoundary;
+  baseline: GraphBoundary;
+}
+
+/**
+ * The graphical derivation of s = ut + ½at²: the area under a straight v
+ * against t graph is cut by the line v = u into the rectangle ut and the
+ * triangle ½at² above it. A polyline or motion graph (never a function curve)
+ * may be split this way along y = c, where c is the height of its own first
+ * or last vertex and lies between the graph and its baseline across the
+ * polygon's x span. A polygon is one piece when it is exactly the band
+ * between the graph and y = c, or between y = c and the baseline, with no
+ * other graph passing through it. A piece is accepted only when its
+ * complement is drawn too, as a region polygon over the same x span and the
+ * same c: a lone ut rectangle labelled as the whole displacement is still a
+ * guess at the area under the graph.
+ */
+function polygonIsSplitGraphRegion(
+  polygon: SceneDocument["constructions"][number],
+  vertices: GraphPoint[],
+  graphs: DocumentGraph[],
+  document: SceneDocument,
+  constructionByOutput: Map<string, SceneDocument["constructions"][number]>,
+): boolean {
+  const span = polygonXSpan(vertices);
+  if (!span) return false;
+  const complements = document.constructions
+    .filter((candidate) => candidate !== polygon && candidate.operator === "polygon" && polygonHasRegionRole(candidate, document))
+    .map((candidate) => validationGraphVertices(candidate, document, constructionByOutput))
+    .filter((points): points is GraphPoint[] => {
+      if (!points || points.length < 3) return false;
+      const other = polygonXSpan(points);
+      return other !== null && Math.abs(other.min - span.min) <= span.tolerance && Math.abs(other.max - span.max) <= span.tolerance;
+    });
+  if (complements.length === 0) return false;
+  const piece = (points: GraphPoint[], one: GraphBoundary, two: GraphBoundary, others: GraphBoundary[]) =>
+    polygonMatchesGraphRegion(points, one, two, others) || polygonMatchesGraphRegion(points, two, one, others);
+  return graphs.some((graph) => {
+    if (!GRAPH_POLYLINE_OPERATORS.has(graph.operator)) return false;
+    const { boundary, baseline } = graph;
+    const others = graphs.filter((other) => other !== graph).map((other) => other.boundary);
+    const heights = [boundary.evaluate(boundary.min), boundary.evaluate(boundary.max)];
+    return [...new Set(heights)].some((c) => {
+      if (!splitLineInsideRegion(boundary, baseline, c, span)) return false;
+      const line: GraphBoundary = { ...AXIS_BASELINE, evaluate: () => c };
+      const upper = (points: GraphPoint[]) => piece(points, boundary, line, others);
+      const lower = (points: GraphPoint[]) => piece(points, line, baseline, others);
+      return (upper(vertices) && complements.some(lower)) || (lower(vertices) && complements.some(upper));
+    });
+  });
+}
+
+function polygonXSpan(points: readonly GraphPoint[]): { min: number; max: number; tolerance: number } | null {
+  const xs = points.map((point) => point.x);
+  const min = Math.min(...xs);
+  const max = Math.max(...xs);
+  if (!(max > min)) return null;
+  return { min, max, tolerance: Math.max(1e-9, (max - min) * 1e-6) };
+}
+
+/**
+ * Whether y = c stays between a graph and its baseline over the span, at
+ * every vertex of the graph inside it, and strictly between them at the
+ * span's middle, so both pieces it cuts are real areas.
+ */
+function splitLineInsideRegion(
+  graph: GraphBoundary,
+  baseline: GraphBoundary,
+  c: number,
+  span: { min: number; max: number },
+): boolean {
+  if (!Number.isFinite(c)) return false;
+  const stations = [span.min, span.max, ...graph.breakpoints.filter((x) => x > span.min && x < span.max)];
+  const values = stations.flatMap((x) => [graph.evaluate(x), baseline.evaluate(x)]);
+  if (!values.every(Number.isFinite)) return false;
+  const tolerance = Math.max(1, Math.max(...values, c) - Math.min(...values, c)) * 1e-6;
+  const between = (x: number, strict: boolean) => {
+    const low = Math.min(graph.evaluate(x), baseline.evaluate(x));
+    const high = Math.max(graph.evaluate(x), baseline.evaluate(x));
+    return strict ? c > low + tolerance && c < high - tolerance : c >= low - tolerance && c <= high + tolerance;
+  };
+  return stations.every((x) => between(x, false)) && between((span.min + span.max) / 2, true);
+}
+
+/**
+ * The line a graph's region closes on: the axis y = 0, except for a motion
+ * graph, whose zero value is drawn at its own origin's y. A motion graph whose
+ * origin cannot be read has no baseline here.
+ */
+function graphBaseline(
+  construction: SceneDocument["constructions"][number],
+  document: SceneDocument,
+  constructionByOutput: Map<string, SceneDocument["constructions"][number]>,
+): GraphBoundary | null {
+  if (construction.operator !== "motion_graph" || construction.inputs.origin === undefined) return AXIS_BASELINE;
+  const origin = validationWorldPoint(construction.inputs.origin, document, constructionByOutput);
+  if (!origin) return null;
+  return origin.y === 0 ? AXIS_BASELINE : { ...AXIS_BASELINE, evaluate: () => origin.y };
+}
+
+function validateMensurationConstruction(
+  construction: SceneDocument["constructions"][number],
+  index: number,
+  document: SceneDocument,
+  constructionByOutput: Map<string, SceneDocument["constructions"][number]>,
+  issues: SceneIssue[],
+): void {
+  const { operator, inputs } = construction;
+  if (construction.outputs.length !== 1) {
+    issues.push({
+      code: `invalid_${operator}_outputs`,
+      message: `${operator} must produce exactly one visible entity`,
+      severity: "fatal",
+      path: `constructions[${index}].outputs`,
+      actual: construction.outputs.length,
+    });
+  }
+  const output = construction.outputs[0];
+  const outputKind = document.entities.find((entity) => entity.id === output)?.kind;
+  const expectedKind = operator === "solid_anchor" ? "point" : "polyline";
+  if (output && outputKind && outputKind !== expectedKind) {
+    issues.push({
+      code: `invalid_${operator}_output_kind`,
+      message: `${operator} output must use entity kind ${expectedKind}`,
+      severity: "fatal",
+      path: `constructions[${index}].outputs[0]`,
+      entityIds: [output],
+      expected: expectedKind,
+      actual: outputKind,
+    });
+  }
+
+  if (operator === "solid_projection") {
+    const centerId = inputs.center;
+    const centerProducer = typeof centerId === "string" ? constructionByOutput.get(centerId) : undefined;
+    if (centerProducer?.operator !== "point") {
+      issues.push({
+        code: "invalid_solid_projection_center",
+        message: "solid_projection center must reference a constructed point",
+        severity: "fatal",
+        path: `constructions[${index}].inputs.center`,
+        entityIds: typeof centerId === "string" ? [centerId] : undefined,
+        actual: centerId,
+      });
+    }
+    if (inputs.kind === "polyhedron") {
+      try {
+        readPolyhedralSolid(inputs, (value) => {
+          const result = validationNumber(value, document);
+          if (result === null) throw new Error("dimensions must be finite numbers or quantity references");
+          return result;
+        });
+      } catch (error) {
+        issues.push({ code: "invalid_polyhedral_solid", message: error instanceof Error ? error.message : "invalid polyhedral solid", severity: "fatal", path: `constructions[${index}].inputs` });
+      }
+      return;
+    }
+    if (!SOLID_PROJECTION_KINDS.has(String(inputs.kind))) {
+      issues.push({
+        code: "invalid_solid_projection_kind",
+        message: "solid_projection kind must be cylinder, cone, frustum, sphere, hemisphere, or polyhedron",
+        severity: "fatal",
+        path: `constructions[${index}].inputs.kind`,
+        actual: inputs.kind,
+      });
+    }
+    if (inputs.axis !== undefined && inputs.axis !== "vertical" && inputs.axis !== "horizontal") {
+      issues.push({
+        code: "invalid_solid_projection_axis",
+        message: "solid_projection axis must be vertical or horizontal",
+        severity: "fatal",
+        path: `constructions[${index}].inputs.axis`,
+        actual: inputs.axis,
+      });
+    }
+    const radius = validationNumber(inputs.radius, document);
+    if (radius === null || !(radius > 0)) {
+      issues.push({
+        code: "invalid_solid_projection_radius",
+        message: "solid_projection radius must be a positive finite number",
+        severity: "fatal",
+        path: `constructions[${index}].inputs.radius`,
+        actual: inputs.radius,
+      });
+    }
+    const needsHeight = inputs.kind === "cylinder" || inputs.kind === "cone" || inputs.kind === "frustum";
+    const height = inputs.height === undefined ? null : validationNumber(inputs.height, document);
+    if (needsHeight && (height === null || !(height > 0))) {
+      issues.push({
+        code: "invalid_solid_projection_height",
+        message: `${String(inputs.kind)} solid_projection requires a positive finite height`,
+        severity: "fatal",
+        path: `constructions[${index}].inputs.height`,
+        actual: inputs.height,
+      });
+    } else if (!needsHeight && inputs.height !== undefined) {
+      issues.push({
+        code: "invalid_solid_projection_height",
+        message: `${String(inputs.kind)} derives its height from radius and must not declare height`,
+        severity: "fatal",
+        path: `constructions[${index}].inputs.height`,
+        actual: inputs.height,
+      });
+    }
+    const topRadius = inputs.topRadius === undefined ? null : validationNumber(inputs.topRadius, document);
+    if (
+      inputs.kind === "frustum" &&
+      (topRadius === null || !(topRadius > 0) || (radius !== null && Math.abs(topRadius - radius) <= 1e-6))
+    ) {
+      issues.push({
+        code: "invalid_solid_projection_top_radius",
+        message: "frustum solid_projection requires a positive topRadius different from radius",
+        severity: "fatal",
+        path: `constructions[${index}].inputs.topRadius`,
+        actual: inputs.topRadius,
+      });
+    } else if (inputs.kind !== "frustum" && inputs.topRadius !== undefined) {
+      issues.push({
+        code: "invalid_solid_projection_top_radius",
+        message: "topRadius is valid only for a frustum solid_projection",
+        severity: "fatal",
+        path: `constructions[${index}].inputs.topRadius`,
+        actual: inputs.topRadius,
+      });
+    }
+    if (inputs.innerRadius !== undefined) {
+      const inner = validationNumber(inputs.innerRadius, document);
+      if (inputs.kind !== "cylinder" || inner === null || radius === null || !(inner > 0 && inner < radius)) {
+        issues.push({ code: "invalid_solid_inner_radius", message: "innerRadius requires a cylinder with 0 < innerRadius < radius", severity: "fatal", path: `constructions[${index}].inputs.innerRadius` });
+      }
+    }
+    return;
+  }
+
+  const solidId = inputs.solid;
+  const solidProducer = typeof solidId === "string" ? constructionByOutput.get(solidId) : undefined;
+  if (solidProducer?.operator !== "solid_projection") {
+    issues.push({
+      code: `invalid_${operator}_reference`,
+      message: `${operator} solid must reference a solid_projection output`,
+      severity: "fatal",
+      path: `constructions[${index}].inputs.solid`,
+      entityIds: typeof solidId === "string" ? [solidId] : undefined,
+      actual: solidId,
+    });
+  }
+  const at = validationNumber(inputs.at, document);
+  if (operator === "solid_anchor") {
+    for (const [name, value, valid] of [
+      ["at", at, at !== null && at >= 0 && at <= 1],
+      ["radialFraction", inputs.radialFraction === undefined ? 0 : validationNumber(inputs.radialFraction, document), true],
+      ["angleDeg", inputs.angleDeg === undefined ? 0 : validationNumber(inputs.angleDeg, document), true],
+    ] as const) {
+      const inRange = name !== "radialFraction" || (value !== null && value >= 0 && value <= 1);
+      if (value !== null && valid && inRange) continue;
+      issues.push({ code: `invalid_solid_anchor_${name}`, message: `solid_anchor ${name} must be finite${name === "angleDeg" ? "" : " and between 0 and 1"}`, severity: "fatal", path: `constructions[${index}].inputs.${name}`, actual: inputs[name] });
+    }
+    return;
+  }
+  if (at === null || !(at > 0 && at < 1)) {
+    issues.push({
+      code: "invalid_solid_cross_section_position",
+      message: "solid_cross_section at must be a finite number strictly between 0 and 1",
+      severity: "fatal",
+      path: `constructions[${index}].inputs.at`,
+      actual: inputs.at,
+    });
+  }
+  if (inputs.plane !== undefined && inputs.plane !== "transverse") {
+    issues.push({
+      code: "invalid_solid_cross_section_plane",
+      message: "solid_cross_section currently supports plane transverse only",
+      severity: "fatal",
+      path: `constructions[${index}].inputs.plane`,
+      actual: inputs.plane,
+    });
+  }
+}
+
+function validationVec3(
+  value: unknown,
+  document: SceneDocument,
+): { x: number; y: number; z: number } | null {
+  if (Array.isArray(value) && value.length === 3) {
+    const coords = value.map((item) => validationNumber(item, document));
+    if (coords.every((item): item is number => item !== null)) {
+      return { x: coords[0]!, y: coords[1]!, z: coords[2]! };
+    }
+  }
+  if (isRecord(value)) {
+    const x = validationNumber(value.x, document);
+    const y = validationNumber(value.y, document);
+    const z = validationNumber(value.z, document);
+    if (x !== null && y !== null && z !== null) return { x, y, z };
+  }
+  return null;
+}
+
+function validateSpaceConstruction(
+  construction: SceneDocument["constructions"][number],
+  index: number,
+  document: SceneDocument,
+  constructionByOutput: Map<string, SceneDocument["constructions"][number]>,
+  issues: SceneIssue[],
+): void {
+  const { operator, inputs } = construction;
+  const expectedKind = operator === "space_point" ? "point"
+    : operator === "space_line" ? "line"
+      : operator === "plane" ? "polygon"
+        : "polyline";
+  if (construction.outputs.length !== 1) {
+    issues.push({
+      code: `invalid_${operator}_outputs`,
+      message: `${operator} must produce exactly one visible entity`,
+      severity: "fatal",
+      path: `constructions[${index}].outputs`,
+      actual: construction.outputs.length,
+    });
+  }
+  const output = construction.outputs[0];
+  const outputKind = document.entities.find((entity) => entity.id === output)?.kind;
+  if (output && outputKind && outputKind !== expectedKind) {
+    issues.push({
+      code: `invalid_${operator}_output_kind`,
+      message: `${operator} output must use entity kind ${expectedKind}`,
+      severity: "fatal",
+      path: `constructions[${index}].outputs[0]`,
+      entityIds: [output],
+      expected: expectedKind,
+      actual: outputKind,
+    });
+  }
+
+  if (operator === "space_frame") {
+    const originId = inputs.origin ?? inputs.center;
+    const originProducer = typeof originId === "string" ? constructionByOutput.get(originId) : undefined;
+    if (originProducer?.operator !== "point") {
+      issues.push({
+        code: "invalid_space_frame_origin",
+        message: "space_frame origin must reference a constructed 2D point",
+        severity: "fatal",
+        path: `constructions[${index}].inputs.origin`,
+        entityIds: typeof originId === "string" ? [originId] : undefined,
+        actual: originId,
+      });
+    }
+    const scale = inputs.scale === undefined ? 1 : validationNumber(inputs.scale, document);
+    if (scale === null || !(scale > 0)) {
+      issues.push({
+        code: "invalid_space_frame_scale",
+        message: "space_frame scale must be a positive finite number",
+        severity: "fatal",
+        path: `constructions[${index}].inputs.scale`,
+        actual: inputs.scale,
+      });
+    }
+    const axisLength = inputs.axisLength === undefined ? 2 : validationNumber(inputs.axisLength, document);
+    if (axisLength === null || !(axisLength > 0)) {
+      issues.push({
+        code: "invalid_space_frame_axis_length",
+        message: "space_frame axisLength must be a positive finite number",
+        severity: "fatal",
+        path: `constructions[${index}].inputs.axisLength`,
+        actual: inputs.axisLength,
+      });
+    }
+    return;
+  }
+
+  const frameId = inputs.frame;
+  const frameProducer = typeof frameId === "string" ? constructionByOutput.get(frameId) : undefined;
+  if (frameProducer?.operator !== "space_frame") {
+    issues.push({
+      code: "invalid_space_frame_reference",
+      message: `${operator} frame must reference a space_frame output`,
+      severity: "fatal",
+      path: `constructions[${index}].inputs.frame`,
+      entityIds: typeof frameId === "string" ? [frameId] : undefined,
+      actual: frameId,
+    });
+  }
+
+  if (operator === "space_point") {
+    const x = validationNumber(inputs.x, document);
+    const y = validationNumber(inputs.y, document);
+    const z = validationNumber(inputs.z, document);
+    if (x === null || y === null || z === null) {
+      issues.push({
+        code: "invalid_space_point_coordinates",
+        message: "space_point requires finite x, y, and z",
+        severity: "fatal",
+        path: `constructions[${index}].inputs`,
+        actual: { x: inputs.x, y: inputs.y, z: inputs.z },
+      });
+    }
+    return;
+  }
+
+  if (operator === "space_line") {
+    const pointInput = inputs.point ?? inputs.origin ?? inputs.through;
+    const fromSpacePoint = typeof pointInput === "string"
+      && SPATIAL_POINT_CONSTRUCTIONS.has(constructionByOutput.get(pointInput)?.operator ?? "")
+      && document.entities.find((entity) => entity.id === pointInput)?.kind === "point";
+    const fromCoords = validationVec3(pointInput, document);
+    if (!fromSpacePoint && fromCoords === null) {
+      issues.push({
+        code: "invalid_space_line_point",
+        message: "space_line point must be a space_point id or a 3-vector",
+        severity: "fatal",
+        path: `constructions[${index}].inputs.point`,
+        entityIds: typeof pointInput === "string" ? [pointInput] : undefined,
+        actual: pointInput,
+      });
+    }
+    const direction = validationVec3(inputs.direction, document);
+    if (
+      direction === null
+      || !(Math.hypot(direction.x, direction.y, direction.z) > 1e-9)
+    ) {
+      issues.push({
+        code: "invalid_space_line_direction",
+        message: "space_line direction must be a nonzero 3-vector",
+        severity: "fatal",
+        path: `constructions[${index}].inputs.direction`,
+        actual: inputs.direction,
+      });
+    }
+    const tMin = inputs.tMin === undefined ? -1.5 : validationNumber(inputs.tMin, document);
+    const tMax = inputs.tMax === undefined ? 1.5 : validationNumber(inputs.tMax, document);
+    if (tMin === null || tMax === null || !(tMin < tMax)) {
+      issues.push({
+        code: "invalid_space_line_parameter",
+        message: "space_line requires finite tMin < tMax",
+        severity: "fatal",
+        path: `constructions[${index}].inputs`,
+        actual: { tMin: inputs.tMin, tMax: inputs.tMax },
+      });
+    }
+    return;
+  }
+
+  const cartesian = inputs.a !== undefined && inputs.b !== undefined && inputs.c !== undefined;
+  if (cartesian) {
+    const a = validationNumber(inputs.a, document);
+    const b = validationNumber(inputs.b, document);
+    const c = validationNumber(inputs.c, document);
+    const d = inputs.d === undefined ? 0 : validationNumber(inputs.d, document);
+    if (
+      a === null || b === null || c === null || d === null
+      || !(Math.hypot(a, b, c) > 1e-9)
+    ) {
+      issues.push({
+        code: "invalid_plane_cartesian",
+        message: "plane cartesian form requires a nonzero normal ax+by+cz=d",
+        severity: "fatal",
+        path: `constructions[${index}].inputs`,
+        actual: { a: inputs.a, b: inputs.b, c: inputs.c, d: inputs.d },
+      });
+    }
+  } else {
+    const pointInput = inputs.point ?? inputs.origin;
+    const fromSpacePoint = typeof pointInput === "string"
+      && SPATIAL_POINT_CONSTRUCTIONS.has(constructionByOutput.get(pointInput)?.operator ?? "")
+      && document.entities.find((entity) => entity.id === pointInput)?.kind === "point";
+    const fromCoords = validationVec3(pointInput, document);
+    if (!fromSpacePoint && fromCoords === null) {
+      issues.push({
+        code: "invalid_plane_point",
+        message: "plane point must be a space_point id or a 3-vector",
+        severity: "fatal",
+        path: `constructions[${index}].inputs.point`,
+        entityIds: typeof pointInput === "string" ? [pointInput] : undefined,
+        actual: pointInput,
+      });
+    }
+    const u = validationVec3(inputs.u, document);
+    const v = validationVec3(inputs.v, document);
+    const crossLength = u && v
+      ? Math.hypot(
+        u.y * v.z - u.z * v.y,
+        u.z * v.x - u.x * v.z,
+        u.x * v.y - u.y * v.x,
+      )
+      : 0;
+    if (u === null || v === null || !(crossLength > 1e-9)) {
+      issues.push({
+        code: "invalid_plane_spanning",
+        message: "plane spanning vectors u and v must be linearly independent 3-vectors",
+        severity: "fatal",
+        path: `constructions[${index}].inputs`,
+        actual: { u: inputs.u, v: inputs.v },
+      });
+    }
+  }
+  const span = inputs.span === undefined ? 2.4 : validationNumber(inputs.span, document);
+  const uSpan = inputs.uSpan === undefined ? span : validationNumber(inputs.uSpan, document);
+  const vSpan = inputs.vSpan === undefined ? span : validationNumber(inputs.vSpan, document);
+  if (uSpan === null || vSpan === null || !(uSpan > 0) || !(vSpan > 0)) {
+    issues.push({
+      code: "invalid_plane_span",
+      message: "plane spans must be positive finite numbers",
+      severity: "fatal",
+      path: `constructions[${index}].inputs`,
+      actual: { span: inputs.span, uSpan: inputs.uSpan, vSpan: inputs.vSpan },
+    });
+  }
+}
+
+function validateWaveVisualConstruction(
+  construction: SceneDocument["constructions"][number],
+  index: number,
+  document: SceneDocument,
+  constructionByOutput: Map<string, SceneDocument["constructions"][number]>,
+  issues: SceneIssue[],
+): void {
+  const { operator, inputs } = construction;
+  const output = construction.outputs[0];
+  const outputKind = document.entities.find((entity) => entity.id === output)?.kind;
+  if (construction.outputs.length !== 1 || (outputKind !== "polyline" && outputKind !== operator)) {
+    issues.push({
+      code: `invalid_${operator}_output`,
+      message: `${operator} must produce exactly one ${operator} or polyline entity`,
+      severity: "fatal",
+      path: `constructions[${index}].outputs`,
+      entityIds: output ? [output] : undefined,
+      actual: { count: construction.outputs.length, kind: outputKind },
+    });
+  }
+  const pointReference = (key: string): boolean => {
+    const value = inputs[key];
+    return typeof value === "string" && constructionByOutput.get(value)?.operator === "point";
+  };
+  const positiveInput = (key: string): number | null => {
+    const value = validationNumber(inputs[key], document);
+    return value !== null && value > 0 ? value : null;
+  };
+  const finiteArray2 = (value: unknown): boolean => Array.isArray(value) && value.length >= 2 &&
+    value.slice(0, 2).every((entry) => typeof entry === "number" && Number.isFinite(entry));
+  const invalid = (key: string, message: string, actual = inputs[key]) => issues.push({
+    code: `invalid_${operator}_${key}`,
+    message,
+    severity: "fatal" as const,
+    path: `constructions[${index}].inputs.${key}`,
+    actual,
+  });
+
+  if (operator === "wavefront_family") {
+    if (!pointReference("origin")) invalid("origin", "wavefront_family origin must reference a constructed point");
+    const directionEntity = typeof inputs.direction === "string"
+      ? document.entities.find((entity) => entity.id === inputs.direction)
+      : undefined;
+    const pathDirection = Boolean(
+      directionEntity &&
+      ["ray", "vector", "line", "segment", "polyline"].includes(directionEntity.kind) &&
+      constructionByOutput.has(directionEntity.id),
+    );
+    if (!finiteArray2(inputs.direction) && !pathDirection) {
+      invalid("direction", "wavefront_family direction must be a finite two-component vector or a constructed path");
+    }
+    if (inputs.shape !== "plane" && inputs.shape !== "circular") invalid("shape", "wavefront_family shape must be plane or circular");
+    const count = validationNumber(inputs.count, document);
+    if (count === null || !Number.isInteger(count) || count < 1 || count > 12) invalid("count", "wavefront_family count must be an integer from 1 to 12");
+    if (positiveInput("spacing") === null) invalid("spacing", "wavefront_family spacing must be positive");
+    if (positiveInput("span") === null) invalid("span", "wavefront_family span must be positive");
+    return;
+  }
+  if (operator === "aperture") {
+    if (!pointReference("center")) invalid("center", "aperture center must reference a constructed point");
+    if (inputs.orientation !== "vertical" && inputs.orientation !== "horizontal") invalid("orientation", "aperture orientation must be vertical or horizontal");
+    const count = validationNumber(inputs.slitCount, document);
+    if (count === null || !Number.isInteger(count) || count < 1 || count > 4) invalid("slitCount", "aperture slitCount must be an integer from 1 to 4");
+    const length = positiveInput("length");
+    const width = positiveInput("slitWidth");
+    const separation = positiveInput("slitSeparation");
+    if (length === null) invalid("length", "aperture length must be positive");
+    if (width === null) invalid("slitWidth", "aperture slitWidth must be positive");
+    if (separation === null) invalid("slitSeparation", "aperture slitSeparation must be positive");
+    if (length !== null && width !== null && separation !== null && count !== null &&
+      width + Math.max(0, count - 1) * separation >= length) {
+      invalid("length", "aperture slits must fit strictly inside its finite length", { length, width, separation, count });
+    }
+    return;
+  }
+  if (operator === "screen_pattern") {
+    if (!pointReference("start") || !pointReference("end") || inputs.start === inputs.end) {
+      invalid("start", "screen_pattern requires distinct constructed start and end points", { start: inputs.start, end: inputs.end });
+    }
+    if (!["interference", "diffraction", "resolution"].includes(String(inputs.pattern))) invalid("pattern", "screen_pattern pattern must be interference, diffraction, or resolution");
+    const count = validationNumber(inputs.count, document);
+    if (count === null || !Number.isInteger(count) || count < 3 || count > 21 || count % 2 === 0) invalid("count", "screen_pattern count must be an odd integer from 3 to 21");
+    if (positiveInput("spacing") === null) invalid("spacing", "screen_pattern spacing must be positive");
+    if (positiveInput("centralWidth") === null) invalid("centralWidth", "screen_pattern centralWidth must be positive");
+    return;
+  }
+  if (operator === "transverse_field") {
+    if (!pointReference("start") || !pointReference("end") || inputs.start === inputs.end) {
+      invalid("start", "transverse_field requires distinct constructed start and end points", { start: inputs.start, end: inputs.end });
+    }
+    if (positiveInput("amplitude") === null) invalid("amplitude", "transverse_field amplitude must be positive");
+    const cycles = validationNumber(inputs.cycles, document);
+    if (cycles === null || !Number.isInteger(cycles) || cycles < 1 || cycles > 12) invalid("cycles", "transverse_field cycles must be an integer from 1 to 12");
+    if (validationNumber(inputs.orientationDeg, document) === null) invalid("orientationDeg", "transverse_field orientationDeg must be finite");
+    return;
+  }
+  if (!pointReference("center")) invalid("center", "polarizer center must reference a constructed point");
+  if (positiveInput("radius") === null) invalid("radius", "polarizer radius must be positive");
+  if (validationNumber(inputs.axisAngleDeg, document) === null) invalid("axisAngleDeg", "polarizer axisAngleDeg must be finite");
+}
+
+function validateSurfaceRayConstruction(
+  construction: SceneDocument["constructions"][number],
+  index: number,
+  document: SceneDocument,
+  constructionByOutput: Map<string, SceneDocument["constructions"][number]>,
+  issues: SceneIssue[],
+): void {
+  const { operator, inputs } = construction;
+  if (construction.outputs.length !== 3) {
+    issues.push({
+      code: `invalid_${operator}_outputs`,
+      message: `${operator} must produce [incident_ray, normal, outgoing_ray]`,
+      severity: "fatal",
+      path: `constructions[${index}].outputs`,
+      actual: construction.outputs,
+    });
+  }
+  const pointProducer = typeof inputs.point === "string" ? constructionByOutput.get(inputs.point) : undefined;
+  if (pointProducer?.operator !== "point" && pointProducer?.operator !== "surface_intersection") {
+    issues.push({
+      code: `invalid_${operator}_point`,
+      message: `${operator} point must reference a constructed contact point`,
+      severity: "fatal",
+      path: `constructions[${index}].inputs.point`,
+      actual: inputs.point,
+    });
+  }
+  const surfaceProducer = typeof inputs.surface === "string" ? constructionByOutput.get(inputs.surface) : undefined;
+  if (!surfaceProducer || !["line", "segment", "circle", "arc"].includes(surfaceProducer.operator)) {
+    issues.push({
+      code: `invalid_${operator}_surface`,
+      message: `${operator} surface must reference a constructed line, segment, circle, or arc`,
+      severity: "fatal",
+      path: `constructions[${index}].inputs.surface`,
+      actual: inputs.surface,
+    });
+  }
+  const incidentAngleDeg = validationNumber(inputs.incidentAngleDeg, document);
+  if (incidentAngleDeg === null || !(incidentAngleDeg > 0 && incidentAngleDeg < 90)) {
+    issues.push({
+      code: `invalid_${operator}_angle`,
+      message: `${operator} incidentAngleDeg must be strictly between 0 and 90`,
+      severity: "fatal",
+      path: `constructions[${index}].inputs.incidentAngleDeg`,
+      actual: inputs.incidentAngleDeg,
+    });
+  }
+  if (inputs.tangentSign !== undefined && inputs.tangentSign !== -1 && inputs.tangentSign !== 1) {
+    issues.push({
+      code: `invalid_${operator}_tangent_sign`,
+      message: `${operator} tangentSign must be -1 or 1`,
+      severity: "fatal",
+      path: `constructions[${index}].inputs.tangentSign`,
+      actual: inputs.tangentSign,
+    });
+  }
+  const span = inputs.span === undefined ? 2 : validationNumber(inputs.span, document);
+  if (span === null || !(span > 0)) {
+    issues.push({
+      code: `invalid_${operator}_span`,
+      message: `${operator} span must be positive`,
+      severity: "fatal",
+      path: `constructions[${index}].inputs.span`,
+      actual: inputs.span,
+    });
+  }
+  if (operator === "refract_at") {
+    const n1 = validationNumber(inputs.n1, document);
+    const n2 = validationNumber(inputs.n2, document);
+    if (n1 === null || n2 === null || !(n1 > 0) || !(n2 > 0)) {
+      issues.push({
+        code: "invalid_refract_at_indices",
+        message: "refract_at requires positive n1 and n2",
+        severity: "fatal",
+        path: `constructions[${index}].inputs`,
+        actual: { n1: inputs.n1, n2: inputs.n2 },
+      });
+    }
+  }
+}
+
+function validateOpticalTrainConstruction(
+  construction: SceneDocument["constructions"][number],
+  index: number,
+  constructionByOutput: ReadonlyMap<string, SceneDocument["constructions"][number]>,
+  issues: SceneIssue[],
+): void {
+  if (construction.outputs.length !== 6) {
+    issues.push({
+      code: "invalid_optical_train_outputs",
+      message: "optical_train must produce [incoming_upper, incoming_lower, internal_upper, internal_lower, outgoing_upper, outgoing_lower]",
+      severity: "fatal",
+      path: `constructions[${index}].outputs`,
+      actual: construction.outputs,
+    });
+  }
+  const allowedPathOperators = new Set(["line", "segment", "parallel_through", "perpendicular_through"]);
+  for (const key of ["axis", "objective", "eyepiece"] as const) {
+    const value = construction.inputs[key];
+    const producer = typeof value === "string" ? constructionByOutput.get(value) : undefined;
+    if (!producer || !allowedPathOperators.has(producer.operator)) {
+      issues.push({
+        code: "invalid_optical_train_path",
+        message: `optical_train ${key} must reference constructed line geometry`,
+        severity: "fatal",
+        path: `constructions[${index}].inputs.${key}`,
+        entityIds: typeof value === "string" ? [value] : undefined,
+      });
+    }
+  }
+  const focus = construction.inputs.focus;
+  const focusProducer = typeof focus === "string" ? constructionByOutput.get(focus) : undefined;
+  if (focusProducer?.operator !== "point" && focusProducer?.operator !== "intersection") {
+    issues.push({
+      code: "invalid_optical_train_focus",
+      message: "optical_train focus must reference one constructed point",
+      severity: "fatal",
+      path: `constructions[${index}].inputs.focus`,
+      entityIds: typeof focus === "string" ? [focus] : undefined,
+    });
+  }
+  for (const key of ["object", "finalImage", "virtualImage"] as const) {
+    const value = construction.inputs[key];
+    if (value === undefined) continue;
+    const producer = typeof value === "string" ? constructionByOutput.get(value) : undefined;
+    if (producer?.operator !== "point" && producer?.operator !== "intersection") {
+      issues.push({
+        code: "invalid_optical_train_focus",
+        message: `optical_train ${key} must reference one constructed point`,
+        severity: "fatal",
+        path: `constructions[${index}].inputs.${key}`,
+        entityIds: typeof value === "string" ? [value] : undefined,
+      });
+    }
+  }
+  for (const key of ["raySpan", "beamHalfHeight"] as const) {
+    const value = construction.inputs[key];
+    if (value !== undefined && !(typeof value === "number" && Number.isFinite(value) && value > 0)) {
+      issues.push({
+        code: "invalid_optical_train_scale",
+        message: `optical_train ${key} must be a positive dimensionless display length`,
+        severity: "fatal",
+        path: `constructions[${index}].inputs.${key}`,
+        actual: value,
+      });
+    }
+  }
+}
+
+function validateSphericalSurfaceConstruction(
+  construction: SceneDocument["constructions"][number],
+  index: number,
+  constructionByOutput: ReadonlyMap<string, SceneDocument["constructions"][number]>,
+  issues: SceneIssue[],
+): void {
+  if (construction.outputs.length !== 1) {
+    issues.push({
+      code: "invalid_spherical_surface_outputs",
+      message: "spherical_surface must produce exactly one surface entity",
+      severity: "fatal",
+      path: `constructions[${index}].outputs`,
+      actual: construction.outputs,
+    });
+  }
+  const vertex = construction.inputs.vertex ?? construction.inputs.pole;
+  const axis = construction.inputs.axis;
+  const vertexProducer = typeof vertex === "string" ? constructionByOutput.get(vertex) : undefined;
+  const axisProducer = typeof axis === "string" ? constructionByOutput.get(axis) : undefined;
+  if (!vertexProducer || vertexProducer.operator !== "point") {
+    issues.push({
+      code: "invalid_spherical_surface_vertex",
+      message: "spherical_surface vertex must reference a constructed point",
+      severity: "fatal",
+      path: `constructions[${index}].inputs.vertex`,
+      entityIds: typeof vertex === "string" ? [vertex] : undefined,
+    });
+  }
+  if (!axisProducer || !["line", "segment"].includes(axisProducer.operator)) {
+    issues.push({
+      code: "invalid_spherical_surface_axis",
+      message: "spherical_surface axis must reference a constructed line",
+      severity: "fatal",
+      path: `constructions[${index}].inputs.axis`,
+      entityIds: typeof axis === "string" ? [axis] : undefined,
+    });
+  }
+  const halfHeight = construction.inputs.halfHeight ?? construction.inputs.aperture;
+  if (!(typeof halfHeight === "number" && Number.isFinite(halfHeight) && halfHeight > 0)) {
+    issues.push({
+      code: "invalid_spherical_surface_height",
+      message: "spherical_surface halfHeight must be a positive number",
+      severity: "fatal",
+      path: `constructions[${index}].inputs.halfHeight`,
+      actual: halfHeight,
+    });
+  }
+}
+
+function validateLensSectionConstruction(
+  construction: SceneDocument["constructions"][number],
+  index: number,
+  constructionByOutput: ReadonlyMap<string, SceneDocument["constructions"][number]>,
+  issues: SceneIssue[],
+): void {
+  if (construction.outputs.length !== 1) {
+    issues.push({
+      code: "invalid_lens_section_outputs",
+      message: "lens_section must produce exactly one lens entity",
+      severity: "fatal",
+      path: `constructions[${index}].outputs`,
+      actual: construction.outputs,
+    });
+  }
+  const center = construction.inputs.center ?? construction.inputs.opticalCentre ?? construction.inputs.optical_center;
+  const axis = construction.inputs.axis;
+  const centerProducer = typeof center === "string" ? constructionByOutput.get(center) : undefined;
+  const axisProducer = typeof axis === "string" ? constructionByOutput.get(axis) : undefined;
+  if (!centerProducer || centerProducer.operator !== "point") {
+    issues.push({
+      code: "invalid_lens_section_center",
+      message: "lens_section center must reference a constructed point",
+      severity: "fatal",
+      path: `constructions[${index}].inputs.center`,
+      entityIds: typeof center === "string" ? [center] : undefined,
+    });
+  }
+  if (!axisProducer || !["line", "segment"].includes(axisProducer.operator)) {
+    issues.push({
+      code: "invalid_lens_section_axis",
+      message: "lens_section axis must reference a constructed line",
+      severity: "fatal",
+      path: `constructions[${index}].inputs.axis`,
+      entityIds: typeof axis === "string" ? [axis] : undefined,
+    });
+  }
+  for (const key of ["radius1", "R1", "signedRadius1", "radius2", "R2", "signedRadius2"] as const) {
+    const value = construction.inputs[key];
+    if (value === undefined) continue;
+    if (typeof value !== "number" || !Number.isFinite(value) || value === 0) {
+      issues.push({
+        code: "invalid_lens_section_radius",
+        message: `lens_section ${key} must be a finite nonzero signed radius`,
+        severity: "fatal",
+        path: `constructions[${index}].inputs.${key}`,
+        actual: value,
+      });
+    }
+  }
+  const hasR1 = construction.inputs.radius1 !== undefined || construction.inputs.R1 !== undefined
+    || construction.inputs.signedRadius1 !== undefined;
+  const hasR2 = construction.inputs.radius2 !== undefined || construction.inputs.R2 !== undefined
+    || construction.inputs.signedRadius2 !== undefined;
+  if (!hasR1 || !hasR2) {
+    issues.push({
+      code: "invalid_lens_section_radius",
+      message: "lens_section requires signed radius1 and radius2",
+      severity: "fatal",
+      path: `constructions[${index}].inputs`,
+    });
+  }
+  const halfHeight = construction.inputs.halfHeight ?? construction.inputs.aperture;
+  if (!(typeof halfHeight === "number" && Number.isFinite(halfHeight) && halfHeight > 0)) {
+    issues.push({
+      code: "invalid_lens_section_height",
+      message: "lens_section halfHeight must be a positive number",
+      severity: "fatal",
+      path: `constructions[${index}].inputs.halfHeight`,
+      actual: halfHeight,
+    });
+  }
+}
+
+function validateImplicitCurveInputs(
+  inputs: Record<string, unknown>,
+  index: number,
+  document: SceneDocument,
+  issues: SceneIssue[],
+): void {
+  const xMin = validationNumber(inputs.xMin, document);
+  const xMax = validationNumber(inputs.xMax, document);
+  const yMin = validationNumber(inputs.yMin, document);
+  const yMax = validationNumber(inputs.yMax, document);
+  if (
+    xMin === null || xMax === null || !(xMin < xMax) ||
+    yMin === null || yMax === null || !(yMin < yMax)
+  ) {
+    issues.push({
+      code: "invalid_implicit_curve_domain",
+      message: "implicit_curve requires finite xMin < xMax and yMin < yMax",
+      severity: "fatal",
+      path: `constructions[${index}].inputs`,
+      expected: { xMin: "finite", xMax: "> xMin", yMin: "finite", yMax: "> yMin" },
+      actual: { xMin: inputs.xMin, xMax: inputs.xMax, yMin: inputs.yMin, yMax: inputs.yMax },
+    });
+  }
+
+  const expression = inputs.expression;
+  if (typeof expression !== "string") {
+    issues.push({
+      code: "invalid_implicit_curve_expression",
+      message: "implicit_curve expression must be a string representing F(x, y)",
+      severity: "fatal",
+      path: `constructions[${index}].inputs.expression`,
+    });
+  } else {
+    try {
+      const parsed = parseMathExpression2D(expression);
+      if (xMin !== null && xMax !== null && xMin < xMax && yMin !== null && yMax !== null && yMin < yMax) {
+        parsed.assertContinuousOn(xMin, xMax, yMin, yMax);
+      }
+    } catch (error) {
+      issues.push({
+        code: "invalid_implicit_curve_expression",
+        message: `implicit_curve expression is invalid or discontinuous: ${error instanceof Error ? error.message : String(error)}`,
+        severity: "fatal",
+        path: `constructions[${index}].inputs.expression`,
+      });
+    }
+  }
+
+  if (inputs.variable !== undefined || inputs.variables !== undefined) {
+    issues.push({
+      code: "invalid_implicit_curve_variables",
+      message: "implicit_curve variables are fixed as x and y and must not be overridden",
+      severity: "fatal",
+      path: `constructions[${index}].inputs`,
+      actual: inputs.variable ?? inputs.variables,
+    });
+  }
+  validateImplicitGridCount(inputs.xSamples, "xSamples", index, document, issues);
+  validateImplicitGridCount(inputs.ySamples, "ySamples", index, document, issues);
+
+  const xSamples = inputs.xSamples === undefined ? 65 : validationNumber(inputs.xSamples, document);
+  const ySamples = inputs.ySamples === undefined ? 65 : validationNumber(inputs.ySamples, document);
+  if (
+    xMin !== null && xMax !== null && xSamples !== null && xSamples >= 2 &&
+    yMin !== null && yMax !== null && ySamples !== null && ySamples >= 2 &&
+    (xMin + (xMax - xMin) / (xSamples - 1) === xMin ||
+      yMin + (yMax - yMin) / (ySamples - 1) === yMin)
+  ) {
+    issues.push({
+      code: "invalid_implicit_curve_grid_precision",
+      message: "implicit_curve domain is too narrow for distinct floating-point grid coordinates",
+      severity: "fatal",
+      path: `constructions[${index}].inputs`,
+    });
+  }
+}
+
+function validateImplicitGridCount(
+  value: unknown,
+  name: "xSamples" | "ySamples",
+  index: number,
+  document: SceneDocument,
+  issues: SceneIssue[],
+): void {
+  const samples = value === undefined ? 65 : validationNumber(value, document);
+  if (samples === null || !Number.isInteger(samples) || samples < 17 || samples > 161) {
+    issues.push({
+      code: "invalid_implicit_curve_grid",
+      message: `implicit_curve ${name} must be an integer from 17 to 161`,
+      severity: "fatal",
+      path: `constructions[${index}].inputs.${name}`,
+      actual: samples,
+    });
+  }
+}
+
+function validateParameterizedCurveInputs(
+  inputs: Record<string, unknown>,
+  index: number,
+  document: SceneDocument,
+  issues: SceneIssue[],
+  contract: {
+    operator: "parametric_curve" | "polar_curve";
+    parameter: "t" | "theta";
+    minKey: "tMin" | "thetaMin";
+    maxKey: "tMax" | "thetaMax";
+    expressions: string[];
+  },
+): void {
+  if (inputs.parameter !== undefined && inputs.parameter !== contract.parameter) {
+    issues.push({
+      code: `invalid_${contract.operator}_parameter`,
+      message: `${contract.operator} only supports parameter ${contract.parameter}`,
+      severity: "fatal",
+      path: `constructions[${index}].inputs.parameter`,
+      actual: inputs.parameter,
+    });
+  }
+  const min = validationNumber(inputs[contract.minKey] ?? inputs.parameterMin, document);
+  const max = validationNumber(inputs[contract.maxKey] ?? inputs.parameterMax, document);
+  if (min === null || max === null || !(min < max)) {
+    issues.push({
+      code: `invalid_${contract.operator}_domain`,
+      message: `${contract.operator} requires finite ${contract.minKey} < ${contract.maxKey}`,
+      severity: "fatal",
+      path: `constructions[${index}].inputs`,
+      actual: { min: inputs[contract.minKey], max: inputs[contract.maxKey] },
+    });
+  }
+  for (const expressionKey of contract.expressions) {
+    const source = inputs[expressionKey];
+    if (typeof source !== "string") {
+      issues.push({
+        code: `invalid_${contract.operator}_expression`,
+        message: `${contract.operator} ${expressionKey} must be a string`,
+        severity: "fatal",
+        path: `constructions[${index}].inputs.${expressionKey}`,
+      });
+      continue;
+    }
+    try {
+      const parsed = parseParameterizedExpression(source, contract.parameter);
+      if (min !== null && max !== null && min < max) parsed.assertContinuousOn(min, max);
+    } catch (error) {
+      issues.push({
+        code: `invalid_${contract.operator}_expression`,
+        message: `${contract.operator} ${expressionKey} is invalid or discontinuous: ${error instanceof Error ? error.message : String(error)}`,
+        severity: "fatal",
+        path: `constructions[${index}].inputs.${expressionKey}`,
+      });
+    }
+  }
+  validateCurveSamples(inputs.samples, index, document, issues, contract.operator, LOOP_CURVE_MAX_SAMPLES);
+}
+
+function sampledCurveDomain(
+  construction: SceneDocument["constructions"][number],
+  document: SceneDocument,
+): { min: number; max: number } | null {
+  const keys = construction.operator === "function_curve"
+    ? ["xMin", "xMax", "x_min", "x_max"]
+    : construction.operator === "parametric_curve"
+      ? ["tMin", "tMax", "parameterMin", "parameterMax"]
+      : construction.operator === "polar_curve"
+        ? ["thetaMin", "thetaMax", "parameterMin", "parameterMax"]
+        : [];
+  if (keys.length === 0) return null;
+  const min = validationNumber(construction.inputs[keys[0]!] ?? construction.inputs[keys[2]!], document);
+  const max = validationNumber(construction.inputs[keys[1]!] ?? construction.inputs[keys[3]!], document);
+  return min !== null && max !== null && min < max ? { min, max } : null;
+}
+
+/** Parametric and polar curves often close a full loop; like conics they may ask for up to 513 samples. */
+const LOOP_CURVE_MAX_SAMPLES = 513;
+
+function validateCurveSamples(
+  value: unknown,
+  index: number,
+  document: SceneDocument,
+  issues: SceneIssue[],
+  operator: string,
+  maxSamples = 161,
+): void {
+  const samples = value === undefined ? 65 : validationNumber(value, document);
+  if (samples === null || !Number.isInteger(samples) || samples < 17 || samples > maxSamples || samples % 2 === 0) {
+    issues.push({
+      code: `invalid_${operator}_samples`,
+      message: `${operator} samples must be an odd integer from 17 to ${maxSamples}`,
+      severity: "fatal",
+      path: `constructions[${index}].inputs.samples`,
+      actual: samples,
+    });
+  }
+}
+
+function parseParameterizedExpression(source: string, parameter: "t" | "theta") {
+  if (/\bx\b/.test(source)) throw new Error(`${parameter} expression cannot also reference x`);
+  return parseMathExpression(source.replace(new RegExp(`\\b${parameter}\\b`, "g"), "x"));
+}
+
+function validateFunctionCurveInputs(
+  inputs: Record<string, unknown>,
+  index: number,
+  document: SceneDocument,
+  issues: SceneIssue[],
+): void {
+  if (typeof inputs.expression !== "string") {
+    issues.push({
+      code: "invalid_function_expression",
+      message: "function_curve expression must be a string",
+      severity: "fatal",
+      path: `constructions[${index}].inputs.expression`,
+    });
+  } else {
+    try {
+      parseMathExpression(inputs.expression);
+    } catch (error) {
+      issues.push({
+        code: "invalid_function_expression",
+        message: `Invalid function_curve expression: ${error instanceof Error ? error.message : String(error)}`,
+        severity: "fatal",
+        path: `constructions[${index}].inputs.expression`,
+      });
+    }
+  }
+  if (inputs.variable !== undefined && inputs.variable !== "x") {
+    issues.push({
+      code: "invalid_function_variable",
+      message: "function_curve only supports variable x",
+      severity: "fatal",
+      path: `constructions[${index}].inputs.variable`,
+      actual: inputs.variable,
+    });
+  }
+  const xMin = validationNumber(inputs.xMin ?? inputs.x_min, document);
+  const xMax = validationNumber(inputs.xMax ?? inputs.x_max, document);
+  if (xMin === null || xMax === null || !(xMin < xMax)) {
+    issues.push({
+      code: "invalid_function_domain",
+      message: "function_curve requires finite numeric xMin < xMax",
+      severity: "fatal",
+      path: `constructions[${index}].inputs`,
+      expected: { xMin: "finite number", xMax: "greater finite number" },
+      actual: { xMin: inputs.xMin ?? inputs.x_min, xMax: inputs.xMax ?? inputs.x_max },
+    });
+  } else if (typeof inputs.expression === "string") {
+    try {
+      parseMathExpression(inputs.expression).assertContinuousOn(xMin, xMax);
+    } catch (error) {
+      issues.push({
+        code: "invalid_function_domain",
+        message: `function_curve is not provably finite and continuous on its domain: ${error instanceof Error ? error.message : String(error)}`,
+        severity: "fatal",
+        path: `constructions[${index}].inputs`,
+      });
+    }
+  }
+  const samples = inputs.samples === undefined ? 65 : validationNumber(inputs.samples, document);
+  if (samples === null || !Number.isInteger(samples) || samples < 17 || samples > 161 || samples % 2 === 0) {
+    issues.push({
+      code: "invalid_function_samples",
+      message: "function_curve samples must be an odd integer from 17 to 161",
+      severity: "fatal",
+      path: `constructions[${index}].inputs.samples`,
+      actual: samples,
+    });
+  }
+}
+
+function validationNumber(value: unknown, document: SceneDocument, seen = new Set<string>(), depth = 0): number | null {
+  if (depth > 32) return null;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (isRecord(value) && "value" in value) return validationNumber(value.value, document, seen, depth + 1);
+  if (typeof value !== "string" || value.trim() === "" || seen.has(value)) return null;
+  const quantity = document.quantities.find((candidate) => candidate.id === value);
+  if (!quantity) return Number.isFinite(Number(value)) ? Number(value) : null;
+  seen.add(value);
+  return validationNumber(quantity.value, document, seen, depth + 1);
+}
+
+function normalizeAnnotationStyle(value: unknown): SceneAnnotationStyle | undefined {
+  if (!isRecord(value)) return undefined;
+  const count = value.count === 2 || value.count === 3 || value.count === 1 ? value.count : undefined;
+  const pointStyle = value.pointStyle === "filled" || value.pointStyle === "open"
+    || value.pointStyle === "cross" || value.pointStyle === "square"
+    ? value.pointStyle
+    : undefined;
+  const transient = typeof value.transient === "boolean" ? value.transient : undefined;
+  if (count === undefined && pointStyle === undefined && transient === undefined) return undefined;
+  return { count, pointStyle, transient };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isInlineCoordinatePoint(value: unknown): value is Record<string, unknown> {
+  return isRecord(value) &&
+    typeof value.x === "number" &&
+    Number.isFinite(value.x) &&
+    typeof value.y === "number" &&
+    Number.isFinite(value.y) &&
+    (value.coordinateSpace === "layout" || value.coordinateSpace === "world");
+}
+
+function isAngleMarkVertex(entityId: string, document: SceneDocument): boolean {
+  return document.constructions.some((construction) => {
+    if (construction.operator !== "angle_mark" && construction.operator !== "right_angle_mark" && !SPACE_ANGLE_MARK_OPERATORS.has(construction.operator)) return false;
+    return isRecord(construction.inputs) && construction.inputs.vertex === entityId;
+  });
+}
+
+function isImplicitConstructionPoint(entityId: string, document: SceneDocument): boolean {
+  const entity = document.entities.find((candidate) => candidate.id === entityId);
+  if (isAngleMarkVertex(entityId, document)) return false;
+  if (entity?.label) return false;
+  const annotationAnchor = Boolean(
+    entity &&
+    isGenericHelperPointRole(entity.role) &&
+    document.annotations.some((annotation) => annotation.targetIds.includes(entityId)),
+  );
+  if (annotationAnchor) return true;
+  if (document.annotations.some((annotation) => annotation.targetIds.includes(entityId))) return false;
+  if (document.relations.some((relation) => relation.entities.includes(entityId))) return false;
+  if (entity && !isGenericHelperPointRole(entity.role)) {
+    return false;
+  }
+  const consumers = document.constructions.flatMap((construction) =>
+    referencesEntityId(construction.inputs, entityId) ? [construction.operator] : [],
+  );
+  if (consumers.length === 0) return false;
+  // Required terminals stay ink: topology gates read their marks. Unnamed
+  // coil, node, and centre locators still drop even when SceneBuilder required them.
+  if (
+    document.requiredEntityIds.includes(entityId) &&
+    /\bterminal\b/i.test(entity?.role.replace(/[_-]+/g, " ") ?? "")
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function isGenericHelperPointRole(role: string): boolean {
+  if (typeof role !== "string") return false;
+  const normalized = role.replace(/[_-]+/g, " ");
+  if (/\b(?:observation|target|charge|object|image|focus|focal|pole|vertex|midpoint|intersection|incidence|source|curvature|mass)\b/i.test(normalized)) {
+    return false;
+  }
+  return /\b(?:point|node|terminal|junction|endpoint|end|hit|contact|origin|reference|helper|layout|wire|anchor|marker|mark|base|tip|tail|head|position|pos|coil|support|cent(?:er|re))\b|\bfield symbol\b/i.test(normalized);
+}
+
+function isCompactDiagramLabel(text: string): boolean {
+  const normalized = text.trim().replace(/\s+/g, " ");
+  return normalized.length > 0 && normalized.length <= 16;
+}
+
+/**
+ * The operator that derives a tangent depends on the curve it touches: a
+ * circle takes circle_tangent_at, a function, parametric or polar curve takes
+ * tangent_line. The guessed path names no curve, so the curve kind is read
+ * from the entity's own words first, then from the curves the document builds.
+ */
+function tangentOperatorForCurveKind(
+  document: SceneDocument,
+  entity: SceneDocument["entities"][number],
+): { expected: string; advice: string } {
+  const circleAdvice = "circle_tangent_at (tangent to a circle)";
+  const curveAdvice = "tangent_line (tangent to a function_curve, parametric_curve, polar_curve, or another analytic curve it supports)";
+  const words = `${entity.id} ${entity.role} ${entity.label ?? ""}`.toLowerCase().replace(/[_-]+/g, " ");
+  const namesCircle = /\b(?:circle|circular|circumference|radius|radii|chord)\b/.test(words);
+  const namesCurve = /\b(?:curve|function|graph|parametric|polar)\b/.test(words);
+  const hasCircle = document.entities.some((candidate) => candidate.kind === "circle")
+    || document.constructions.some((construction) => construction.operator === "circle" || construction.operator === "circle_from_three_points");
+  const hasCurve = document.constructions.some((construction) => SAMPLED_CURVE_OPERATORS.has(construction.operator)
+    || ANALYTIC_TANGENT_CURVE_OPERATORS.has(construction.operator));
+  const circle = namesCircle !== namesCurve ? namesCircle : hasCircle !== hasCurve ? hasCircle : null;
+  if (circle === true) return { expected: "circle_tangent_at", advice: circleAdvice };
+  if (circle === false) return { expected: "tangent_line", advice: curveAdvice };
+  return { expected: "tangent_line", advice: `${circleAdvice} or ${curveAdvice}` };
+}
+
+function requiredOperatorForDerivedRole(entity: SceneDocument["entities"][number]): string | null {
+  const normalized = entity.role.trim().toLowerCase();
+  const pathLike = ["ray", "vector", "line", "segment", "polyline"].includes(entity.kind);
+  if (/\bwavefront(?:s| family)?\b/.test(normalized)) return "wavefront_family";
+  if (pathLike && /\breflected\b/.test(normalized)) {
+    return "reflect_direction";
+  }
+  if (pathLike && /\brefracted\b/.test(normalized)) {
+    return "refract_direction";
+  }
+  if (/\bangle bisector\b/.test(normalized)) return "angle_bisector";
+  if (/\bprojection foot\b|\bfoot of (?:the )?perpendicular\b/.test(normalized)) return "project";
+  if (/\btangent line\b/.test(normalized)) return "tangent_line";
+  if (/\b(?:curve|function|graph) normal line\b|\bnormal line (?:to|of) (?:the )?(?:curve|function|graph)\b/.test(normalized)) {
+    return "normal_line";
+  }
+  if (/\brepresentative slice\b/.test(normalized)) return "representative_slice";
+  if (/\bsolid of revolution\b/.test(normalized)) return "solid_of_revolution";
+  if (/\bsolid cross section\b/.test(normalized)) return "solid_cross_section";
+  if (/\bsolid projection\b/.test(normalized)) return "solid_projection";
+  if (/\bpolyhedral solid\b/.test(normalized)) return "solid_projection";
+  if (/\bspace frame\b|\b3d axes\b/.test(normalized)) return "space_frame";
+  if (/\bspace point\b/.test(normalized)) return "space_point";
+  if (/\bspace line\b/.test(normalized)) return "space_line";
+  if (/\bplane patch\b|\bcoordinate plane\b/.test(normalized)) return "plane";
+  if (/\bparametric curve\b/.test(normalized)) return "parametric_curve";
+  if (/\bpolar curve\b/.test(normalized)) return "polar_curve";
+  return null;
+}
+
+/**
+ * Optical instruments are accepted from their semantic proof graph, never a
+ * fixed drawing. The checks below state the invariant shared by refracting
+ * instrument chains: elements are transverse to one axis, ray bundles prove
+ * their direction, and normal adjustment has one shared focal plane.
+ */
+function validateOpticalInstrumentProofContract(
+  document: SceneDocument,
+  issues: SceneIssue[],
+): void {
+  const semantic = (id: string): string => {
+    const entity = document.entities.find((candidate) => candidate.id === id);
+    return `${id} ${entity?.role ?? ""} ${entity?.label ?? ""}`
+      .toLowerCase()
+      .replace(/[_-]+/g, " ")
+      .replace(/([a-z])(\d)/g, "$1 $2")
+      .replace(/\s+/g, " ");
+  };
+  const pathLike = (id: string): boolean => {
+    const kind = document.entities.find((entity) => entity.id === id)?.kind;
+    return typeof kind === "string" && ["line", "segment", "ray", "vector", "polyline"].includes(kind);
+  };
+  const isNamedElement = (
+    entity: SceneDocument["entities"][number],
+    name: "objective" | "eyepiece",
+  ): boolean => {
+    const normalizedLabel = entity.label?.trim().toLowerCase();
+    const normalizedRole = entity.role.toLowerCase().replace(/[_-]+/g, " ");
+    return normalizedLabel === name ||
+      new RegExp(`\\b${name} (?:lens|element)\\b`).test(normalizedRole);
+  };
+  const objectiveIds = document.entities.flatMap((entity) =>
+    pathLike(entity.id) && isNamedElement(entity, "objective") ? [entity.id] : []);
+  const eyepieceIds = document.entities.flatMap((entity) =>
+    pathLike(entity.id) && isNamedElement(entity, "eyepiece") ? [entity.id] : []);
+  if (objectiveIds.length === 0 || eyepieceIds.length === 0) return;
+
+  const axisIds = document.entities.flatMap((entity) =>
+    (entity.kind === "line" || entity.kind === "segment") &&
+    /\b(?:optical |principal )?axis\b/.test(semantic(entity.id))
+      ? [entity.id]
+      : []);
+  if (axisIds.length !== 1) {
+    issues.push({
+      code: "instrument_axis_not_unique",
+      message: "An optical instrument chain requires exactly one shared optical axis",
+      severity: "fatal",
+      entityIds: [...objectiveIds, ...eyepieceIds, ...axisIds],
+      expected: 1,
+      actual: axisIds.length,
+    });
+    return;
+  }
+  const axisId = axisIds[0]!;
+  const proves = (predicate: string, ids: readonly string[]): boolean =>
+    document.assertions.some((assertion) =>
+      assertion.predicate === predicate &&
+      assertion.expected !== false &&
+      ids.every((id) => assertion.entities.includes(id)));
+
+  for (const elementId of [...objectiveIds, ...eyepieceIds]) {
+    if (proves("perpendicular", [elementId, axisId])) continue;
+    issues.push({
+      code: "instrument_element_orientation_not_proven",
+      message: `${elementId} must be proved perpendicular to the shared optical axis`,
+      severity: "fatal",
+      entityIds: [elementId, axisId],
+      expected: true,
+    });
+  }
+
+  const incomingRayIds = document.entities.flatMap((entity) =>
+    entity.kind === "ray" && /\b(?:incident|incoming|ray in)\b/.test(semantic(entity.id)) ? [entity.id] : []);
+  const outgoingRayIds = document.entities.flatMap((entity) =>
+    entity.kind === "ray" && /\b(?:emergent|outgoing|ray out)\b/.test(semantic(entity.id)) ? [entity.id] : []);
+  const hasOpticalTrain = document.constructions.some((construction) => construction.operator === "optical_train");
+  if (!hasOpticalTrain) {
+    for (const [name, rayIds] of [["incoming", incomingRayIds], ["emergent", outgoingRayIds]] as const) {
+      if (rayIds.length < 2 || proves("parallel", rayIds.slice(0, 2))) continue;
+      issues.push({
+        code: "instrument_ray_bundle_not_proven",
+        message: `The ${name} ray bundle must include a parallel proof`,
+        severity: "fatal",
+        entityIds: rayIds,
+        expected: true,
+      });
+    }
+  }
+
+  const question = typeof document.source.question === "string" ? document.source.question : "";
+  if (!/\bnormal adjustment\b/i.test(question)) return;
+  // optical_train is the instrument proof. Do not demand a second LLM-style
+  // converges assertion just because the exam text mentions normal adjustment.
+  if (hasOpticalTrain) return;
+  const objectiveFocalIds = document.entities.flatMap((entity) => {
+    const name = semantic(entity.id);
+    return entity.kind === "point" && /\bobjective\b/.test(name) && /\bfoc(?:al|us)\b/.test(name)
+      ? [entity.id]
+      : [];
+  });
+  const eyepieceFocalIds = document.entities.flatMap((entity) => {
+    const name = semantic(entity.id);
+    return entity.kind === "point" && /\beyepiece\b/.test(name) && /\bfoc(?:al|us)\b/.test(name)
+      ? [entity.id]
+      : [];
+  });
+  if (
+    objectiveFocalIds.length > 0 &&
+    eyepieceFocalIds.length > 0 &&
+    !objectiveFocalIds.some((id) => eyepieceFocalIds.includes(id))
+  ) {
+    issues.push({
+      code: "normal_adjustment_focal_plane_split",
+      message: "Normal adjustment requires one shared objective-image and eyepiece-focal point, not two independent focal points",
+      severity: "fatal",
+      entityIds: [...objectiveFocalIds, ...eyepieceFocalIds],
+      expected: "one shared point ID",
+    });
+  }
+  const focalIds = document.entities.flatMap((entity) =>
+    entity.kind === "point" && /\b(?:foc(?:al|us)|intermediate image)\b/.test(semantic(entity.id))
+      ? [entity.id]
+      : []);
+  const hasFocusProof = document.assertions.some((assertion) =>
+    assertion.predicate === "converges" &&
+    assertion.expected !== false &&
+    assertion.entities.length >= 3 &&
+    assertion.entities.some((id) => focalIds.includes(id)));
+  if (!hasFocusProof) {
+    issues.push({
+      code: "instrument_intermediate_focus_not_proven",
+      message: "A normal-adjustment instrument must prove that at least two objective rays converge at the shared intermediate focal point",
+      severity: "fatal",
+      entityIds: [...objectiveIds, ...eyepieceIds, ...focalIds],
+      expected: "converges [ray, ray, shared_focus]",
+    });
+  }
+}

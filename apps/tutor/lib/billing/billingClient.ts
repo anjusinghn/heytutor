@@ -1,0 +1,367 @@
+import { parseDiagramYieldPolicy, type DiagramYieldPolicy } from "@heytutor/scene-engine";
+import { resolveApiUrl, parseDiagramStrictSubjects, type DiagramSubject } from "@heytutor/tutor-core";
+import type { CheckoutPlanId } from "./catalog";
+import { isBillingErrorCode } from "./errors";
+import { isOutOfCreditsCode } from "./studentCopy";
+import { patchEntitlementSnapshot, setEntitlementSnapshot, type Entitlement } from "./entitlementState";
+import { openRazorpayCheckout, type RazorpayCheckout } from "./razorpayCheckout";
+import type { DiagramStrategy } from "@/features/tutor-session/lib/scene/diagramStrategy";
+
+export type BillingTurnKind = "lesson" | "doubt" | "resume";
+
+export interface BillingFailure {
+  status: number;
+  code: string;
+  remaining: number | null;
+}
+
+export interface BeginTurnOk {
+  ok: true;
+  remainingPct: number | null;
+  remaining: number | null;
+  planId: string;
+  nextResetAt: number | null;
+  ttsCharsRemaining: number;
+  diagramStrategy: DiagramStrategy;
+  diagramStrictSubjects?: DiagramSubject[];
+  diagramYieldPolicy?: DiagramYieldPolicy;
+  /** True only when the server set DIAGRAM_CURVE_LABELS=on. */
+  diagramCurveLabels?: boolean;
+  /** True only when the server set OPTICS_ARCHETYPE_IN_STRICT=on. */
+  opticsArchetypeInStrict?: boolean;
+  /** True only when the server set SOLVER_DISAGREEMENT_STOPS=on. */
+  solverDisagreementStops?: boolean;
+  /** Default off: draw a judged reference picture when no verified figure is drawn. */
+  referencePicture?: boolean;
+  /** Default off: the pen may point at a reference picture's located parts and key rows. */
+  referencePicturePartFocus?: boolean;
+  /** Default off (`DIAGRAM_DOUBT_POINTING`): a doubt walks, rings and letters the figure on the board. */
+  doubtPointing?: boolean;
+  /** Default off (`DIAGRAM_DOUBT_FIGURES`): a doubt that needs a new figure plans, verifies and draws one. */
+  doubtFigures?: boolean;
+  /** Default off (`DIAGRAM_LESSON_FIGURES`): a lesson may move to up to two later verified figures. */
+  lessonFigures?: boolean;
+}
+
+export interface BeginTurnErr {
+  ok: false;
+  status: number;
+  code: string;
+  remaining: number | null;
+}
+
+export type BillingRedirect =
+  | { ok: true; url: string }
+  | { ok: true; skipped: true }
+  | { ok: true; checkout: RazorpayCheckout }
+  | { ok: false } & BillingFailure;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function remainingFrom(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function remainingPctFromPayload(payload: Record<string, unknown>): number | null {
+  return remainingFrom(payload.remainingPct) ?? remainingFrom(payload.remaining);
+}
+
+function rememberRemainingPct(remainingPct: number | null, extra?: Partial<Entitlement>): void {
+  patchEntitlementSnapshot({ remainingPct, ...extra });
+}
+
+export function rememberBillingFailure(failure: BillingFailure): void {
+  if (typeof failure.remaining === "number") {
+    patchEntitlementSnapshot({ remainingPct: failure.remaining });
+    return;
+  }
+  if (isOutOfCreditsCode(failure.code)) {
+    patchEntitlementSnapshot({ remainingPct: 0 });
+  }
+}
+
+export function parseBillingFailureFromBody(status: number, body: unknown): BillingFailure | null {
+  const payload = typeof body === "string" ? tryParseJson(body) : body;
+  const code = isRecord(payload) && typeof payload.code === "string" ? payload.code : null;
+  const remaining = isRecord(payload) ? remainingPctFromPayload(payload) : null;
+  if (code) {
+    return { status, code, remaining };
+  }
+  if (status === 402) return { status, code: "out_of_credits", remaining };
+  if (status === 429) return { status, code: "rate_limited", remaining };
+  if (status === 503) return { status, code: "autumn_unavailable", remaining };
+  return null;
+}
+
+export function parseBillingFailureFromMessage(message: string): BillingFailure | null {
+  const statusMatch = message.match(/LLM proxy error \((\d+)\)/);
+  const notesMatch = message.match(/notes chat failed \((\d+)\)/);
+  const status = statusMatch
+    ? Number(statusMatch[1])
+    : notesMatch
+    ? Number(notesMatch[1])
+    : 0;
+  const json = extractJsonObject(message);
+  if (json) {
+    const parsed = parseBillingFailureFromBody(status || guessStatusFromCode(json.code), json);
+    if (parsed) return parsed;
+  }
+  if (/out_of_credits/.test(message)) {
+    return { status: status || 402, code: "out_of_credits", remaining: null };
+  }
+  if (/no_grant/.test(message)) {
+    return { status: status || 402, code: "no_grant", remaining: null };
+  }
+  if (status === 402 || status === 429 || status === 503) {
+    return parseBillingFailureFromBody(status, {});
+  }
+  return null;
+}
+
+export function parseBillingFailureFromUnknown(error: unknown): BillingFailure | null {
+  if (error instanceof Error) return parseBillingFailureFromMessage(error.message);
+  if (isRecord(error) && error.ok === false && typeof error.code === "string") {
+    return {
+      status: typeof error.status === "number" ? error.status : 402,
+      code: error.code,
+      remaining: remainingFrom(error.remainingPct) ?? remainingFrom(error.remaining),
+    };
+  }
+  return null;
+}
+
+function guessStatusFromCode(code: unknown): number {
+  if (typeof code !== "string" || !isBillingErrorCode(code)) return 402;
+  if (code === "unauthorized") return 401;
+  if (code === "autumn_unavailable") return 503;
+  if (code === "rate_limited" || code === "concurrent_limit" || code === "doubt_limit" || code === "tts_budget") {
+    return 429;
+  }
+  return 402;
+}
+
+function tryParseJson(raw: string): unknown {
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+function extractJsonObject(message: string): Record<string, unknown> | null {
+  const start = message.indexOf("{");
+  const end = message.lastIndexOf("}");
+  if (start < 0 || end <= start) return null;
+  const parsed = tryParseJson(message.slice(start, end + 1));
+  return isRecord(parsed) ? parsed : null;
+}
+
+const BEGIN_TURN_TIMEOUT_MS = 15_000;
+
+function mergeAbortSignals(first?: AbortSignal, second?: AbortSignal): AbortSignal | undefined {
+  if (!first) return second;
+  if (!second) return first;
+  if (typeof AbortSignal.any === "function") {
+    return AbortSignal.any([first, second]);
+  }
+  const controller = new AbortController();
+  const abort = (signal: AbortSignal) => {
+    if (!controller.signal.aborted) controller.abort(signal.reason);
+  };
+  if (first.aborted) abort(first);
+  else first.addEventListener("abort", () => abort(first), { once: true });
+  if (second.aborted) abort(second);
+  else second.addEventListener("abort", () => abort(second), { once: true });
+  return controller.signal;
+}
+
+export async function beginTurn(input: {
+  traceId: string;
+  kind: BillingTurnKind;
+  parentTraceId?: string;
+  signal?: AbortSignal;
+  ownsTurn: () => boolean;
+  /** Tests only. Production uses the 15s client deadline. */
+  timeoutMs?: number;
+}): Promise<BeginTurnOk | BeginTurnErr> {
+  const first = await beginTurnOnce(input);
+  // A stalled begin-turn used to stick the "took too long" toast while the
+  // server was still answering. One more attempt, same trace, before that.
+  if (first.ok || first.code !== "timeout") return first;
+  if (input.signal?.aborted || !input.ownsTurn()) return first;
+  return beginTurnOnce(input);
+}
+
+async function beginTurnOnce(input: {
+  traceId: string;
+  kind: BillingTurnKind;
+  parentTraceId?: string;
+  signal?: AbortSignal;
+  ownsTurn: () => boolean;
+  timeoutMs?: number;
+}): Promise<BeginTurnOk | BeginTurnErr> {
+  const timeout =
+    typeof AbortSignal.timeout === "function"
+      ? AbortSignal.timeout(input.timeoutMs ?? BEGIN_TURN_TIMEOUT_MS)
+      : undefined;
+  let response: Response;
+  try {
+    response = await fetch(resolveApiUrl("/api/billing/begin-turn"), {
+      method: "POST",
+      credentials: "include",
+      headers: { "content-type": "application/json" },
+      signal: mergeAbortSignals(input.signal, timeout),
+      body: JSON.stringify({ traceId: input.traceId, kind: input.kind, parentTraceId: input.parentTraceId }),
+    });
+  } catch (error) {
+    if (timeout?.aborted && !input.signal?.aborted) {
+      return { ok: false, status: 504, code: "timeout", remaining: null };
+    }
+    throw error;
+  }
+  const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+  const remainingPct = remainingPctFromPayload(payload);
+  const mayRemember = input.ownsTurn();
+  if (!response.ok) {
+    const err: BeginTurnErr = {
+      ok: false,
+      status: response.status,
+      code: typeof payload.code === "string" ? payload.code : "out_of_credits",
+      remaining: remainingPct,
+    };
+    if (mayRemember) rememberRemainingPct(err.remaining);
+    return err;
+  }
+  const ok: BeginTurnOk = {
+    ok: true,
+    remainingPct,
+    remaining: remainingPct,
+    planId: typeof payload.planId === "string" ? payload.planId : "free",
+    diagramStrategy: payload.diagramStrategy === "strict" ? "strict" : "current",
+    diagramStrictSubjects: parseDiagramStrictSubjects(payload.diagramStrictSubjects),
+    diagramYieldPolicy: parseDiagramYieldPolicy(payload.diagramYieldPolicy),
+    diagramCurveLabels: payload.diagramCurveLabels === true,
+    opticsArchetypeInStrict: payload.opticsArchetypeInStrict === true,
+    solverDisagreementStops: payload.solverDisagreementStops === true,
+    referencePicture: payload.referencePicture === true,
+    referencePicturePartFocus: payload.referencePicturePartFocus === true,
+    doubtPointing: payload.doubtPointing === true,
+    doubtFigures: payload.doubtFigures === true,
+    lessonFigures: payload.lessonFigures === true,
+    nextResetAt: typeof payload.nextResetAt === "number" ? payload.nextResetAt : null,
+    ttsCharsRemaining: typeof payload.ttsCharsRemaining === "number" ? payload.ttsCharsRemaining : 0,
+  };
+  if (mayRemember) rememberRemainingPct(ok.remainingPct, { planId: ok.planId, nextResetAt: ok.nextResetAt });
+  return ok;
+}
+
+let entitlementInflight: Promise<{ ok: true; entitlement: Entitlement } | BeginTurnErr> | null = null;
+
+export async function fetchEntitlement(
+  signal?: AbortSignal,
+): Promise<{ ok: true; entitlement: Entitlement } | BeginTurnErr> {
+  if (entitlementInflight && !signal) return entitlementInflight;
+  const run = (async () => {
+    const response = await fetch(resolveApiUrl("/api/billing/entitlement"), {
+      credentials: "include",
+      signal,
+    });
+    const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+    if (!response.ok) {
+      return {
+        ok: false as const,
+        status: response.status,
+        code: typeof payload.code === "string" ? payload.code : "autumn_unavailable",
+        remaining: remainingPctFromPayload(payload),
+      };
+    }
+    const entitlement: Entitlement = {
+      planId: typeof payload.planId === "string" ? payload.planId : "free",
+      remainingPct: remainingPctFromPayload(payload),
+      nextResetAt: typeof payload.nextResetAt === "number" ? payload.nextResetAt : null,
+      staff: payload.staff === true,
+    };
+    setEntitlementSnapshot(entitlement);
+    return { ok: true as const, entitlement };
+  })();
+  if (!signal) {
+    entitlementInflight = run.finally(() => {
+      entitlementInflight = null;
+    });
+    return entitlementInflight;
+  }
+  return run;
+}
+
+async function postBillingRedirect(
+  path: string,
+  body?: Record<string, unknown>,
+): Promise<BillingRedirect> {
+  const response = await fetch(resolveApiUrl(path), {
+    method: "POST",
+    credentials: "include",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ...body, idempotencyKey: crypto.randomUUID() }),
+    signal: AbortSignal.timeout(20_000),
+  });
+  const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+  if (!response.ok) {
+    return {
+      ok: false,
+      status: response.status,
+      code: typeof payload.code === "string" ? payload.code : "autumn_unavailable",
+      remaining: remainingPctFromPayload(payload),
+    };
+  }
+  if (isRecord(payload.checkout) && payload.checkout.provider === "razorpay") {
+    const checkout = payload.checkout;
+    if (typeof checkout.purchaseId !== "string" || typeof checkout.keyId !== "string" ||
+        typeof checkout.orderId !== "string" || typeof checkout.amount !== "number" ||
+        typeof checkout.currency !== "string" || typeof checkout.planId !== "string" || typeof checkout.testMode !== "boolean") {
+      return { ok: false, status: 503, code: "payments_unavailable", remaining: null };
+    }
+    return { ok: true, checkout: checkout as unknown as RazorpayCheckout };
+  }
+  if (payload.skipped === true || payload.url === null) {
+    return { ok: true, skipped: true };
+  }
+  if (typeof payload.url !== "string") {
+    return { ok: false, status: 503, code: "payments_unavailable", remaining: null };
+  }
+  return { ok: true, url: payload.url };
+}
+
+export async function startCheckout(planId: CheckoutPlanId, quote?: string | null): Promise<BillingRedirect> {
+  return postBillingRedirect("/api/billing/checkout", { planId, quote });
+}
+
+export async function startTopUp(quote?: string | null): Promise<BillingRedirect> {
+  return postBillingRedirect("/api/billing/top-up", { quote });
+}
+
+export async function openCustomerPortal(): Promise<BillingRedirect> {
+  return postBillingRedirect("/api/billing/portal");
+}
+
+export async function refreshPaidEntitlement(): Promise<boolean> {
+  try { return (await fetchEntitlement(AbortSignal.timeout(15_000))).ok; }
+  catch { return false; }
+}
+
+export async function followBillingRedirect(result: BillingRedirect): Promise<boolean | "paid_refresh_needed"> {
+  if (!result.ok) return false;
+  if ("checkout" in result) {
+    const paid = await openRazorpayCheckout(result.checkout);
+    // Payment confirmation remains authoritative if the usage refresh is lost.
+    if (paid && !await refreshPaidEntitlement()) return "paid_refresh_needed";
+    return paid;
+  }
+  if ("skipped" in result && result.skipped) return true;
+  if ("url" in result && result.url) {
+    window.location.assign(result.url);
+    return true;
+  }
+  return false;
+}

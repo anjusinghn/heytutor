@@ -1,0 +1,834 @@
+/**
+ * Required visual obligations (DCP-02) — the "is this figure complete?" seam.
+ *
+ * Compiling proves a scene's geometry is valid; `sceneDemand` proves it is not
+ * a contradicted family. Neither proves the picture actually shows what the
+ * source requires: a circuit missing one named resistor still compiles, and a
+ * stale scalar can still pair with correct geometry. These obligations close
+ * that gap from source evidence and structural ProblemIR alone:
+ *
+ * - named bodies: every entity a representation intent draws must appear,
+ * - connections: every `connected` constraint must hold in the scene topology,
+ * - given dimensions: every constant given-grounded expression value must be
+ *   carried by the scene (stale planner scalars reject),
+ * - spatial relations: every structural constraint with an executable proof
+ *   predicate must carry a fatal assertion over the mapped entities.
+ *
+ * Derivation reads only ProblemIR structure (entity ids/labels, constraint
+ * kinds, intent membership, expression trees, fact kinds). There is no chapter
+ * registry, no question template, no question-ID routing, and no English
+ * stem classifier here: a source-named body must appear under its source
+ * name (exact label equality; the id is only a search hint), an unnamed
+ * body matches by stable id, and dimensions are stated literal values.
+ * Relations with no
+ * executable predicate (tangent, symmetric) are reported as unsupported, never
+ * silently dropped and never a rejection — an honest representation preserves
+ * all *supported* source requirements and declares the rest as limits.
+ *
+ * A missed supported obligation is fatal: the candidate is rejected and the
+ * caller moves to the next family or teaches text-only. Partial scenes never
+ * render.
+ */
+
+import {
+  isExecutableSceneProofPredicate,
+  isPlannerVisibleSceneProofPredicate,
+} from "../capability/capabilityManifest";
+import type { ExpressionNodeIR, ProblemIR } from "../ir/problemIR";
+import { sectionFormulaDimensionIsCarried } from "../ir/sectionFormulaSource";
+import type { SceneDocument, SceneIssue } from "../types";
+import { verifiedVseprStructure } from "../chemistry/vseprStructure";
+import type { VseprFigure } from "../chemistry/vsepr";
+import { parseFormula } from "../chemistry/formula";
+import { chemistrySpeciesIdentity } from "../chemistry/representation/species";
+import { sourceAdditionProductEntityHolds } from "../chemistry/organic/reactionBinding";
+import { sourceDepositedMetalEntityHolds } from "../chemistry/depositionBinding";
+import { bindArchetypeBody, certifiedArchetypeFigureIdentity } from "../archetypes/obligationIdentity";
+import type { ArchetypeFigureIdentity, CertifiedArchetypeBody } from "../archetypes/figureIdentity";
+
+export const VISUAL_OBLIGATIONS_VERSION = "visual-obligations/v1" as const;
+
+export type VisualObligationKind =
+  | "named_body"
+  | "connection"
+  | "given_dimension"
+  | "spatial_relation";
+
+interface VisualObligationBase {
+  id: string;
+  kind: VisualObligationKind;
+  /** ProblemIR entity ids this obligation is about (empty for pure dimensions). */
+  problemEntityIds: readonly string[];
+  /** Source facts grounding this obligation. */
+  factIds: readonly string[];
+  /** Stable human-readable summary; never matched against, only reported. */
+  label: string;
+  /** False only when no executable capability can express the requirement. */
+  supported: boolean;
+  supportReason?: string;
+}
+
+export interface NamedBodyObligation extends VisualObligationBase {
+  kind: "named_body";
+  problemEntityId: string;
+  problemKind: string;
+  problemLabel: string | null;
+}
+
+export interface ConnectionObligation extends VisualObligationBase {
+  kind: "connection";
+  problemConstraintId: string;
+}
+
+export interface GivenDimensionObligation extends VisualObligationBase {
+  kind: "given_dimension";
+  problemExpressionId: string;
+  value: number;
+}
+
+export interface SpatialRelationObligation extends VisualObligationBase {
+  kind: "spatial_relation";
+  problemConstraintId: string;
+  relation: string;
+  /** Compatible executable proof predicates (empty when unsupported). */
+  predicates: readonly string[];
+}
+
+export type VisualObligation =
+  | NamedBodyObligation
+  | ConnectionObligation
+  | GivenDimensionObligation
+  | SpatialRelationObligation;
+
+export interface VisualObligationSet {
+  version: typeof VISUAL_OBLIGATIONS_VERSION;
+  problemId: string;
+  obligations: readonly VisualObligation[];
+}
+
+export interface VisualObligationMiss {
+  obligationId: string;
+  kind: VisualObligationKind;
+  code: string;
+  message: string;
+  problemEntityIds: readonly string[];
+}
+
+export interface VisualObligationCheckResult {
+  satisfied: boolean;
+  satisfiedIds: readonly string[];
+  missing: readonly VisualObligationMiss[];
+  /** Supported obligations cannot be confused with declared limits. */
+  unsupportedIds: readonly string[];
+}
+
+/**
+ * Structural constraint kinds that demand a visible proof, and the executable
+ * predicates that can carry each one. `tangent` and `symmetric` have no
+ * executable predicate in the capability manifest, so they are reported as
+ * unsupported rather than rejected: the picture cannot prove them, and the
+ * turn must declare that limit instead of faking it.
+ */
+const SPATIAL_PREDICATES: Readonly<Record<string, readonly string[]>> = {
+  incident: ["incident", "on"],
+  parallel: ["parallel"],
+  perpendicular: ["perpendicular"],
+  inside: ["inside"],
+  tangent: [],
+  symmetric: [],
+};
+
+/** Narrow a loose structural view to a full ProblemIR before deriving. */
+export function isFullProblemIRStructure(value: unknown): value is ProblemIR {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  for (const field of ["facts", "entities", "expressions", "constraints", "representationIntents"]) {
+    if (!Array.isArray(record[field])) return false;
+  }
+  const entities = record.entities as unknown[];
+  if (entities.length > 0) {
+    const shaped = entities.every(
+      (entity) =>
+        typeof entity === "object" &&
+        entity !== null &&
+        typeof (entity as Record<string, unknown>).id === "string",
+    );
+    if (!shaped) return false;
+  }
+  return true;
+}
+
+export function deriveVisualObligations(problem: ProblemIR): VisualObligationSet {
+  const obligations: VisualObligation[] = [];
+  const entities = new Map((problem.entities ?? []).map((entity) => [entity.id, entity]));
+  const facts = new Map((problem.facts ?? []).map((fact) => [fact.id, fact]));
+
+  const obligatedEntities = new Set<string>();
+  for (const intent of problem.representationIntents ?? []) {
+    for (const entityId of intent.entityIds ?? []) {
+      if (obligatedEntities.has(entityId)) continue;
+      const entity = entities.get(entityId);
+      if (!entity) continue;
+      obligatedEntities.add(entityId);
+      obligations.push({
+        id: `body:${entityId}`,
+        kind: "named_body",
+        problemEntityIds: [entityId],
+        factIds: [...entity.evidenceFactIds],
+        label: entity.label ?? entityId,
+        supported: true,
+        problemEntityId: entityId,
+        problemKind: entity.kind,
+        problemLabel: entity.label ?? null,
+      });
+    }
+  }
+
+  for (const constraint of problem.constraints ?? []) {
+    if (constraint.kind === "equation" || constraint.kind === "inequality") continue;
+    const entityIds = [...(constraint.entityIds ?? [])];
+    if (entityIds.length < 2 || entityIds.some((id) => !entities.has(id))) continue;
+    if (constraint.kind === "connected") {
+      obligations.push({
+        id: `connection:${constraint.id}`,
+        kind: "connection",
+        problemEntityIds: entityIds,
+        factIds: [...constraint.evidenceFactIds],
+        label: entityIds.join(" + "),
+        supported: true,
+        problemConstraintId: constraint.id,
+      });
+      continue;
+    }
+    const predicates = (SPATIAL_PREDICATES[constraint.kind] ?? []).filter((predicate) =>
+      isExecutableSceneProofPredicate(predicate),
+    );
+    const supported = predicates.length > 0;
+    obligations.push({
+      id: `relation:${constraint.id}`,
+      kind: "spatial_relation",
+      problemEntityIds: entityIds,
+      factIds: [...constraint.evidenceFactIds],
+      label: `${constraint.kind} ${entityIds.join(" ")}`,
+      supported,
+      supportReason: supported
+        ? undefined
+        : `no executable proof predicate for ${constraint.kind}`,
+      problemConstraintId: constraint.id,
+      relation: constraint.kind,
+      predicates,
+    });
+  }
+
+  for (const expression of problem.expressions ?? []) {
+    if (expression.valueType !== "scalar") continue;
+    // A given dimension is a stated literal, not a computation: compound trees
+    // are solver business, and obligating them would force scenes to carry
+    // incidental arithmetic. Bare literals grounded in given facts are the
+    // source's own numbers, so the figure must carry them.
+    if (expression.root.kind !== "number" && expression.root.kind !== "constant") continue;
+    const groundedInGiven = (expression.evidenceFactIds ?? []).some(
+      (factId) => facts.get(factId)?.kind === "given",
+    );
+    if (!groundedInGiven) continue;
+    const value = evaluateConstantExpression(expression.root);
+    if (value === null) continue;
+    obligations.push({
+      id: `dimension:${expression.id}`,
+      kind: "given_dimension",
+      problemEntityIds: [],
+      factIds: [...expression.evidenceFactIds],
+      label: String(value),
+      supported: true,
+      problemExpressionId: expression.id,
+      value,
+    });
+  }
+
+  return { version: VISUAL_OBLIGATIONS_VERSION, problemId: problem.id, obligations };
+}
+
+export function checkVisualObligations(
+  set: VisualObligationSet,
+  document: SceneDocument,
+  originalQuestion?: string,
+): VisualObligationCheckResult {
+  const satisfiedIds: string[] = [];
+  const missing: VisualObligationMiss[] = [];
+  const unsupportedIds: string[] = [];
+  const molecule = verifiedVseprStructure(document, originalQuestion);
+  // Only a certified physics archetype, recomputed whole from the original
+  // question, has an identity; every other document keeps exact binding.
+  const archetype = document.source.archetype !== undefined
+    ? certifiedArchetypeFigureIdentity(document, originalQuestion)
+    : null;
+  const mapping = mapProblemEntities(set, document, molecule, archetype, originalQuestion);
+
+  for (const obligation of set.obligations) {
+    if (!obligation.supported) {
+      unsupportedIds.push(obligation.id);
+      continue;
+    }
+    const miss = checkObligation(obligation, document, mapping, molecule);
+    if (miss) missing.push(miss);
+    else satisfiedIds.push(obligation.id);
+  }
+  // Persistence is part of completeness: an obligated body that the turn does
+  // not require and does not reveal is lost on save and on replay.
+  for (const obligation of set.obligations) {
+    if (obligation.kind !== "named_body" || !obligation.supported) continue;
+    const sceneId = mapping.get(obligation.problemEntityId);
+    if (!sceneId) continue;
+    if (!document.requiredEntityIds.includes(sceneId)) {
+      missing.push({
+        obligationId: obligation.id,
+        kind: obligation.kind,
+        code: "uncovered_required_entity",
+        message: `obligated body ${describeBody(obligation)} is missing from requiredEntityIds`,
+        problemEntityIds: [obligation.problemEntityId],
+      });
+    }
+    const revealed = document.revealGroups.some((group) => group.entityIds.includes(sceneId));
+    if (!revealed) {
+      missing.push({
+        obligationId: obligation.id,
+        kind: obligation.kind,
+        code: "uncovered_reveal_entity",
+        message: `obligated body ${describeBody(obligation)} is in no reveal group`,
+        problemEntityIds: [obligation.problemEntityId],
+      });
+    }
+  }
+
+  return { satisfied: missing.length === 0, satisfiedIds, missing, unsupportedIds };
+}
+
+/** Fatal scene issues for every missed supported obligation. */
+export function visualObligationIssues(
+  problem: ProblemIR,
+  document: SceneDocument,
+  originalQuestion?: string,
+): SceneIssue[] {
+  const set = deriveVisualObligations(problem);
+  const result = checkVisualObligations(set, document, originalQuestion);
+  return result.missing.map((miss) => ({
+    code: miss.code,
+    message: miss.message,
+    severity: "fatal" as const,
+    path: `visualObligations/${miss.obligationId}`,
+    entityIds: [],
+  }));
+}
+
+/** First-miss summary for the family loop; null when the candidate is whole. */
+export function visualObligationRejection(
+  set: VisualObligationSet,
+  document: SceneDocument,
+  originalQuestion?: string,
+): string | null {
+  const result = checkVisualObligations(set, document, originalQuestion);
+  return result.missing.length > 0 ? result.missing[0]!.message : null;
+}
+
+/**
+ * Planner-availability half of the slice: every supported obligation must be
+ * expressible with planner-visible capabilities, so the planner can actually
+ * be asked for what the obligations demand.
+ */
+export function visualObligationsPlannerCoverage(set: VisualObligationSet): {
+  covered: boolean;
+  uncoveredIds: readonly string[];
+} {
+  const uncoveredIds: string[] = [];
+  for (const obligation of set.obligations) {
+    if (!obligation.supported) continue;
+    if (obligation.kind !== "spatial_relation") continue;
+    const visible = obligation.predicates.some((predicate) =>
+      isPlannerVisibleSceneProofPredicate(predicate),
+    );
+    if (!visible) uncoveredIds.push(obligation.id);
+  }
+  return { covered: uncoveredIds.length === 0, uncoveredIds };
+}
+
+function checkObligation(
+  obligation: VisualObligation,
+  document: SceneDocument,
+  mapping: ReadonlyMap<string, string>,
+  molecule: VseprFigure | null,
+): VisualObligationMiss | null {
+  switch (obligation.kind) {
+    case "named_body": {
+      const sceneId = mapping.get(obligation.problemEntityId);
+      return sceneId
+        ? null
+        : {
+            obligationId: obligation.id,
+            kind: obligation.kind,
+            code: "missing_named_body",
+            message: `obligated body ${describeBody(obligation)} has no scene entity`,
+            problemEntityIds: [obligation.problemEntityId],
+          };
+    }
+    case "connection": {
+      const sceneIds = lookupSceneIds(obligation.problemEntityIds, document, mapping);
+      if (!sceneIds) {
+        return {
+          obligationId: obligation.id,
+          kind: obligation.kind,
+          code: "missing_connection",
+          message: `connection ${obligation.label} names a body with no scene entity`,
+          problemEntityIds: [...obligation.problemEntityIds],
+        };
+      }
+      return (molecularAtomsConnected(molecule, sceneIds) || sceneIdsConnected(document, sceneIds))
+        ? null
+        : {
+            obligationId: obligation.id,
+            kind: obligation.kind,
+            code: "missing_connection",
+            message: `connection ${obligation.label} is not joined in the scene topology`,
+            problemEntityIds: [...obligation.problemEntityIds],
+          };
+    }
+    case "given_dimension": {
+      return (sectionFormulaDimensionIsCarried(document, obligation.problemExpressionId, obligation.value, obligation.factIds)
+        ?? sceneCarriesValue(document, obligation.value))
+        ? null
+        : {
+            obligationId: obligation.id,
+            kind: obligation.kind,
+            code: "missing_given_dimension",
+            message: `given dimension ${obligation.label} is not carried by the scene`,
+            problemEntityIds: [],
+          };
+    }
+    case "spatial_relation": {
+      const sceneIds = lookupSceneIds(obligation.problemEntityIds, document, mapping);
+      if (!sceneIds) {
+        return {
+          obligationId: obligation.id,
+          kind: obligation.kind,
+          code: "missing_spatial_relation",
+          message: `${obligation.label} names a body with no scene entity`,
+          problemEntityIds: [...obligation.problemEntityIds],
+        };
+      }
+      const proved = document.assertions.some(
+        (assertion) =>
+          assertion.severity === "fatal" &&
+          obligation.predicates.includes(assertion.predicate) &&
+          sceneIds.every((id) => assertion.entities.includes(id)),
+      );
+      return proved
+        ? null
+        : {
+            obligationId: obligation.id,
+            kind: obligation.kind,
+            code: "missing_spatial_relation",
+            message: `${obligation.label} has no fatal ${obligation.predicates.join("/")} proof`,
+            problemEntityIds: [...obligation.problemEntityIds],
+          };
+    }
+  }
+}
+
+function describeBody(obligation: NamedBodyObligation): string {
+  return obligation.problemLabel ?? obligation.problemEntityId;
+}
+
+/**
+ * Greedy one-to-one map from obligated ProblemIR entities to scene entities.
+ * A source-named body must appear under its source name: the id is only a
+ * search hint, and an id hit with a missing or conflicting label does not
+ * match — a renamed body is a different body. An unnamed body matches by
+ * stable id. Each scene entity is consumed once, so two obligations sharing
+ * one label still report the second as missing. Only when no exact match
+ * exists may a certified physics archetype, recomputed whole from the
+ * original question, bind a model-word name to a body it constructed, by role
+ * (`archetypes/obligationIdentity`). A chemistry name such as "SF4 molecule"
+ * binds only to a species the certified VSEPR figure actually drew.
+ */
+function mapProblemEntities(
+  set: VisualObligationSet,
+  document: SceneDocument,
+  molecule: VseprFigure | null,
+  archetype: ArchetypeFigureIdentity | null,
+  originalQuestion?: string,
+): Map<string, string> {
+  const mapping = new Map<string, string>();
+  const consumed = new Set<string>();
+  // Certified archetype bodies already bound; a body that consumes no mark
+  // (the river, named by its near bank) must still bind only once.
+  const usedBodies = new Set<CertifiedArchetypeBody>();
+  const byId = new Map(document.entities.map((entity) => [entity.id, entity]));
+  const molecularBodies = new Set(molecule?.structures.flatMap((structure) => [structure.formulaId, ...structure.atomIds]) ?? []);
+  const labelHolds = (entity: SceneDocument["entities"][number], problemLabel: string | null): boolean =>
+    problemLabel === null ||
+    (typeof entity.label === "string" &&
+      (sameObligationLabel(entity.label, problemLabel)
+        || originalQuestion !== undefined && (sourceAdditionProductEntityHolds(originalQuestion, document, entity, problemLabel)
+          || sourceDepositedMetalEntityHolds(originalQuestion, document, entity, problemLabel))));
+  // Text is not a physical body. Structural kinds constrain identity even
+  // when the label is exact: a trajectory's name on a point cannot name a curve.
+  const kindHolds = (entity: SceneDocument["entities"][number], obligation: NamedBodyObligation): boolean => {
+    // An atom symbol or formula represents a body only when the complete
+    // source-derived molecule (including every bond/electron) was checked.
+    if (["body", "component"].includes(obligation.problemKind) && molecularBodies.has(entity.id)) return true;
+    switch (obligation.problemKind) {
+      case "point": return entity.kind === "point";
+      // Analytic straight lines may be rendered as sampled function curves.
+      case "line": return ["line", "segment", "ray", "polyline"].includes(entity.kind);
+      case "curve": return ["polyline", "circle", "arc", "line", "segment", "ray"].includes(entity.kind);
+      case "body":
+      case "solid":
+      case "component":
+      case "region":
+      case "field": return !["label", "group", "dimension", "angle_mark", "right_angle_mark", "axes"].includes(entity.kind);
+      default: return true;
+    }
+  };
+  for (const obligation of set.obligations) {
+    if (obligation.kind !== "named_body") continue;
+    if (["body", "component"].includes(obligation.problemKind) && obligation.problemLabel &&
+      /^(?:equatorial\s+)?lone\s+pair$/i.test(obligation.problemLabel.trim())) {
+      const equatorial = /^equatorial\s/i.test(obligation.problemLabel.trim());
+      const pair = molecule?.structures.flatMap((structure) => structure.lonePairs)
+        .find((candidate) => (!equatorial || candidate.equatorial) && !consumed.has(candidate.entityIds[0]));
+      if (pair) {
+        // The representative id denotes both freshly checked electron marks.
+        mapping.set(obligation.problemEntityId, pair.entityIds[0]);
+        consumed.add(pair.entityIds[0]);
+        continue;
+      }
+    }
+    const direct = byId.get(obligation.problemEntityId);
+    if (direct && !consumed.has(direct.id) && kindHolds(direct, obligation) && labelHolds(direct, obligation.problemLabel)) {
+      mapping.set(obligation.problemEntityId, direct.id);
+      consumed.add(direct.id);
+      continue;
+    }
+    if (obligation.problemLabel === null) continue;
+    const wanted = obligation.problemLabel;
+    const labelled = document.entities.find(
+      (entity) =>
+        !consumed.has(entity.id) &&
+        kindHolds(entity, obligation) &&
+        typeof entity.label === "string" &&
+        labelHolds(entity, wanted),
+    );
+    if (labelled) {
+      mapping.set(obligation.problemEntityId, labelled.id);
+      consumed.add(labelled.id);
+      continue;
+    }
+    const species = bindCertifiedSpecies(molecule, document, obligation, consumed);
+    if (species) {
+      mapping.set(obligation.problemEntityId, species);
+      consumed.add(species);
+      continue;
+    }
+    // A physics body named in model words ("parabolic trajectory", "near
+    // bank") binds only to a body the certified archetype constructed, by role.
+    const bound = archetype ? bindArchetypeBody(archetype, obligation.problemKind, wanted, consumed, usedBodies) : null;
+    if (bound) {
+      mapping.set(obligation.problemEntityId, bound.entityId);
+      usedBodies.add(bound.body);
+      for (const id of bound.consumes) consumed.add(id);
+    }
+  }
+  return mapping;
+}
+
+function molecularAtomsConnected(molecule: VseprFigure | null, ids: readonly string[]): boolean {
+  if (ids.length < 2) return false;
+  return molecule?.structures.some((structure) => {
+    if (!ids.every((id) => structure.atomIds.includes(id))) return false;
+    const reached = new Set([ids[0]!]);
+    // Only bonds between the requested atoms count; two ligand atoms alone
+    // do not acquire a direct bond through an unrequested central atom.
+    for (let pass = 0; pass < ids.length; pass += 1) {
+      for (const [a, b] of structure.bonds) {
+        if (!ids.includes(a) || !ids.includes(b)) continue;
+        if (reached.has(a)) reached.add(b);
+        if (reached.has(b)) reached.add(a);
+      }
+    }
+    return ids.every((id) => reached.has(id));
+  }) ?? false;
+}
+
+/** Resolve constraint endpoints through the body map, then by direct lookup. */
+function lookupSceneIds(
+  problemIds: readonly string[],
+  document: SceneDocument,
+  mapping: ReadonlyMap<string, string>,
+): string[] | null {
+  const sceneIds: string[] = [];
+  for (const problemId of problemIds) {
+    const mapped = mapping.get(problemId);
+    if (mapped) {
+      sceneIds.push(mapped);
+      continue;
+    }
+    const direct = document.entities.some((entity) => entity.id === problemId);
+    if (direct) {
+      sceneIds.push(problemId);
+      continue;
+    }
+    return null;
+  }
+  return sceneIds;
+}
+
+/**
+ * Undirected construction-graph connectivity over entity ids: every string in
+ * a construction's inputs that names an entity is joined to every output.
+ * Assertions deliberately contribute no edges — a claimed path is a proof
+ * about the graph, not the graph itself, so a lying assertion can never
+ * satisfy a connection on an uncompiled document. Transitive connectivity
+ * counts: a series path through other components still joins its ends.
+ */
+const NON_MATERIAL_KINDS: ReadonlySet<string> = new Set(["vector", "angle_mark", "right_angle_mark", "dimension", "label"]);
+
+function sceneIdsConnected(document: SceneDocument, sceneIds: readonly string[]): boolean {
+  if (sceneIds.length < 2) return true;
+  const known = new Set(document.entities.map((entity) => entity.id));
+  const adjacency = new Map<string, Set<string>>();
+  const link = (first: string, second: string): void => {
+    if (first === second || !known.has(first) || !known.has(second)) return;
+    const siblings = adjacency.get(first) ?? new Set<string>();
+    siblings.add(second);
+    adjacency.set(first, siblings);
+    const reverse = adjacency.get(second) ?? new Set<string>();
+    reverse.add(first);
+    adjacency.set(second, reverse);
+  };
+  const clique = (ids: readonly string[]): void => {
+    for (let index = 0; index < ids.length; index += 1) {
+      for (let other = index + 1; other < ids.length; other += 1) {
+        link(ids[index]!, ids[other]!);
+      }
+    }
+  };
+  const kindOf = new Map(document.entities.map((entity) => [entity.id, entity.kind]));
+  for (const construction of document.constructions) {
+    // A force or velocity arrow, an angle mark, a dimension or a label sits
+    // on bodies without joining them: a tension arrow drawn from a block to
+    // the axle is not the string. Only material ink can connect two bodies,
+    // so a pulley with a cut string stays disconnected.
+    const outputs = construction.outputs.filter((output) => known.has(output));
+    if (outputs.length > 0 && outputs.every((output) => NON_MATERIAL_KINDS.has(kindOf.get(output) ?? ""))) continue;
+    const touched = [
+      ...collectEntityReferences(construction.inputs, known),
+      ...outputs,
+    ];
+    clique(touched);
+  }
+  const [start, ...rest] = sceneIds;
+  const reached = new Set<string>([start!]);
+  const queue = [start!];
+  while (queue.length > 0) {
+    const current = queue.pop()!;
+    for (const next of adjacency.get(current) ?? []) {
+      if (reached.has(next)) continue;
+      reached.add(next);
+      queue.push(next);
+    }
+  }
+  return rest.every((id) => reached.has(id));
+}
+
+function collectEntityReferences(inputs: Record<string, unknown>, known: ReadonlySet<string>): string[] {
+  const found: string[] = [];
+  const visit = (value: unknown): void => {
+    if (typeof value === "string") {
+      if (known.has(value)) found.push(value);
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item);
+    }
+  };
+  for (const value of Object.values(inputs)) visit(value);
+  return found;
+}
+
+function sceneCarriesValue(document: SceneDocument, value: number): boolean {
+  return document.quantities.some(
+    (quantity) => typeof quantity.value === "number" && valuesMatch(quantity.value, value),
+  );
+}
+
+function valuesMatch(first: number, second: number): boolean {
+  if (!Number.isFinite(first) || !Number.isFinite(second)) return false;
+  if (first === second) return true;
+  return Math.abs(first - second) <= 1e-9 * Math.max(1, Math.abs(first), Math.abs(second));
+}
+
+function normalizeObligationLabel(value: string): string {
+  return value.trim().replace(/\s+/g, " ");
+}
+
+/**
+ * ProblemIR often names a drawn species as "SF4 molecule". The wrapper is not
+ * a different body; the formula is. Articles are lowercase words only, so a
+ * point named "A" is never read as one. "ion" is dropped only when a charge is
+ * still written ("NH4+ ion"); "Na ion" keeps it and names no drawn species.
+ * Used only against a certified VSEPR figure, never for other subjects.
+ */
+function speciesObligationName(label: string): string {
+  const bare = label
+    .trim()
+    .replace(/^(?:[Tt]he|an?)\s+/, "")
+    .replace(/\s+(?:molecules?|compounds?|species)$/i, "")
+    .trim();
+  const charged = /^(.*[+\-\u2212]\)?)\s+ions?$/i.exec(bare);
+  return charged ? charged[1]!.trim() : bare;
+}
+
+// The kinds main binds a molecule for, plus "other", which live ProblemIR uses for
+// a named species ("SF4 molecule"). Never a solid, region or field.
+const SPECIES_BODY_KINDS = new Set(["body", "component", "other"]);
+
+/**
+ * Bind one obligated chemistry name to a species the certified VSEPR figure
+ * drew, with the same formula and charge, or null. Each drawn species binds
+ * at most once, so a second SF4 obligation stays missing and an H2O
+ * obligation cannot attach to SF4. Only the species title is consumed, so a
+ * "lone pair" obligation can still bind that species' electrons.
+ */
+function bindCertifiedSpecies(
+  molecule: VseprFigure | null,
+  document: SceneDocument,
+  obligation: NamedBodyObligation,
+  consumed: ReadonlySet<string>,
+): string | null {
+  if (!molecule || !SPECIES_BODY_KINDS.has(obligation.problemKind) || !obligation.problemLabel) return null;
+  const wanted = chemistrySpeciesIdentity(speciesObligationName(obligation.problemLabel));
+  if (!wanted) return null;
+  for (const structure of molecule.structures) {
+    if (consumed.has(structure.formulaId)) continue;
+    const title = document.entities.find((entity) => entity.id === structure.formulaId);
+    const drawn = title?.label ? chemistrySpeciesIdentity(title.label.replace(/_(\d+)/g, "$1").replace(/\^\(([^)]*)\)/g, "$1")) : null;
+    if (drawn && drawn.key === wanted.key) return structure.formulaId;
+  }
+  return null;
+}
+
+/**
+ * A board formula writes subscripts as `_4` and charges as `^(2-)`. That is
+ * the same species as the source spelling `SF4` or `SO4^2-`, not a renamed body.
+ * Anything that is not a chemical formula keeps the exact trimmed comparison.
+ */
+function sameObligationLabel(sceneLabel: string, problemLabel: string): boolean {
+  if (normalizeObligationLabel(sceneLabel) === normalizeObligationLabel(problemLabel)) return true;
+  // A component symbol written with its stated value ("R1=4 ohm") names the
+  // same body as the bare symbol "R1". Only the name is compared here; the
+  // value is audited against the source by save admission. A different name
+  // ("R2=4 ohm" for R1) or prose before the "=" never matches.
+  const valued = /^([A-Za-z][A-Za-z0-9]{0,3})\s*=\s*\S/.exec(normalizeObligationLabel(sceneLabel));
+  if (valued && /^[A-Za-z][A-Za-z0-9]{0,3}$/.test(problemLabel.trim()) && valued[1] === problemLabel.trim()) return true;
+  const sceneAqueous = aqueousFormulaIdentity(sceneLabel);
+  const problemAqueous = aqueousFormulaIdentity(problemLabel);
+  if (sceneAqueous !== null && problemAqueous !== null) return sceneAqueous === problemAqueous;
+  const sceneKey = formulaIdentity(sceneLabel);
+  const problemKey = formulaIdentity(problemLabel);
+  return sceneKey !== null && sceneKey === problemKey;
+}
+
+/** Closed equivalent spellings of one aqueous species. Formula grouping and
+ * charge are retained; concentrations, other phases and prose are not aliases. */
+function aqueousFormulaIdentity(label: string): string | null {
+  const text = label.trim();
+  const wrapped = /^aqueous\s+(\S+)\s+solution$/i.exec(text) ?? /^(\S+)\(aq\)$/.exec(text);
+  if (!wrapped) return null;
+  const formula = parseFormula(wrapped[1]!.replace(/_(\d+)/g, "$1"));
+  if (!formula) return null;
+  const exact = formula.text.replace(/\^\(?(\d*)([+-])\)?$/, (_, magnitude: string, sign: string) => `^(${magnitude || "1"}${sign})`);
+  return JSON.stringify(["aq", exact, formula.charge]);
+}
+
+function formulaIdentity(value: string): string | null {
+  const key = value
+    .trim()
+    .replace(/\s+/g, "")
+    .replace(/_(\d+)/g, "$1")
+    .replace(/\^\(([^)]*)\)/g, "$1")
+    .replace(/[\^()[\]]/g, "");
+  if (!/^[A-Z][A-Za-z0-9+-]*$/.test(key)) return null;
+  return key;
+}
+
+/**
+ * Closed-form constant evaluation over the ProblemIR expression tree. Any free
+ * variable — or anything outside the finite range — is not a given dimension,
+ * so it yields no obligation rather than a guessed one. Function semantics
+ * match the audited expression language (`log` is the natural logarithm).
+ */
+export function evaluateConstantExpression(root: ExpressionNodeIR): number | null {
+  switch (root.kind) {
+    case "number":
+      return Number.isFinite(root.value) && Math.abs(root.value) <= 1e12 ? root.value : null;
+    case "constant":
+      return root.name === "pi" ? Math.PI : Math.E;
+    case "variable":
+      return null;
+    case "unary": {
+      const operand = evaluateConstantExpression(root.operand);
+      if (operand === null) return null;
+      const value = root.operator === "+" ? operand : -operand;
+      return Number.isFinite(value) ? value : null;
+    }
+    case "binary": {
+      const left = evaluateConstantExpression(root.left);
+      const right = evaluateConstantExpression(root.right);
+      if (left === null || right === null) return null;
+      let value: number;
+      switch (root.operator) {
+        case "+": value = left + right; break;
+        case "-": value = left - right; break;
+        case "*": value = left * right; break;
+        case "/":
+          if (right === 0) return null;
+          value = left / right;
+          break;
+        case "^":
+          value = Math.pow(left, right);
+          break;
+      }
+      return Number.isFinite(value) && Math.abs(value) <= 1e12 ? value : null;
+    }
+    case "call": {
+      const argument = evaluateConstantExpression(root.argument);
+      if (argument === null) return null;
+      let value: number;
+      switch (root.function) {
+        case "sin": value = Math.sin(argument); break;
+        case "cos": value = Math.cos(argument); break;
+        case "tan": value = Math.tan(argument); break;
+        case "asin":
+          if (Math.abs(argument) > 1) return null;
+          value = Math.asin(argument);
+          break;
+        case "acos":
+          if (Math.abs(argument) > 1) return null;
+          value = Math.acos(argument);
+          break;
+        case "atan": value = Math.atan(argument); break;
+        case "sqrt":
+          if (argument < 0) return null;
+          value = Math.sqrt(argument);
+          break;
+        case "abs": value = Math.abs(argument); break;
+        case "exp": value = Math.exp(argument); break;
+        case "log":
+        case "ln":
+          if (argument <= 0) return null;
+          value = Math.log(argument);
+          break;
+      }
+      return Number.isFinite(value) && Math.abs(value) <= 1e12 ? value : null;
+    }
+  }
+}

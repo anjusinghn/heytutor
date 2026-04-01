@@ -1,0 +1,148 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { isAuthDisabled } from "../../lib/authDisabled";
+import {
+  clientIpFromForwarded,
+  consumeIpRateLimit,
+  rateLimitBucketForPath,
+  resetIpRateLimitsForTests,
+} from "../../lib/http/ipRateLimit";
+import { contentSecurityPolicy, securityHeaderEntries } from "../../lib/http/securityHeaders";
+import {
+  resetTtsWsConnectionsForTests,
+  tryAcquireTtsWsConnection,
+  TTS_WS_MAX_CONNECTIONS_PER_USER,
+  TTS_WS_MAX_CONNECTIONS_WITH_BYPASS,
+  ttsWsCharsWithinCeiling,
+} from "../../lib/tts/wsRelayLimits";
+
+function assert(condition: unknown, message: string): asserts condition {
+  if (!condition) throw new Error(message);
+}
+
+const root = resolve(import.meta.dirname, "../..");
+const read = (relative: string) => readFileSync(resolve(root, relative), "utf8");
+
+function env(values: Record<string, string>): NodeJS.ProcessEnv {
+  return values as unknown as NodeJS.ProcessEnv;
+}
+
+assert(!isAuthDisabled(env({}), "development"), "unset AUTH_DISABLED keeps the login gate on");
+assert(!isAuthDisabled(env({ AUTH_DISABLED: "1" }), "production"), "production refuses AUTH_DISABLED");
+
+const auth = read("lib/auth.ts");
+assert(
+  !auth.includes("?? (await getAnonymousCookieId())"),
+  "getUserId must not fall back to htutor_uid when the login gate is on",
+);
+assert(
+  auth.includes("if (!isAuthDisabled()) return null"),
+  "the anonymous cookie helper must refuse to mint or return an id while auth is on",
+);
+
+const flags = read("lib/billing/flags.ts");
+assert(flags.includes("LECTURE_LAB_TOKEN"), "lecture-lab bypass is token-gated");
+assert(!flags.includes("isAutumnEnabled(env)) return false"), "lecture-lab must not open because Autumn is off");
+
+const headers = securityHeaderEntries();
+const names = new Set(headers.map((header) => header.key));
+assert(names.has("Content-Security-Policy"), "CSP is set");
+assert(names.has("X-Content-Type-Options"), "nosniff is set");
+assert(names.has("Referrer-Policy"), "Referrer-Policy is set");
+assert(names.has("Permissions-Policy"), "Permissions-Policy is set");
+assert(contentSecurityPolicy().includes("frame-ancestors"), "CSP limits who may frame the tutor");
+assert(contentSecurityPolicy().includes("https://accelute.co"), "the landing origin may frame the embed");
+assert(contentSecurityPolicy(env({ NODE_ENV: "production" })).includes("https://accelute.co/api/region"), "first-party country detection is allowed by production CSP");
+assert(contentSecurityPolicy(env({ NODE_ENV: "development", NEXT_PUBLIC_LANDING_URL: "http://localhost:5174" })).includes("http://localhost:5174/api/region"), "configured landing country endpoint is allowed without a wildcard");
+assert(
+  contentSecurityPolicy().includes("https://*.googleusercontent.com"),
+  "CSP must allow Google profile photos",
+);
+assert(
+  !contentSecurityPolicy(env({ NODE_ENV: "production" })).includes("'unsafe-eval'"),
+  "production CSP must not allow eval",
+);
+assert(
+  contentSecurityPolicy(env({ NODE_ENV: "development" })).includes("'unsafe-eval'"),
+  "development CSP must allow eval for the Next dev runtime",
+);
+assert(
+  contentSecurityPolicy().includes("connect-src 'self' blob: data:"),
+  "lecture download must be allowed to fetch in-tab blob and data audio",
+);
+assert(
+  contentSecurityPolicy().includes("media-src 'self' blob: data:"),
+  "CSP must allow data: audio for the WebAudio unlock WAV",
+);
+assert(
+  contentSecurityPolicy(env({ NODE_ENV: "production" })).includes("media-src 'self' blob: data:"),
+  "production CSP must allow data: audio for the WebAudio unlock WAV",
+);
+
+assert(read("next.config.ts").includes("securityHeaderEntries"), "next.config applies security headers");
+assert(read("middleware.ts").includes("applySecurityHeaders"), "middleware applies security headers");
+assert(read("middleware.ts").includes("consumeIpRateLimit"), "middleware rate-limits login/account/board/trace");
+
+assert(rateLimitBucketForPath("/api/auth/callback/google") === "auth", "auth callbacks are rate-limited");
+assert(rateLimitBucketForPath("/api/account/me") === "account", "account routes are rate-limited");
+assert(rateLimitBucketForPath("/api/boards/abc") === "boards", "board routes are rate-limited");
+assert(rateLimitBucketForPath("/api/trace/event") === "trace", "trace routes are rate-limited");
+assert(rateLimitBucketForPath("/api/home-suggestions") === "suggestions", "AI suggestions are rate-limited");
+assert(rateLimitBucketForPath("/api/health") === null, "health is not credit-shaped-limited");
+assert(rateLimitBucketForPath("/monitoring") === "sentry", "the Sentry tunnel is rate-limited");
+assert(
+  clientIpFromForwarded("203.0.113.8, 127.0.0.1", undefined) === "203.0.113.8",
+  "the local reverse-proxy hop is not the client",
+);
+assert(
+  clientIpFromForwarded("198.51.100.4, ::ffff:127.0.0.1", "127.0.0.1") === "198.51.100.4",
+  "an IPv4-mapped loopback hop is not the client",
+);
+assert(
+  clientIpFromForwarded(undefined, "203.0.113.9") === "203.0.113.9",
+  "a direct remote address is the client when no forwarded chain exists",
+);
+
+resetIpRateLimitsForTests();
+for (let i = 0; i < 40; i += 1) {
+  assert(consumeIpRateLimit({ ip: "1.1.1.1", bucket: "auth" }).ok, "auth budget allows the first 40");
+}
+assert(!consumeIpRateLimit({ ip: "1.1.1.1", bucket: "auth" }).ok, "the 41st auth attempt is 429");
+assert(consumeIpRateLimit({ ip: "2.2.2.2", bucket: "auth" }).ok, "a second IP has its own budget");
+
+assert(ttsWsCharsWithinCeiling(0, 48_000), "a full connection budget is allowed");
+assert(!ttsWsCharsWithinCeiling(47_000, 2_000), "the connection ceiling is hard");
+resetTtsWsConnectionsForTests();
+for (let i = 0; i < TTS_WS_MAX_CONNECTIONS_PER_USER; i += 1) {
+  assert(tryAcquireTtsWsConnection("user-a"), "a user may open up to the socket cap");
+}
+assert(!tryAcquireTtsWsConnection("user-a"), "a fourth TTS socket for one user is refused");
+resetTtsWsConnectionsForTests();
+assert(TTS_WS_MAX_CONNECTIONS_WITH_BYPASS === 5, "the authenticated staff cap is five");
+for (let i = 0; i < TTS_WS_MAX_CONNECTIONS_WITH_BYPASS; i += 1) {
+  assert(tryAcquireTtsWsConnection("staff-a", true), "authenticated staff can open five sockets");
+}
+assert(!tryAcquireTtsWsConnection("staff-a", true), "the sixth staff socket is refused");
+resetTtsWsConnectionsForTests();
+for (let i = 0; i < TTS_WS_MAX_CONNECTIONS_PER_USER; i += 1) {
+  assert(tryAcquireTtsWsConnection("dev-cookie", false), "anonymous dev sockets retain the base cap");
+}
+assert(!tryAcquireTtsWsConnection("dev-cookie", false), "an anonymous fourth socket is refused");
+const relayServer = read("server.ts");
+assert(/!isAuthDisabled\(\)\s*&&\s*ticketUser\?\.userId\s*===\s*userId\s*&&\s*grant\.skipGates/.test(relayServer),
+  "only an authenticated session ticket and server grant can increase the socket cap");
+assert(/tryAcquireTtsWsConnection\(userId, authenticatedSkipGates\)/.test(relayServer),
+  "the server must pass the authenticated staff allowance to the connection cap");
+
+const media = read("lib/object-store/serveMedia.ts");
+assert(!media.includes("object.contentType"), "media responses must not echo the stored Content-Type");
+assert(media.includes("contentTypeForStoredKey"), "media Content-Type comes from the key allowlist");
+assert(media.includes("content-disposition"), "media sets Content-Disposition");
+
+const unit = read("../../deploy/aws/setup-vm.sh");
+assert(unit.includes("User=heytutor"), "the systemd unit must not run as root");
+assert(!unit.includes("User=root"), "setup-vm must not install a root unit");
+assert(unit.includes("Strict-Transport-Security"), "Caddy sets HSTS");
+assert(read("../../deploy/aws/deploy.sh").includes("User=heytutor"), "deploys keep the service off root");
+
+console.log("✓ security controls fail closed: auth, lecture-lab, headers, rate limit, WS caps, media types");

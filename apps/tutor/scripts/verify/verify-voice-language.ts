@@ -1,0 +1,262 @@
+/**
+ * Settings → voice wiring. The student picks a language and an accent; that
+ * pair must collapse to one voice key, cross the wire, and resolve to the
+ * right voice on the server, with Indian English as the default and as the
+ * fallback for anything unconfigured. Hinglish is one Sarvam voice, offered
+ * only when the server holds a Sarvam key (see verify-sarvam-tts).
+ */
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import {
+  DEFAULT_ACCENT,
+  DEFAULT_AUDIO_LANGUAGE,
+  DEFAULT_FAMILIARITY,
+  DEFAULT_VOICE_KEY,
+  isSubjectFamiliarity,
+  isTutorAccent,
+  isTutorAudioLanguage,
+  FAMILIARITY_ADDONS,
+  normalizeVoiceKey,
+  toVoiceKey,
+  TTS_LANG_HEADER,
+  TTS_LANG_QUERY,
+} from "@heytutor/tutor-core";
+import { configuredVoiceKeys, resolveVoiceId } from "../../lib/tts/ttsProxy";
+
+const root = resolve(import.meta.dirname, "../..");
+
+function assert(condition: unknown, message: string): void {
+  if (!condition) throw new Error(message);
+}
+
+// --- defaults: Indian English is the product default -----------------------
+assert(DEFAULT_AUDIO_LANGUAGE === "english", "default audio language is not English");
+assert(DEFAULT_ACCENT === "india", "default accent is not India");
+assert(DEFAULT_VOICE_KEY === "en-IN", "default voice key is not en-IN");
+assert(
+  toVoiceKey(DEFAULT_AUDIO_LANGUAGE, DEFAULT_ACCENT) === "en-IN",
+  "the default settings pair does not resolve to Indian English",
+);
+
+// --- language + accent collapse to one wire value --------------------------
+assert(toVoiceKey("english", "india") === "en-IN", "english/india should be en-IN");
+assert(toVoiceKey("english", "uk") === "en-GB", "english/uk should be en-GB");
+assert(toVoiceKey("english", "us") === "en-US", "english/us should be en-US");
+// Hinglish ships one voice, so the accent choice must not fork it.
+for (const accent of ["india", "uk", "us"] as const) {
+  assert(toVoiceKey("hinglish", accent) === "hi-IN", `hinglish/${accent} should stay hi-IN`);
+}
+
+// --- untrusted wire values fall back rather than going silent --------------
+for (const bad of ["", "fr-FR", "en", null, undefined, 42, {}]) {
+  assert(
+    normalizeVoiceKey(bad) === "en-IN",
+    `unrecognised voice key ${JSON.stringify(bad)} did not fall back to en-IN`,
+  );
+}
+assert(normalizeVoiceKey("hi-IN") === "hi-IN", "a valid voice key was rewritten");
+
+// --- settings type guards reject junk from localStorage --------------------
+assert(isTutorAudioLanguage("hinglish") && !isTutorAudioLanguage("marathi"), "language guard is wrong");
+// Rows saved as "hindi" before the Hinglish voice meant an English lesson.
+assert(!isTutorAudioLanguage("hindi"), "a legacy hindi row must not switch a student to Hinglish");
+assert(isTutorAccent("uk") && !isTutorAccent("aus"), "accent guard is wrong");
+assert(isSubjectFamiliarity("new") && !isSubjectFamiliarity("epic"), "familiarity guard is wrong");
+
+// --- familiarity actually changes the teaching prompt ----------------------
+assert(DEFAULT_FAMILIARITY === "normal", "default familiarity changed");
+assert(FAMILIARITY_ADDONS.normal === "", "the middle familiarity must add no prompt text");
+for (const familiarity of ["revision", "new"] as const) {
+  const addon = FAMILIARITY_ADDONS[familiarity];
+  assert(addon.length > 0, `${familiarity} has no prompt addon`);
+  // The count itself belongs to the LESSON LENGTH block (lessonScope.ts), which
+  // already folds this setting in. A second number here would argue with it.
+  assert(
+    /LESSON LENGTH block/.test(addon),
+    `${familiarity} must defer the step count to the lesson budget`,
+  );
+  assert(
+    !/\d+\s*-\s*\d+\s+steps/i.test(addon),
+    `${familiarity} hard-codes a step range instead of using the lesson budget`,
+  );
+}
+// The ladder from the teaching prompt must survive the shortest setting.
+assert(
+  /every line of algebra/i.test(FAMILIARITY_ADDONS.revision) &&
+    /substitution/i.test(FAMILIARITY_ADDONS.revision),
+  "Revision drops the derivation instead of only trimming beginner scaffolding",
+);
+
+// --- wire constants are stable --------------------------------------------
+assert(TTS_LANG_HEADER === "x-tts-lang", "tts language header name changed");
+assert(TTS_LANG_QUERY === "lang", "tts language query param changed");
+
+process.env.TTS_PROVIDER = "elevenlabs";
+// The ElevenLabs cases below are about per-accent env voices, not Sarvam.
+const savedSarvam = process.env.SARVAM_API_KEY;
+delete process.env.SARVAM_API_KEY;
+
+// --- server-side env resolution -------------------------------------------
+const saved = {
+  en: process.env.ELEVENLABS_VOICE_ID,
+  hi: process.env.ELEVENLABS_VOICE_ID_HI,
+  gb: process.env.ELEVENLABS_VOICE_ID_EN_GB,
+  us: process.env.ELEVENLABS_VOICE_ID_EN_US,
+};
+process.env.ELEVENLABS_VOICE_ID = "voice_en_in";
+process.env.ELEVENLABS_VOICE_ID_HI = "voice_hi_in";
+delete process.env.ELEVENLABS_VOICE_ID_EN_GB;
+delete process.env.ELEVENLABS_VOICE_ID_EN_US;
+
+assert(resolveVoiceId("en-IN") === "voice_en_in", "en-IN did not resolve to its own voice");
+assert(resolveVoiceId("hi-IN") === "voice_hi_in", "hi-IN did not resolve to the Hindi voice");
+// An accent with no configured voice must still speak, in the default voice.
+assert(
+  resolveVoiceId("en-GB") === "voice_en_in" && resolveVoiceId("en-US") === "voice_en_in",
+  "an unconfigured accent did not fall back to the default voice",
+);
+const configured = configuredVoiceKeys();
+assert(
+  configured.includes("en-IN") && configured.includes("hi-IN") && configured.length === 2,
+  `configuredVoiceKeys is wrong: ${JSON.stringify(configured)}`,
+);
+
+// A deployment with no voice at all reports nothing rather than a bogus id.
+delete process.env.ELEVENLABS_VOICE_ID;
+delete process.env.ELEVENLABS_VOICE_ID_HI;
+assert(resolveVoiceId("en-IN") === undefined, "resolveVoiceId invented an id with no env set");
+assert(configuredVoiceKeys().length === 0, "configuredVoiceKeys reported an unset voice");
+
+process.env.ELEVENLABS_VOICE_ID = saved.en ?? "";
+process.env.ELEVENLABS_VOICE_ID_HI = saved.hi ?? "";
+if (saved.gb) process.env.ELEVENLABS_VOICE_ID_EN_GB = saved.gb;
+if (saved.us) process.env.ELEVENLABS_VOICE_ID_EN_US = saved.us;
+if (savedSarvam) process.env.SARVAM_API_KEY = savedSarvam;
+
+// --- student-usable path: accent writes, persist, and reach TTS ------------
+const settingsDrawer = readFileSync(
+  resolve(root, "features/tutor-session/components/SettingsDrawer.tsx"),
+  "utf8",
+);
+assert(!settingsDrawer.includes("Soon"), "Accent must not ship a Soon badge");
+assert(!settingsDrawer.includes("subtitleLanguage"), "dead subtitleLanguage field came back");
+assert(
+  !settingsDrawer.includes('audioLanguage: "hindi"'),
+  "the drawer must not offer the legacy Hindi value",
+);
+assert(
+  settingsDrawer.includes('update({ audioLanguage: "hinglish" })') &&
+    settingsDrawer.includes("{hinglishAvailable ? ("),
+  "the drawer offers Hinglish only when the server holds a Sarvam key",
+);
+assert(
+  !settingsDrawer.includes("Audio Language"),
+  "Audio Language is no longer a student setting",
+);
+assert(
+  settingsDrawer.includes(">Voice<") &&
+    settingsDrawer.includes('update({ audioLanguage: "english", accent: "india" })') &&
+    settingsDrawer.includes('update({ audioLanguage: "english", accent: "uk" })') &&
+    settingsDrawer.includes('update({ audioLanguage: "english", accent: "us" })'),
+  "the lesson settings sheet must offer the India/UK/US voice picker",
+);
+
+const settingsScreen = readFileSync(
+  resolve(root, "features/account/SettingsScreen.tsx"),
+  "utf8",
+);
+assert(
+  !settingsScreen.includes('audioLanguage: "hindi"') &&
+    !settingsScreen.includes('label="Hindi"'),
+  "account settings must not offer the legacy Hindi value",
+);
+assert(
+  settingsScreen.includes('patch({ audioLanguage: "hinglish" })') &&
+    settingsScreen.includes("{hinglishAvailable ? ("),
+  "account settings offer Hinglish only when the server holds a Sarvam key",
+);
+assert(
+  !settingsScreen.includes('title="Fast mode"') &&
+    !settingsScreen.includes('title="Narration"') &&
+    !settingsScreen.includes('label="Low latency"'),
+  "account settings must not expose fast mode, narration, or low-latency voice",
+);
+
+const shell = readFileSync(
+  resolve(root, "features/tutor-session/TutorSessionShell.tsx"),
+  "utf8",
+);
+assert(!shell.includes("subtitleLanguage"), "shell must not keep a dead subtitleLanguage");
+for (const key of [
+  "htutor_audio_language",
+  "htutor_accent",
+  "htutor_speed",
+  "htutor_marker_color",
+] as const) {
+  assert(shell.includes(key), `persisted setting ${key} is missing from the shell`);
+}
+assert(shell.includes("settingsHydrated"), "persist writes must wait until stored settings load");
+assert(
+  shell.includes("toVoiceKey(settings.audioLanguage, settings.accent)"),
+  "shell must collapse language + accent into the voice key",
+);
+assert(
+  shell.includes('hinglish && data.settings.audioLanguage === "hinglish"') &&
+    shell.includes("toVoiceKey(DEFAULT_AUDIO_LANGUAGE, accent)"),
+  "Hinglish comes only from the server's answer; a stale local cache starts in English",
+);
+assert(shell.includes("setVoicePreferences"), "shell must push the voice key into the TTS client");
+assert(shell.includes("voicePreferencesRef"), "first TTS create must see the stored voice, not the default");
+assert(!shell.includes("cache.fastMode === false"), "shell must not apply a cached fastMode off");
+assert(shell.includes("fastModeRef.current = true"), "fastModeRef must stay on");
+
+const boardSession = readFileSync(
+  resolve(root, "features/tutor-session/hooks/useBoardSession.ts"),
+  "utf8",
+);
+assert(
+  boardSession.includes("voicePreferences: voicePreferencesRef.current"),
+  "createTTSClient must receive the stored voice on first create",
+);
+
+const httpClient = readFileSync(
+  resolve(root, "../../packages/tutor-core/src/tts/speechClient.ts"),
+  "utf8",
+);
+assert(
+  httpClient.includes("[TTS_LANG_HEADER]: voiceKey"),
+  "HTTP TTS must send x-tts-lang so /api/tts can pick the voice",
+);
+
+const wsClient = readFileSync(
+  resolve(root, "../../packages/tutor-core/src/tts/streamingSpeechClient.ts"),
+  "utf8",
+);
+assert(
+  wsClient.includes("${TTS_LANG_QUERY}="),
+  "WebSocket TTS must send ?lang= so the relay can pick the voice",
+);
+
+const server = readFileSync(resolve(root, "server.ts"), "utf8");
+assert(
+  server.includes("query.lang") && server.includes("normalizeVoiceKey"),
+  "the TTS WebSocket upgrade must read ?lang= and fall back instead of going silent",
+);
+
+const ttsRoute = readFileSync(resolve(root, "app/api/tts/route.ts"), "utf8");
+const ttsStream = readFileSync(resolve(root, "app/api/tts/stream/route.ts"), "utf8");
+assert(
+  ttsRoute.includes("handleTtsRequest") && ttsStream.includes("handleTtsRequest") && readFileSync(resolve(root, "lib/tts/handleTtsRequest.ts"), "utf8").includes("voiceKeyFromRequest"),
+  "HTTP TTS routes must resolve the voice from x-tts-lang",
+);
+
+const teaching = readFileSync(
+  resolve(root, "features/tutor-session/hooks/turn/useQuestionHandler.ts"),
+  "utf8",
+);
+assert(
+  !teaching.includes("audioLanguage") && !teaching.includes("toVoiceKey"),
+  "teaching must not branch on audio language — voice/accent only, no lesson translation",
+);
+
+console.log("verify-voice-language: language/accent → voice key → voice id wiring is sound");

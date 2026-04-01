@@ -1,0 +1,1311 @@
+import { useCallback, useRef } from "react";
+import type { IntroLayoutCheckpoint } from "../../lib/board/introLayoutCheckpoint";
+import type { RecordedSegmentPayload } from "@/lib/boards/boardsClient";
+import {
+  getSegmentCommands,
+  prefetchStrokePaths,
+  type DrawCommand,
+  type TutorSegment,
+  serializeSegmentCommands,
+} from "@heytutor/drawing";
+import {
+  createSpeechRateState,
+  observeSpeechRate,
+  estimateSpeechDurationMs,
+  resolveLiveAudioPositionMs,
+  resolveInitialTimingWait,
+  validateAudioTimingsForNarration,
+  tutorDebug,
+  mathToSpeech,
+  voiceSettingsForDelivery,
+  shouldInkSpokenSegment,
+  type AudioTimings,
+  type FirstAudioByteInfo,
+  type InitialTimingWaitRelease,
+  type TTSClient,
+  SpeechSynthesisTTSClient,
+} from "@heytutor/tutor-core";
+import { drawSegmentInk, planSegmentInk } from "../../lib/turn/segmentInk";
+import { guardDrawWithSpeech, incompleteCodeBeatFailure, requiredCodeBeatTargets, shouldFinishSegmentAfterHeardSpeechFailure, silentSentenceRemainingMs, voiceFailureDisposition, type SegmentRunOutcome } from "../../lib/turn/turnFailurePolicy";
+import { segmentWatchdogPlaybackRate, speakSegmentTimeoutMs } from "../../lib/turn/ttsSegmentTimeout";
+import { browserRecoveryPlaybackRate, createPauseAwareSpeechClock, requireSpeechStart, SPEECH_AUDIO_IN_TRANSIT_GRACE_MS, speakWithPauseOwnedFallback, speakWithStartupRecovery, speechPlaybackOverdue, type PauseAwareSpeechClock } from "../../lib/turn/speechStartup";
+import { liveTurnSave } from "../../lib/turn/liveTurnSave";
+import { savedCommandFilter } from "../../lib/scene/lessonFigureSequence";
+import type { UseSegmentRunnerParams } from "./types";
+import { recordFirstAudible, recordTtsFirstByte } from "../../../../lib/obs/turnTelemetry";
+
+/**
+ * Sentences asked for ahead of the one being spoken. The TTS client caps how
+ * many it will actually hold open; this is the order they are asked for in.
+ */
+const TTS_LOOKAHEAD_SEGMENTS = 2;
+
+export function useSegmentRunner({
+  sessionId,
+  activeVerifiedDiagramRef,
+  codeLessonControllerRef,
+  cancellableDelay,
+  ensureTTSClient,
+  executeCommandWithCancel,
+  raceWithCancel,
+  applyTurnPhase,
+  cancelRef,
+  isPausedRef,
+  turnActiveRef,
+  turnGenerationRef,
+  turnTelemetryRef,
+  turnStatsRef,
+  recordedSegmentsRef,
+  narrationSinceEpochRef,
+  currentTraceIdRef,
+  setCurrentSegmentText,
+  narrationDensityRef,
+  drawChainRef,
+  reserveTextCommandPlacements,
+  onSpeechStartupStatus,
+  onVoiceDegraded,
+  lessonFiguresRef,
+}: UseSegmentRunnerParams) {
+  // The voice's measured pace, learned from every aligned sentence of the
+  // session and used wherever a sentence has no alignment yet. The estimate
+  // used to assume 15 spoken chars a second; the voice runs 11 to 13.5, so
+  // every guessed row finished a median 1.4 s before its words.
+  const speechRateRef = useRef(createSpeechRateState());
+  /** The sentence being spoken. Recorded segments omit it until the beat ends. */
+  const speakingNarrationRef = useRef("");
+  const browserSpeechRef = useRef<SpeechSynthesisTTSClient | null>(null);
+  const browserFallbackOwnerRef = useRef<symbol | null>(null);
+  const fallbackPauseGenerationRef = useRef(0);
+  const speechClockRef = useRef<PauseAwareSpeechClock | null>(null);
+  const timingWaitClockRef = useRef<PauseAwareSpeechClock | null>(null);
+  const introDrawOwnerRef = useRef<{ owner: symbol; freeze: () => void } | null>(null);
+  const startupStatusOwnerRef = useRef<symbol | null>(null);
+  // Set while a provider clip waits on a browser autoplay gesture. Its clock
+  // stays paused so neither startup nor playback budgets can expire the beat.
+  const permissionWaitOwnerRef = useRef<symbol | null>(null);
+
+  // Turn controls own both transports. Browser pause() cancels its current
+  // utterance; the fallback loop retries that sentence after resume.
+  const pauseFallbackSpeech = () => {
+    speechClockRef.current?.pause();
+    timingWaitClockRef.current?.pause();
+    fallbackPauseGenerationRef.current++;
+    if (browserFallbackOwnerRef.current) browserSpeechRef.current?.pause();
+  };
+  const resumeFallbackSpeech = () => {
+    // Resume will repeat the browser sentence, not continue its old media cursor.
+    // Invalidate the pen synchronously before the board's paused flag is lifted.
+    if (introDrawOwnerRef.current?.owner === browserFallbackOwnerRef.current) introDrawOwnerRef.current?.freeze();
+    if (!permissionWaitOwnerRef.current) speechClockRef.current?.resume();
+    timingWaitClockRef.current?.resume();
+    if (browserFallbackOwnerRef.current) browserSpeechRef.current?.resume();
+  };
+  const stopFallbackSpeech = () => {
+    // A cancelled turn must not leave its startup poll suspended forever.
+    permissionWaitOwnerRef.current = null;
+    speechClockRef.current?.resume();
+    timingWaitClockRef.current?.resume();
+    fallbackPauseGenerationRef.current++;
+    if (browserFallbackOwnerRef.current) browserSpeechRef.current?.stop();
+  };
+
+  const waitWhilePaused = useCallback(async (): Promise<boolean> => {
+    while (isPausedRef.current) {
+      if (cancelRef.current) {
+        return false;
+      }
+      await cancellableDelay(80);
+    }
+    return !cancelRef.current;
+  }, [cancelRef, cancellableDelay, isPausedRef]);
+
+  const runSegment = useCallback(
+    async (
+      segment: TutorSegment,
+      index: number,
+      allSegments: TutorSegment[],
+      turnGeneration: number,
+      rollbackIntroInk?: () => void,
+      introLayoutCheckpoint?: IntroLayoutCheckpoint,
+      onRecorded?: (row: RecordedSegmentPayload) => void,
+    ): Promise<SegmentRunOutcome | undefined> => {
+      const isStale = () => turnGeneration !== turnGenerationRef.current;
+      const isCancelled = () => cancelRef.current || isStale();
+      if (isCancelled()) return;
+      if (!(await waitWhilePaused())) return;
+      if (isStale()) return;
+
+      const tts = ensureTTSClient();
+      let browserRecoveryRate: number | null = null;
+      const segmentPlaybackRate = () => browserRecoveryRate ?? tts.getPlaybackRate?.() ?? 1;
+
+      tutorDebug("segment", "runSegment start", {
+        index,
+        narration_preview: segment.narration.slice(0, 80),
+        narration_chars: segment.narration.length,
+        command_type: segment.command?.type ?? null,
+        command_text: segment.command?.text?.slice(0, 60),
+      });
+
+      const tel = turnTelemetryRef.current;
+      const segmentName = `segment-${index}`;
+      // One `tts-first-byte` per segment, even across a provider recovery.
+      let firstAudioByteRecorded = false;
+      const segmentSpan = tel?.span(segmentName);
+      if (isCancelled()) {
+        segmentSpan?.end({ skipped: true, reason: "cancelled" });
+        return;
+      }
+
+      setCurrentSegmentText(segment.narration);
+
+      const previousText = allSegments[index - 1]?.narration;
+      const nextText = allSegments[index + 1]?.narration;
+      const narration = segment.narration.trim();
+      // Two sentences ahead, in speaking order. One is enough while a beat
+      // runs for seconds, but a short beat — a one-line emphasis, a five-word
+      // aside — does not cover a sentence's generation on its own, and that
+      // was the last place the lecture could still be heard to stop.
+      for (let ahead = 1; ahead <= TTS_LOOKAHEAD_SEGMENTS; ahead++) {
+        const upcoming = allSegments[index + ahead]?.narration;
+        if (!upcoming?.trim()) continue;
+        tts.prefetchSegment?.(upcoming, {
+          previousText: allSegments[index + ahead - 1]?.narration ?? narration,
+          nextText: allSegments[index + ahead + 1]?.narration,
+          traceId: currentTraceIdRef.current ?? undefined,
+          sessionId: sessionId ?? undefined,
+          // Generated ahead with the dials it will be spoken with, so the
+          // lookahead cannot hand an opening line the teaching voice.
+          voiceSettings: voiceSettingsForDelivery(allSegments[index + ahead]?.delivery),
+        });
+      }
+
+      if (!narration && !segment.command) {
+        tutorDebug("segment", "skipped empty segment", { index });
+        segmentSpan?.end({ skipped: true });
+        return;
+      }
+
+      let segmentCommands = getSegmentCommands(segment);
+      const reservedTextCommands = new Set<DrawCommand>();
+      if (segment.verifiedDiagramIntro !== true) {
+        const prepared: DrawCommand[] = [];
+        for (const command of segmentCommands) {
+          // A stopped or replaced turn reserves nothing more: the board and
+          // its layout may already belong to the next turn.
+          if (isCancelled()) return;
+          // One work row can come back as several: a line too long for the
+          // column is wrapped there rather than shrunk to fit.
+          const resolved = await reserveTextCommandPlacements(command, { isCancelled });
+          for (const row of resolved) {
+            prepared.push(row);
+            if (row !== command) reservedTextCommands.add(row);
+          }
+        }
+        segmentCommands = prepared;
+      }
+      if (isCancelled()) return;
+      // Stay in thinking until the voice is audible. Applying "speaking" here
+      // dropped the preparing overlay the moment a segment was queued, so the
+      // student watched a silent 1.5–2× dump while TTS was still connecting.
+      const hasNarration = narration.length > 0;
+      const hasCommand = segmentCommands.length > 0;
+      const codeBeatOwner = codeLessonControllerRef?.current;
+      const codeBeatPlan = codeBeatOwner?.getActivePlan();
+      const codeBeatTargets = requiredCodeBeatTargets(segmentCommands, codeBeatPlan);
+      const inkPlan = planSegmentInk({
+        commands: segmentCommands,
+        verifiedDiagramIntro: segment.verifiedDiagramIntro === true,
+        hasNarration,
+        sceneText: segment.sceneText === true,
+      });
+
+      if (hasNarration) {
+        turnStatsRef.current.ttsChars += narration.length;
+      }
+
+      const segmentMetadata = {
+        chars: narration.length,
+        has_command: hasCommand,
+        command_type: segmentCommands[0]?.type ?? null,
+        command_count: segmentCommands.length,
+      };
+
+      let capturedAudio: Uint8Array | null = null;
+      let capturedTimings: AudioTimings | null = null;
+      let capturedDurationMs: number | null = null;
+      let generatedAudio: Pick<RecordedSegmentPayload, "audioBytes" | "durationMs" | "timings"> | null = null;
+      let terminalSpeechFailure = false;
+      const spokenChars = mathToSpeech(narration).length;
+      // The dials this sentence is spoken with. The lookahead generated it
+      // with the same ones, and the cache is keyed on them, so the peek
+      // below must ask with exactly what `speakSegment` will ask with.
+      const voiceSettings = voiceSettingsForDelivery(segment.delivery);
+      const speechMsPerChar = speechRateRef.current.msPerChar;
+      const estimateSpeechMs = estimateSpeechDurationMs(spokenChars, speechMsPerChar);
+      // Feed the adaptive-speed hook with the narration density of this segment.
+      narrationDensityRef.current =
+        estimateSpeechMs > 0 ? narration.length / estimateSpeechMs : 0;
+      const naturalDrawMs = Math.max(inkPlan.totalDrawWeight, 200);
+      let audioStartedAtMs: number | null = null;
+      let audioStartedAtActiveMs: number | null = null;
+      let usingBrowserFallback = false;
+      let speechAborted = false;
+      // Both voices failed and the sentence is taught silently: the ink keeps
+      // drawing on the estimated schedule although speech is aborted.
+      let voiceDegraded = false;
+      // The paired draw failed. Its voice failure is a failed beat, never silent teaching.
+      let drawFailed = false;
+      const segmentFallbackOwner = Symbol("browser fallback");
+      let speechComplete = false;
+      let drawGeneration = 0;
+      let introRestartPending = false;
+      let ownedDraw: Promise<void> = Promise.resolve();
+      let startOwnedDraw: (() => void) | null = null;
+      const freezeIntroDraw = () => {
+        if (!rollbackIntroInk || introRestartPending) return;
+        drawGeneration++;
+        introRestartPending = true;
+      };
+      const restartIntroDraw = async () => {
+        if (!rollbackIntroInk || !introRestartPending) return;
+        // A cancelled command may still be finishing an async glyph/path lookup.
+        // Join it before taking away its nodes or allowing a successor to draw.
+        await ownedDraw;
+        if (isCancelled() || speechAborted) return;
+        rollbackIntroInk();
+        audioStartedAtMs = null;
+        audioStartedAtActiveMs = null;
+        maxAudioPositionMs = Number.NEGATIVE_INFINITY;
+        capturedAudio = null;
+        capturedTimings = null;
+        capturedDurationMs = null;
+        timingsOrigin = null;
+        speechComplete = false;
+        introRestartPending = false;
+        startOwnedDraw?.();
+      };
+      let actualDrawMs = 0;
+      /** Ink or voice of this segment reached the student (a Stop after this cuts it). */
+      const codeController = codeLessonControllerRef?.current;
+      const codePlan = codeController?.getActivePlan();
+      // lesson-figure-saved-cues:begin
+      // A lesson advance cue is saved only once the playback cursor reached it
+      // (review F2, N6). No active sequence: undefined, rows saved as before.
+      const savesCommand = savedCommandFilter(lessonFiguresRef?.current);
+      // lesson-figure-saved-cues:end
+      const preparedSave = liveTurnSave().prepareSegment(cancelRef, turnGeneration, {
+        orderIndex: index, narration: segment.narration, spokenText: mathToSpeech(narration),
+        command: serializeSegmentCommands(segmentCommands), audioBytes: null, durationMs: null, timings: null,
+      }, { intro: onRecorded !== undefined || segment.verifiedDiagramIntro === true,
+        getTypeShownChars: (id) => codeController?.getActivePlan() === codePlan ? codeController?.getState().revealedChars[id] ?? 0 : 0,
+        ...(savesCommand ? { savesCommand } : {}),
+      });
+      const markShown = () => { if (!isCancelled()) preparedSave?.markShown(); };
+      let timingTelemetryCount = 0;
+      let lastTimingTelemetryChars = -1;
+      // Agent B (timings live): the initial-timing wait. Each waiter re-reads
+      // the segment state through `resolveInitialTimingWait`; the three
+      // events that can move that decision (first alignment, audio start,
+      // speech end) each call `notifyTimingWaiters`.
+      const timingWaiters: Array<() => void> = [];
+      const notifyTimingWaiters = () => {
+        for (const notify of timingWaiters.slice()) {
+          notify();
+        }
+      };
+      /** Where the first alignment came from, for the schedule log. */
+      let timingsOrigin: "peek" | "callback" | null = null;
+      let initialTimingWait: { release: InitialTimingWaitRelease; waitedMs: number } | null = null;
+
+      const markSpeechComplete = () => {
+        speechComplete = true;
+        notifyTimingWaiters();
+      };
+
+      let maxAudioPositionMs = Number.NEGATIVE_INFINITY;
+      const liveAudioPositionMs = (): number => {
+        const clock = speechClockRef.current;
+        const resolved = resolveLiveAudioPositionMs({
+          speechComplete,
+          capturedDurationMs:
+            capturedDurationMs ??
+            (capturedTimings?.totalDuration
+              ? Math.round(capturedTimings.totalDuration * 1000)
+              : null),
+          estimateSpeechMs,
+          playbackPositionMs: usingBrowserFallback || voiceDegraded ? null : tts.getPlaybackPositionMs(),
+          audioStartedAtMs: clock && audioStartedAtActiveMs !== null ? audioStartedAtActiveMs : audioStartedAtMs,
+          nowMs: clock ? clock.elapsedMs() : performance.now(),
+          maxAudioPositionMs,
+          playbackRate: segmentPlaybackRate(),
+        });
+        maxAudioPositionMs = resolved.maxAudioPositionMs;
+        return resolved.positionMs;
+      };
+
+      /**
+       * Hold the first schedule until the voice is actually audible
+       * (playback > 0, not merely `onStart`) and either the exact alignment
+       * is in hand, 120 ms have passed since `onStart`, speech has ended, or
+       * the turn is cancelled. Peeked timings and onStart used to release the
+       * pen onto a silent 1.5× wall clock.
+       */
+      const waitForInitialTimings = (drawCancelled = isCancelled): Promise<void> =>
+        new Promise((resolve) => {
+          const waitClock = createPauseAwareSpeechClock();
+          if (isPausedRef.current) waitClock.pause();
+          timingWaitClockRef.current = waitClock;
+          let settled = false;
+          let timerId: number | null = null;
+          const evaluate = () => {
+            if (settled) {
+              return;
+            }
+            const speechClock = speechClockRef.current;
+            const nowMs = speechClock?.elapsedMs() ?? performance.now();
+            const decision = resolveInitialTimingWait({
+              hasNarration,
+              timingChars: capturedTimings?.charStartTimes.length ?? 0,
+              audioStartedAtMs: speechClock && audioStartedAtActiveMs !== null ? audioStartedAtActiveMs : audioStartedAtMs,
+              nowMs,
+              speechComplete,
+              cancelled: drawCancelled(),
+              playbackPositionMs: usingBrowserFallback || voiceDegraded ? null : tts.getPlaybackPositionMs(),
+              // Provider recovery resets its active clock. Reuse that origin
+              // instead of spending the retry's budget on the abandoned voice.
+              waitedMs: speechClock?.elapsedMs() ?? waitClock.elapsedMs(),
+            });
+            // Speech owns startup expiry, browser handoff and the one provider
+            // retry. Its bounded final outcome, not a competing pen timer,
+            // releases a no-start wait; accepted onStart can release it sooner.
+            const startupPending = audioStartedAtMs === null && !speechComplete && !speechAborted;
+            if (decision.release && !(decision.source === "give_up" && startupPending)) {
+              settled = true;
+              if (timingWaitClockRef.current === waitClock) timingWaitClockRef.current = null;
+              if (timerId !== null) {
+                window.clearTimeout(timerId);
+              }
+              const waiterIndex = timingWaiters.indexOf(evaluate);
+              if (waiterIndex >= 0) {
+                timingWaiters.splice(waiterIndex, 1);
+              }
+              initialTimingWait = {
+                release: decision.source,
+                waitedMs: Math.round(waitClock.elapsedMs()),
+              };
+              resolve();
+              return;
+            }
+            if (!timingWaiters.includes(evaluate)) {
+              timingWaiters.push(evaluate);
+            }
+            if (timerId === null) {
+              // Playback becoming audible is not an event — poll. Cap the
+              // deadline timer at one frame so we notice the first sample.
+              const delay =
+                !decision.release && decision.releaseAtMs !== null
+                  ? Math.max(decision.releaseAtMs - nowMs, 0) + 1
+                  : 16;
+              timerId = window.setTimeout(() => {
+                timerId = null;
+                evaluate();
+              }, Math.min(delay, 16));
+            }
+          };
+          evaluate();
+        });
+
+      const runDraw = async (
+        totalSpeechMs: number,
+        audioTimings?: AudioTimings | null,
+        generation = drawGeneration,
+      ): Promise<void> => {
+        // A silently taught sentence keeps its ink; any other speech abort stops it.
+        const isCancelled = () => cancelRef.current || isStale() || (speechAborted && !voiceDegraded) || generation !== drawGeneration;
+        const waitWhilePaused = async () => {
+          while (isPausedRef.current && !isCancelled()) await cancellableDelay(16);
+          return !isCancelled();
+        };
+        const drawName = `draw-${index}`;
+        const drawSpan = tel?.span(drawName, segmentName);
+        const drawStart = performance.now();
+        const diagramDrawOptions = {
+          introLayoutCheckpoint,
+          trustedDiagramGeometry: segment.verifiedDiagramIntro === true,
+          applyLayout: segment.verifiedDiagramIntro !== true,
+          segmentIndex: index,
+          isCancelled,
+        };
+
+        try {
+          // Warm handwriting paths while TTS connects so the first glyph is ready
+          // when its spoken cue arrives.
+          for (const command of segmentCommands) {
+            if (
+              (command.type === "WRITE" || command.type === "LABEL") &&
+              command.text &&
+              Number.isFinite(command.params[0]) &&
+              Number.isFinite(command.params[1])
+            ) {
+              prefetchStrokePaths(command.text, command.params[0]!, command.params[1]!, 32);
+            }
+          }
+
+          // Agent B (timings live), start. The lookahead generated this
+          // sentence one or two beats ago, so its alignment is already in the
+          // client; asked for here, before any schedule is built, it is what
+          // makes `schedule_source: tts` the normal case. The claim replays
+          // the same timings 1 to 3 ms after the old code had already built
+          // the estimated schedule (15 of 15 WRITE rows, 10 Sep 2026).
+          if (hasNarration && !capturedTimings) {
+            const peeked = tts.peekSegmentTimings?.(narration, { voiceSettings });
+            if (peeked && peeked.charStartTimes.length > 0) {
+              timingsOrigin = "peek";
+              captureTimings(peeked);
+              tutorDebug("tts", "segment timings peeked", {
+                index,
+                timing_chars: peeked.charStartTimes.length,
+                spoken_chars: spokenChars,
+                total_duration_ms: Math.round(peeked.totalDuration * 1000),
+              });
+            }
+          }
+          // Spoken ink waits until the voice is audible. Peeked alignment is
+          // used once `onStart` has fired — not before, or the pen dumps the
+          // figure on the wall clock while TTS is still connecting.
+          if (hasNarration) {
+            await raceWithCancel(waitForInitialTimings(isCancelled));
+            if (isCancelled()) {
+              return;
+            }
+            if (
+              !shouldInkSpokenSegment({
+                hasNarration: true,
+                audioStarted: audioStartedAtMs !== null,
+                speechFailed: speechAborted && !voiceDegraded,
+                browserFallback: usingBrowserFallback,
+              })
+            ) {
+              tutorDebug(
+                "draw",
+                speechAborted
+                  ? "skipped ink; speech failed before the pen started"
+                  : "skipped silent dump; voice never started",
+                { index },
+              );
+              // Voice never came: uncover the board so the lecture is not stuck
+              // behind "preparing" for the rest of the turn.
+              if (hasCommand) applyTurnPhase("speaking");
+              return;
+            }
+            // Narration-only motion follows the voice's speaking phase. Its
+            // timing wait may settle after an opening's owner restored the
+            // planning/thinking wait, so it must not overwrite that phase.
+            if (hasCommand) applyTurnPhase("drawing");
+            tutorDebug("draw", "initial timing wait", {
+              index,
+              release: initialTimingWait?.release ?? null,
+              waited_ms: initialTimingWait?.waitedMs ?? null,
+              timing_chars: capturedTimings?.charStartTimes.length ?? 0,
+              timing_origin: timingsOrigin,
+            });
+          }
+          // Agent B (timings live), end.
+
+          await drawSegmentInk({
+            plan: inkPlan,
+            verifiedDiagramIntro: segment.verifiedDiagramIntro === true,
+            clock: {
+              narration,
+              getTimings: () => capturedTimings,
+              fallbackTimings: audioTimings,
+              totalSpeechMs,
+              estimatedSpeechMs: estimateSpeechMs,
+              msPerChar: speechMsPerChar,
+              getAudioPositionMs: liveAudioPositionMs,
+              // This segment owns the provider clock through short buffering
+              // stalls. Accepted onEnd and the bounded speech finally path
+              // release it; browser recovery has only an estimated wall clock,
+              // and so does a silently taught sentence.
+              isAudioActive: () => !speechComplete && !speechAborted && !voiceDegraded && audioStartedAtMs !== null && !usingBrowserFallback,
+              isSpeechActive: () => !speechComplete && !speechAborted && !voiceDegraded && audioStartedAtMs !== null,
+              getPlaybackRate: segmentPlaybackRate,
+              isSpeechComplete: () => speechComplete,
+              canAdvanceAfterSpeech: () => !isPausedRef.current,
+              isPaused: () => isPausedRef.current,
+              nowMs: () => speechClockRef.current?.elapsedMs() ?? performance.now(),
+            },
+            getDiagram: () => activeVerifiedDiagramRef.current,
+            isCancelled,
+            waitWhilePaused,
+            execute: executeCommandWithCancel,
+            commandOptions: (command) => ({
+              ...diagramDrawOptions,
+              textPlacementReserved: reservedTextCommands.has(command),
+              onInkStarted: markShown,
+            }),
+            segmentIndex: index,
+            spokenChars,
+            describeTiming: () => ({
+              timing_origin: timingsOrigin,
+              timing_wait_release: initialTimingWait?.release ?? null,
+              timing_wait_ms: initialTimingWait?.waitedMs ?? null,
+            }),
+            trace: {
+              reordered: (order) => {
+                tutorDebug("draw", "commands reordered by spoken word", { index, order });
+              },
+              writeScheduleReady: (metadata) => {
+                tutorDebug("draw", "write schedule ready", { index, ...metadata });
+                tel?.mark("write-schedule-ready", metadata);
+              },
+              writeCharStart: (metadata) => {
+                tutorDebug("draw", "write char start", metadata);
+                tel?.mark("write-char-start", metadata);
+              },
+              focusScheduleReady: (metadata) => {
+                tutorDebug("draw", "focus schedule ready", metadata);
+                tel?.mark("focus-schedule-ready", metadata);
+              },
+              cueWindowReady: (metadata) => {
+                tutorDebug("draw", "cue window ready", metadata);
+                tel?.mark("cue-window-ready", metadata);
+              },
+            },
+          });
+        } finally {
+          actualDrawMs = Math.round(performance.now() - drawStart);
+          turnStatsRef.current.drawMs += actualDrawMs;
+          const audioElapsedMs =
+            audioStartedAtMs === null ? null : Math.round(performance.now() - audioStartedAtMs);
+          tel?.mark("draw-complete", {
+            segment_index: index,
+            command_count: segmentCommands.length,
+            duration_ms: actualDrawMs,
+            audio_elapsed_ms: audioElapsedMs,
+          });
+          drawSpan?.end({
+            command_count: segmentCommands.length,
+            duration_ms: actualDrawMs,
+          });
+        }
+      };
+
+      const captureTimings = (timings: AudioTimings) => {
+        if (timingsOrigin === null && timings.charStartTimes.length > 0) {
+          timingsOrigin = "callback";
+        }
+        // Duration-only timings (the Hinglish voice has no alignment) teach the
+        // speaking rate and the recorded length, and nothing else: the pen
+        // keeps its estimated schedule, as with no timings at all.
+        if (timings.charStartTimes.length > 0) capturedTimings = timings;
+        const validation = validateAudioTimingsForNarration(narration, timings);
+        if (timings.totalDuration > 0) {
+          speechRateRef.current = observeSpeechRate(
+            speechRateRef.current,
+            spokenChars,
+            Math.round(timings.totalDuration * 1000),
+          );
+          capturedDurationMs = Math.round(timings.totalDuration * 1000);
+        }
+        if (timingTelemetryCount < 3 && timings.charStartTimes.length !== lastTimingTelemetryChars) {
+          timingTelemetryCount++;
+          lastTimingTelemetryChars = timings.charStartTimes.length;
+          tel?.mark("tts-timing-received", {
+            segment_index: index,
+            timing_chars: timings.charStartTimes.length,
+            total_duration_ms: capturedDurationMs,
+          });
+          tel?.mark("tts-timing-validation", {
+            segment_index: index,
+            valid: validation.valid,
+            reason: validation.reason ?? null,
+            total_duration_ms: validation.totalDurationMs,
+            expected_max_ms: validation.expectedMaxMs,
+          });
+        }
+        if (timings.charStartTimes.length > 0) {
+          notifyTimingWaiters();
+        }
+      };
+
+      const markVoiceStarted = () => {
+        if (isCancelled() || !turnActiveRef.current) return;
+        markShown();
+        // Once per turn; the browser voice and the provider both land here
+        // only after their start was accepted.
+        // The provider resets its signal per segment and records its own
+        // browser fallback (mock mode, a suspended context), so a null
+        // signal is unknown with no lead, never the previous segment's.
+        const startSignal = usingBrowserFallback ? null : tts.getLastPlaybackStart?.() ?? null;
+        const browserVoice = usingBrowserFallback || startSignal?.signal === "speech-synthesis-start";
+        recordFirstAudible(tel, {
+          segmentIndex: index,
+          transport: browserVoice ? "browser" : "provider",
+          signal: browserVoice ? "speech-synthesis-start" : startSignal?.signal ?? "unknown",
+          leadMs: startSignal?.signal === "audio-context-scheduled" ? startSignal.leadMs : 0,
+          muted: tts.isMuted?.() ?? false,
+        });
+        if (usingBrowserFallback) tel?.mark("tts-startup-accepted", {
+          segment_index: index,
+          turn_generation: turnGeneration,
+          transport: "browser",
+          accepted: true,
+          paused: isPausedRef.current,
+          audio_context_state: null,
+        });
+        // A voice speaks again: the forced caption and its notice go.
+        onVoiceDegraded?.(false);
+        if (hasNarration) speakingNarrationRef.current = narration;
+        if (audioStartedAtMs === null) {
+          audioStartedAtMs = performance.now();
+          audioStartedAtActiveMs = speechClockRef.current?.elapsedMs() ?? null;
+        }
+        // Narration-only: drop the overlay as soon as onStart fires.
+        // Paired speech+ink waits until playback is audible so a long
+        // decode cannot uncover a silent 1.5× dump.
+        if (!hasCommand) {
+          applyTurnPhase("speaking");
+        }
+        notifyTimingWaiters();
+      };
+
+      const speakOptions = {
+        previousText,
+        nextText,
+        traceId: currentTraceIdRef.current ?? undefined,
+        sessionId: sessionId ?? undefined,
+        voiceSettings,
+        onStart: markVoiceStarted,
+        onAudioCaptured: (audio: { bytes: Uint8Array }) => {
+          capturedAudio = audio.bytes;
+          generatedAudio = { audioBytes: audio.bytes, durationMs: capturedDurationMs, timings: capturedTimings };
+        },
+        onTimings: captureTimings,
+        onFirstAudioByte: (info: FirstAudioByteInfo) => {
+          if (firstAudioByteRecorded || isCancelled()) return;
+          firstAudioByteRecorded = true;
+          recordTtsFirstByte(tel, { segmentIndex: index, ...info });
+        },
+        onEnd: markSpeechComplete,
+        // The provider can report an error before this runner starts browser
+        // recovery. Only the final outcome releases the drawing wait.
+        onError: () => {},
+      };
+
+      const speakSegmentWithTimeout = async (
+        text: string,
+        options: Parameters<TTSClient["speakSegment"]>[1] = {},
+      ): Promise<void> => {
+        // First-chunk latency plus the whole playback. An 18s hard cap was
+        // shorter than a normal DSA paragraph on HTTP TTS and killed the pen.
+        // Match the words sent to speech: maths notation can expand well beyond
+        // its written character count, including when the student slows it down.
+        const spokenText = mathToSpeech(text);
+        let slowestPlaybackRate = segmentWatchdogPlaybackRate(segmentPlaybackRate());
+        let timeoutMs = speakSegmentTimeoutMs(spokenText, slowestPlaybackRate);
+        /**
+         * The relay said this sentence's audio is downloading. Startup waits
+         * for it (SPEECH_AUDIO_IN_TRANSIT_GRACE_MS), so the whole-segment
+         * budget restarts from the notice too: without this a short sentence
+         * whose audio lands late would be cut by its own 15 s timeout.
+         */
+        let inTransitTimeoutFloorMs = 0;
+        let timedOut = false;
+        let timeoutId: number | null = null;
+        let playbackWatchId: number | null = null;
+        let clock = createPauseAwareSpeechClock();
+        if (isPausedRef.current) clock.pause();
+        speechClockRef.current = clock;
+        let ownsPrimary = true;
+        let primaryGeneration = 0;
+        let providerRecoveryAttempted = false;
+        /** Furthest provider media position the student actually heard. */
+        let heardPositionMs = 0;
+        const sampleHeardPosition = () => {
+          if (usingBrowserFallback || audioStartedAtMs === null) return;
+          const position = tts.getPlaybackPositionMs();
+          if (position !== null && Number.isFinite(position) && position > heardPositionMs) heardPositionMs = position;
+        };
+        const startupOwner = Symbol();
+        const clearStartupStatus = () => {
+          if (startupStatusOwnerRef.current !== startupOwner) return;
+          startupStatusOwnerRef.current = null;
+          if (permissionWaitOwnerRef.current === startupOwner) {
+            permissionWaitOwnerRef.current = null;
+            if (!isPausedRef.current) clock.resume();
+          }
+          onSpeechStartupStatus?.(null);
+        };
+        const speakPrimary = (onStart: () => boolean, onAudioReady: () => void, onAudioInTransit: () => void) => {
+          const attempt = ++primaryGeneration;
+          const canAcceptPrimary = () => ownsPrimary && attempt === primaryGeneration && !isCancelled() && !speechAborted;
+          tel?.mark("tts-startup-attempted", {
+            segment_index: index,
+            turn_generation: turnGeneration,
+            transport: "provider",
+            audio_context_state: tts.getAudioContextState?.() ?? null,
+          });
+          return tts.speakSegment(text, {
+            ...options,
+            onPlaybackBlocked: (blocked) => {
+              if (!canAcceptPrimary() || !turnActiveRef.current) return;
+              if (!blocked) {
+                clearStartupStatus();
+                return;
+              }
+              if (isPausedRef.current) return;
+              tel?.mark("tts-playback-blocked", {
+                segment_index: index,
+                turn_generation: turnGeneration,
+                reason: blocked.reason,
+                audio_context_state: blocked.audioContextState,
+              });
+              // Permission is a user action, not provider latency. Retain the
+              // current clip and beat and suspend both startup and playback
+              // budgets instead of replacing it with another gesture blocked
+              // transport. The recovery overlay owns the way out.
+              if (onSpeechStartupStatus) {
+                permissionWaitOwnerRef.current = startupOwner;
+                clock.pause();
+              }
+              startupStatusOwnerRef.current = startupOwner;
+              onSpeechStartupStatus?.({
+                turnGeneration,
+                segmentIndex: index,
+                blocked,
+                enableAudio: () => {
+                  if (startupStatusOwnerRef.current !== startupOwner || !canAcceptPrimary() ||
+                    isPausedRef.current || !turnActiveRef.current) return;
+                  tel?.mark("tts-audio-enable-attempted", {
+                    segment_index: index,
+                    turn_generation: turnGeneration,
+                    audio_context_state: tts.getAudioContextState?.() ?? null,
+                  });
+                  permissionWaitOwnerRef.current = null;
+                  clock.resume();
+                  tts.unlockAudio?.();
+                  tts.resume();
+                },
+              });
+            },
+            onAudioReady: () => {
+              if (!canAcceptPrimary()) return;
+              onAudioReady();
+            },
+            onAudioInTransit: () => {
+              if (!canAcceptPrimary()) return;
+              tel?.mark("tts-audio-in-transit", { segment_index: index, turn_generation: turnGeneration });
+              inTransitTimeoutFloorMs = Math.max(inTransitTimeoutFloorMs,
+                // The grace is added so a browser takeover after a full wait still
+                // gets a whole sentence budget of its own.
+                clock.elapsedMs() + SPEECH_AUDIO_IN_TRANSIT_GRACE_MS + speakSegmentTimeoutMs(spokenText, slowestPlaybackRate));
+              onAudioInTransit();
+            },
+            onStart: () => {
+              if (canAcceptPrimary() && permissionWaitOwnerRef.current === startupOwner && !isPausedRef.current) {
+                permissionWaitOwnerRef.current = null;
+                clock.resume();
+              }
+              const accepted = canAcceptPrimary() && !isPausedRef.current && onStart();
+              if (!isStale()) tel?.mark("tts-startup-accepted", {
+                segment_index: index,
+                turn_generation: turnGeneration,
+                transport: "provider",
+                accepted,
+                paused: isPausedRef.current,
+                audio_context_state: tts.getAudioContextState?.() ?? null,
+              });
+              if (!accepted) return;
+              clearStartupStatus();
+              options.onStart?.();
+            },
+            onEnd: () => {
+              if (canAcceptPrimary() && audioStartedAtMs !== null) options.onEnd?.();
+            },
+            onTimings: (timings) => { if (canAcceptPrimary()) options.onTimings?.(timings); },
+            onAudioCaptured: (audio) => { if (canAcceptPrimary()) options.onAudioCaptured?.(audio); },
+            onFirstAudioByte: (info) => { if (canAcceptPrimary()) options.onFirstAudioByte?.(info); },
+          });
+        };
+        const abandonPrimary = () => {
+          clearStartupStatus();
+          ownsPrimary = false;
+          primaryGeneration++;
+          if (tts.abandonSpeaking) tts.abandonSpeaking();
+          else tts.stop();
+        };
+
+        /**
+         * Both voices failed. The sentence is still taught: its ink plays on
+         * the estimated schedule from now, for the time the sentence would
+         * have taken to say, and the lesson moves on. The next sentence asks
+         * the voice again, so a voice that recovers speaks.
+         */
+        const teachSentenceSilently = async (error: unknown) => {
+          // A voice that failed during a permission wait leaves the clock
+          // paused by that wait and the "Enable audio" overlay up. Release
+          // both first, or the silent hold below never ends.
+          clearStartupStatus();
+          if (timeoutId !== null) window.clearTimeout(timeoutId);
+          if (playbackWatchId !== null) window.clearTimeout(playbackWatchId);
+          timeoutId = null;
+          playbackWatchId = null;
+          // A clip that arrived in full but could not play (a hidden tab, a
+          // refused AudioContext) is still this sentence's audio: the saved
+          // row keeps it for replay. Partial or browser audio is dropped.
+          capturedAudio = generatedAudio?.audioBytes ?? null;
+          capturedTimings = generatedAudio?.timings ?? null;
+          capturedDurationMs = generatedAudio?.durationMs ?? null;
+          if (audioStartedAtMs === null) {
+            audioStartedAtMs = performance.now();
+            audioStartedAtActiveMs = clock.elapsedMs();
+          }
+          const silentFromMs = audioStartedAtActiveMs ?? clock.elapsedMs();
+          if (hasNarration) speakingNarrationRef.current = narration;
+          if (!hasCommand) applyTurnPhase("speaking");
+          // The student sees the words when the voice cannot say them.
+          if (!isCancelled()) onVoiceDegraded?.(true);
+          tel?.mark("tts-voice-degraded", {
+            segment_index: index,
+            turn_generation: turnGeneration,
+            error: error instanceof Error ? error.message : String(error),
+            estimated_ms: Math.round(estimateSpeechMs),
+          });
+          notifyTimingWaiters();
+          // The pause aware clock stops while paused, so Pause holds the
+          // silent sentence too. Stop and a failed draw end it at once.
+          while (!isCancelled() && !drawFailed) {
+            const remainingMs = silentSentenceRemainingMs({
+              estimateSpeechMs,
+              playbackRate: segmentPlaybackRate(),
+              elapsedMs: clock.elapsedMs() - silentFromMs,
+            });
+            if (remainingMs <= 0 && !isPausedRef.current) break;
+            await cancellableDelay(Math.min(Math.max(remainingMs, 16), 100));
+          }
+        };
+
+        try {
+          const spoken = requireSpeechStart(speakWithStartupRecovery({
+            primary: speakPrimary,
+            fallback: async () => {
+              browserSpeechRef.current ??= new SpeechSynthesisTTSClient();
+              browserSpeechRef.current.setPlaybackRate(segmentPlaybackRate());
+              browserFallbackOwnerRef.current = segmentFallbackOwner;
+              const firstPauseGeneration = fallbackPauseGenerationRef.current;
+              let browserRestartAttempted = false;
+              try {
+                await speakWithPauseOwnedFallback({
+                  speak: async ({ onStart, onEnd, onError }) => {
+                    const attemptGeneration = fallbackPauseGenerationRef.current;
+                    browserRestartAttempted ||= attemptGeneration !== firstPauseGeneration;
+                    await restartIntroDraw();
+                    if (isCancelled() || speechAborted || isPausedRef.current || attemptGeneration !== fallbackPauseGenerationRef.current) return;
+                    let activeAttempt = true;
+                    const canAcceptBrowser = () => activeAttempt && usingBrowserFallback && !isCancelled() && !speechAborted &&
+                      !isPausedRef.current && attemptGeneration === fallbackPauseGenerationRef.current;
+                    try {
+                      tel?.mark("tts-startup-attempted", {
+                        segment_index: index,
+                        turn_generation: turnGeneration,
+                        transport: "browser",
+                        audio_context_state: null,
+                      });
+                      await browserSpeechRef.current!.speakSegment(text, {
+                        ...options,
+                        onStart: () => {
+                          if (!canAcceptBrowser()) return;
+                          // pause() cancels browser speech; the next utterance starts
+                          // this sentence over. Reset both its origin and the wall
+                          // fallback's high-water mark so ink waits for the voice.
+                          if (audioStartedAtMs !== null) {
+                            audioStartedAtMs = performance.now();
+                            audioStartedAtActiveMs = clock.elapsedMs();
+                            maxAudioPositionMs = Number.NEGATIVE_INFINITY;
+                          }
+                          onStart();
+                          options.onStart?.();
+                        },
+                        onTimings: (timings) => { if (canAcceptBrowser()) options.onTimings?.(timings); },
+                        onAudioCaptured: (audio) => { if (canAcceptBrowser()) options.onAudioCaptured?.(audio); },
+                        onEnd: () => { if (canAcceptBrowser()) { onEnd(); options.onEnd?.(); } },
+                        onError,
+                      });
+                    } finally {
+                      activeAttempt = false;
+                    }
+                  },
+                  waitWhilePaused,
+                  isCancelled: () => isCancelled() || speechAborted,
+                  pauseGeneration: () => fallbackPauseGenerationRef.current,
+                });
+              } catch (error) {
+                // The failed speak promise is joined above. Stop its owned voice
+                // before retrying the SAME sentence, never mark it completed.
+                if (!browserRestartAttempted || providerRecoveryAttempted || isCancelled() || speechAborted) throw error;
+                browserSpeechRef.current.stop();
+                if (!(await waitWhilePaused()) || isCancelled() || speechAborted) return;
+                freezeIntroDraw();
+                await restartIntroDraw();
+                if (isCancelled() || speechAborted) return;
+                providerRecoveryAttempted = true;
+                if (browserFallbackOwnerRef.current === segmentFallbackOwner) browserFallbackOwnerRef.current = null;
+                usingBrowserFallback = false;
+                browserRecoveryRate = null;
+                audioStartedAtMs = null;
+                audioStartedAtActiveMs = null;
+                maxAudioPositionMs = Number.NEGATIVE_INFINITY;
+                capturedAudio = null;
+                capturedTimings = null;
+                capturedDurationMs = null;
+                timingsOrigin = null;
+                speechComplete = false;
+                clock = createPauseAwareSpeechClock();
+                speechClockRef.current = clock;
+                ownsPrimary = true;
+                tel?.mark("tts-provider-recovery", { segment_index: index, reason: "browser-restart-failed" });
+                await speakWithStartupRecovery({
+                  primary: speakPrimary,
+                  abandonPrimary,
+                  hasStarted: () => audioStartedAtMs !== null,
+                  canFallback: () => !isCancelled() && !speechAborted,
+                  // No recovery loop: one bounded provider attempt, then abort.
+                  fallback: async () => { throw new Error("Provider voice did not restart after browser recovery"); },
+                  clock,
+                });
+              } finally {
+                if (browserFallbackOwnerRef.current === segmentFallbackOwner) {
+                  browserFallbackOwnerRef.current = null;
+                }
+              }
+            },
+            abandonPrimary,
+            hasStarted: () => audioStartedAtMs !== null,
+            canFallback: () => !isCancelled() && !speechAborted && !isPausedRef.current,
+            onFallback: (reason) => {
+              usingBrowserFallback = true;
+              browserRecoveryRate = browserRecoveryPlaybackRate(tts.getPlaybackRate?.() ?? 1);
+              capturedAudio = null;
+              capturedTimings = null;
+              capturedDurationMs = null;
+              tel?.mark("tts-browser-recovery", { segment_index: index, reason });
+            },
+            clock,
+          }), () => audioStartedAtMs !== null || isCancelled() || isPausedRef.current);
+          const playbackWatch = new Promise<never>((_, reject) => {
+            const check = () => {
+              slowestPlaybackRate = Math.min(slowestPlaybackRate, segmentWatchdogPlaybackRate(segmentPlaybackRate()));
+              sampleHeardPosition();
+              const timings = capturedTimings;
+              // A voice with no alignment (Sarvam) still reports its length
+              // from the WAV header. Without this the watch never armed for
+              // it and only the 25 s character timeout caught a frozen clip.
+              const audioDurationMs = timings && validateAudioTimingsForNarration(narration, timings).valid
+                ? timings.totalDuration * 1000
+                : !timings && capturedDurationMs !== null && capturedDurationMs > 0 ? capturedDurationMs : null;
+              if (
+                !usingBrowserFallback && audioStartedAtMs !== null && audioDurationMs !== null &&
+                speechPlaybackOverdue({
+                  elapsedMs: clock.elapsedMs() - (audioStartedAtActiveMs ?? 0),
+                  audioDurationMs,
+                  playbackRate: slowestPlaybackRate,
+                  paused: isPausedRef.current,
+                })
+              ) {
+                timedOut = true;
+                reject(new Error("tts segment playback stalled after audio started"));
+                return;
+              }
+              playbackWatchId = window.setTimeout(check, 250);
+            };
+            playbackWatchId = window.setTimeout(check, 250);
+          });
+          await raceWithCancel(Promise.race([
+            spoken,
+            playbackWatch,
+            new Promise<never>((_, reject) => {
+              const check = () => {
+                // A speed reduction applies to the current sentence. Keep
+                // the expanded deadline if speed rises again: elapsed slow
+                // playback cannot be judged against a shorter natural budget.
+                slowestPlaybackRate = Math.min(slowestPlaybackRate, segmentWatchdogPlaybackRate(segmentPlaybackRate()));
+                timeoutMs = Math.max(timeoutMs, speakSegmentTimeoutMs(spokenText, slowestPlaybackRate), inTransitTimeoutFloorMs);
+                if (clock.elapsedMs() >= timeoutMs) {
+                  timedOut = true;
+                  reject(new Error(`tts segment timeout after ${timeoutMs}ms`));
+                  return;
+                }
+                timeoutId = window.setTimeout(check, 250);
+              };
+              timeoutId = window.setTimeout(check, 250);
+            }),
+          ]));
+        } catch (error) {
+          sampleHeardPosition();
+          if (shouldFinishSegmentAfterHeardSpeechFailure({
+            error,
+            heardPositionMs,
+            browserFallback: usingBrowserFallback,
+            providerRecoveryAttempted,
+            speechAborted,
+            cancelled: isCancelled(),
+          })) {
+            // Heard, then the local clip froze. Silence the rest, keep the
+            // segment: its ink finishes, it is recorded with whatever clip
+            // was generated, and the queue never sees a failure to count
+            // toward abandoning the turn.
+            const message = error instanceof Error ? error.message : String(error);
+            tutorDebug("tts", "segment speech failed after it was heard; finishing the segment", {
+              index, error: message, timed_out: timedOut, heard_ms: Math.round(heardPositionMs),
+            });
+            tel?.mark("tts-segment-degraded", {
+              segment_index: index,
+              error: message,
+              timed_out: timedOut,
+              heard_ms: Math.round(heardPositionMs),
+            });
+            tts.abandonSpeaking?.();
+            // The rest of the sentence was never heard: the student reads it
+            // instead, for the time it would have taken to say. The abandoned
+            // clip no longer drives this segment, and its frozen position no
+            // longer drives the ink. Not a speech abort: the ink keeps drawing.
+            ownsPrimary = false;
+            voiceDegraded = true;
+            await teachSentenceSilently(error);
+            return;
+          }
+          const disposition = voiceFailureDisposition({
+            cancelled: isCancelled(),
+            drawFailed,
+            providerRecoveryAttempted,
+            codeBeatOwed: codeBeatTargets.length > 0,
+          });
+          terminalSpeechFailure = disposition !== "quiet";
+          // Set in the same tick as speechAborted: the ink reads both.
+          voiceDegraded = disposition === "teach_silently";
+          speechAborted = true;
+          if (browserFallbackOwnerRef.current === segmentFallbackOwner) stopFallbackSpeech();
+          tutorDebug("tts", "segment speech failed", {
+            index,
+            error: error instanceof Error ? error.message : String(error),
+            timed_out: timedOut,
+          });
+          tel?.mark("tts-segment-failed", {
+            segment_index: index,
+            error: error instanceof Error ? error.message : String(error),
+            timed_out: timedOut,
+          });
+          // The shared provider may already be playing a successor turn.
+          // Kill zombie work only while this segment still owns the turn.
+          if (terminalSpeechFailure) tts.abandonSpeaking?.();
+          if (disposition === "fail") {
+            if (providerRecoveryAttempted) {
+              // A retry timeout is NOT the intro's tolerable first-voice miss.
+              // Keep this out of isVoiceStartupFailure so failed recovery aborts
+              // the transaction instead of skipping narration and committing ink.
+              throw new Error("Provider voice recovery failed", { cause: error });
+            }
+            // A failed draw, or a code beat that owes TYPE: the queue counts this beat.
+            throw error;
+          }
+          if (voiceDegraded) await teachSentenceSilently(error);
+        } finally {
+          ownsPrimary = false;
+          clearStartupStatus();
+          if (timeoutId !== null) {
+            window.clearTimeout(timeoutId);
+          }
+          if (playbackWatchId !== null) {
+            window.clearTimeout(playbackWatchId);
+          }
+          if (speechClockRef.current === clock) speechClockRef.current = null;
+          markSpeechComplete();
+        }
+      };
+
+      let segmentCompleted = false;
+      try {
+        if (!(await waitWhilePaused())) return;
+
+        if (!hasNarration && hasCommand) {
+          tutorDebug("segment", "draw-only", { index });
+          applyTurnPhase("drawing");
+          await runDraw(naturalDrawMs);
+          if (isCancelled()) return;
+          tutorDebug("segment", "draw-only complete", { index });
+        } else if (hasNarration) {
+          tutorDebug("segment", "paired narration+draw", { index });
+
+          // Finish same-generation ink first so speech does not race that draw.
+          // A newer turn must not wait on the previous generation's draw.
+          const priorDraw = drawChainRef.current as Promise<void> & { turnGeneration?: number };
+          if (priorDraw.turnGeneration === undefined || priorDraw.turnGeneration === turnGeneration) {
+            await priorDraw.catch(() => undefined);
+          }
+          if (isCancelled()) return;
+          if (!(await waitWhilePaused())) return;
+
+          // If the ink stops, the voice stops with it. Without this the two
+          // promises are independent: Promise.all rejects on the draw side
+          // while the speech carries on narrating a board that has frozen.
+          startOwnedDraw = () => {
+            const generation = drawGeneration;
+            ownedDraw = guardDrawWithSpeech(runDraw(estimateSpeechMs, null, generation), (error) => {
+              if (isCancelled() || generation !== drawGeneration) return;
+              drawFailed = true;
+              speechAborted = true;
+              if (browserFallbackOwnerRef.current === segmentFallbackOwner) stopFallbackSpeech();
+              tutorDebug("segment", "draw failed; silencing narration", {
+                index,
+                error: error instanceof Error ? error.message : String(error),
+              });
+              tel?.mark("segment-draw-failed", {
+                segment_index: index,
+                error: error instanceof Error ? error.message : String(error),
+              });
+              tts.abandonSpeaking?.();
+            });
+            // Observe immediately, but retain the rejection for the paired join.
+            const queuedDraw = ownedDraw.catch(() => undefined) as Promise<void> & { turnGeneration?: number };
+            queuedDraw.turnGeneration = turnGeneration;
+            drawChainRef.current = queuedDraw;
+          };
+          if (rollbackIntroInk) introDrawOwnerRef.current = { owner: segmentFallbackOwner, freeze: freezeIntroDraw };
+          startOwnedDraw();
+
+          let pairedFailed = false;
+          let pairedFailure: unknown;
+          try {
+            await Promise.all([
+              speakSegmentWithTimeout(narration, {
+                ...speakOptions,
+                onStart: () => {
+                  markVoiceStarted();
+                  tutorDebug("tts", "segment audio started", { index });
+                  tel?.mark("tts-start", {
+                    segment_index: index,
+                    chars: narration.length,
+                    command_count: segmentCommands.length,
+                  });
+                },
+                onTimings: (timings) => {
+                  captureTimings(timings);
+                  if (timings.totalDuration > 0) {
+                    tutorDebug("tts", "segment timings", {
+                      index,
+                      total_duration_ms: Math.round(timings.totalDuration * 1000),
+                    });
+                  }
+                },
+              }),
+              ownedDraw,
+            ]);
+            // The initial draw may have settled before Pause. Completion still
+            // joins the CURRENT replay, not just that first execution.
+            await ownedDraw;
+          } catch (error) {
+            pairedFailed = true;
+            pairedFailure = error;
+          } finally {
+            drawGeneration++;
+            await ownedDraw.catch(() => undefined);
+            if (introDrawOwnerRef.current?.owner === segmentFallbackOwner) introDrawOwnerRef.current = null;
+          }
+
+          if (pairedFailed) {
+            if (!isCancelled() && codeBeatOwner && codeLessonControllerRef?.current === codeBeatOwner &&
+                codeBeatOwner.getActivePlan() === codeBeatPlan && codeBeatOwner.getState().mode === "lesson") {
+              const incomplete = incompleteCodeBeatFailure(codeBeatTargets, codeBeatOwner.getState().revealedChars, pairedFailure);
+              if (incomplete) throw incomplete;
+            }
+            throw pairedFailure;
+          }
+
+          if (isCancelled()) return;
+          tutorDebug("segment", "paired narration+draw complete", { index });
+        }
+        segmentCompleted = true;
+      } finally {
+        if (speakingNarrationRef.current === narration) {
+          speakingNarrationRef.current = "";
+        }
+        if (segmentCompleted && !isCancelled()) {
+          const recordedRow: RecordedSegmentPayload = {
+            orderIndex: index,
+            narration: segment.narration,
+            spokenText: mathToSpeech(narration),
+            command: serializeSegmentCommands(savesCommand ? segmentCommands.filter(savesCommand) : segmentCommands, {
+              trustedDiagramGeometry: segment.verifiedDiagramIntro === true,
+            }),
+            audioBytes: capturedAudio,
+            durationMs: (() => {
+              const spoken = capturedDurationMs;
+              const typed = segmentCommands.some((command) => command.type === "TYPE");
+              if (!typed) return spoken;
+              const elapsed = audioStartedAtMs != null
+                ? Math.round(performance.now() - audioStartedAtMs)
+                : actualDrawMs > 0 ? actualDrawMs : null;
+              if (spoken == null) return elapsed;
+              if (elapsed == null) return spoken;
+              return Math.max(spoken, elapsed);
+            })(),
+            timings: capturedTimings,
+          };
+          if (preparedSave && !preparedSave.complete(recordedRow)) return;
+          recordedSegmentsRef.current.push(recordedRow);
+          // Saved as it is taught. A figure intro's rows wait for the figure
+          // to commit (the intro passes `onRecorded`); see `liveTurnSave`.
+          if (!preparedSave) liveTurnSave().recordRow(cancelRef, turnGeneration, recordedRow, { intro: onRecorded !== undefined });
+          if (segment.narration.trim()) {
+            narrationSinceEpochRef.current +=
+              (narrationSinceEpochRef.current ? " " : "") + segment.narration.trim();
+          }
+          // Publish ownership in the same synchronous completion as the row
+          // and narration, before Stop or another turn can take shared refs.
+          onRecorded?.(recordedRow);
+        } else {
+          // Accepted shown work survives failures as well as cancellation.
+          // A synchronously captured Stop/pagehide token is already settled.
+          if (terminalSpeechFailure && generatedAudio && !isCancelled()) preparedSave?.failPlayback(generatedAudio);
+          else preparedSave?.interrupt();
+        }
+        tutorDebug("segment", "runSegment end", { index, ...segmentMetadata });
+        segmentSpan?.end(segmentMetadata);
+      }
+      // A beat taught without a voice is a success the queue reports, not a failure it counts.
+      return voiceDegraded && segmentCompleted ? { voiceDegraded: true } : undefined;
+    },
+    [
+      sessionId,
+      activeVerifiedDiagramRef,
+      codeLessonControllerRef,
+      cancellableDelay,
+      ensureTTSClient,
+      executeCommandWithCancel,
+      raceWithCancel,
+      applyTurnPhase,
+      cancelRef,
+      isPausedRef,
+      waitWhilePaused,
+      turnActiveRef,
+      turnGenerationRef,
+      turnTelemetryRef,
+      turnStatsRef,
+      recordedSegmentsRef,
+      narrationSinceEpochRef,
+      currentTraceIdRef,
+      setCurrentSegmentText,
+      narrationDensityRef,
+      drawChainRef,
+      reserveTextCommandPlacements,
+      speakingNarrationRef,
+      onSpeechStartupStatus,
+      onVoiceDegraded,
+      lessonFiguresRef,
+    ],
+  );
+
+  return { runSegment, pauseFallbackSpeech, resumeFallbackSpeech, stopFallbackSpeech, speakingNarrationRef };
+}

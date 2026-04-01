@@ -1,0 +1,683 @@
+/**
+ * A doubt answered on the lesson's page stays on that page everywhere the board
+ * is rebuilt.
+ *
+ * A doubt turn is saved without the runtime CLEAR and carries a board
+ * continuation marker. If the server drops the marker, or a surface ignores it,
+ * the doubt becomes a page of its own on replay and restore: the figure it
+ * pointed at vanishes under it, the notes split in two, and the video export
+ * records a few rows on a blank board.
+ */
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import {
+  parseStoredSegmentCommands,
+  serializeSegmentCommands,
+  type DrawCommand,
+} from "@heytutor/drawing";
+import {
+  BOARD_CONTINUATION_VERSION,
+  boardContinuationArtifacts,
+  boardContinuationOf,
+  pageTurnsEndingAt,
+  storedTurnContinuesBoard,
+  storedTurnPageQuestion,
+} from "../../lib/boards/boardContinuation";
+import type {
+  RecordedSegmentPayload,
+  StoredSegment,
+  StoredTurn,
+} from "../../lib/boards/boardsClient";
+import { buildLectureTimeline, buildLiveTurnSegments } from "../../lib/replay/liveTimeline";
+import { canonicalizeTurnSceneMetadata } from "../../lib/scene/turnScenePersistence";
+import {
+  latestLecturePage,
+  lecturePageCacheKey,
+  LECTURE_PAGE_CACHE_REVISION,
+  pageHasExportableAudio,
+} from "../../lib/lecture-export/canExportLectureMp4";
+import { lectureExportCacheKey } from "../../lib/lecture-export/lectureExportFrames";
+import { LECTURE_EXPORT_PLAYBACK_RATE } from "../../lib/lecture-export/lectureExportSpeed";
+import { resumePageRecord, type PersistedTurnScene } from "../../features/tutor-session/lib/turn/doubtTurn";
+import { liveTurnScene } from "../../features/tutor-session/lib/turn/liveTurnSave";
+import { resolveVerifiedDiagramFocusTargets, type VerifiedDiagram } from "@heytutor/drawing";
+import { buildReplayTimeline } from "../../lib/replay/replayTimeline";
+import { DOUBT_FIGURE_REF_VERSION, doubtFigureRefArtifacts } from "../../lib/boards/doubtFigureRef";
+import { bindPageFigureLoader, type PageFigureTurn } from "../../lib/scene/pageFigureLoader";
+import { restoreVerifiedDiagramFromTurn } from "../../features/tutor-session/lib/scene/restoreVerifiedDiagram";
+import { checkpointSceneFixture } from "./fixtures/checkpointScene";
+import { DOUBT_TITLE, doubtFigurePageFixture } from "./fixtures/doubtFigureScene";
+import { doubtFigureTurnScene } from "../../features/tutor-session/lib/turn/doubtTurn";
+
+function assert(condition: unknown, message: string): asserts condition {
+  if (!condition) throw new Error(message);
+}
+
+const LESSON = "A block slides down a 30 degree incline with mu = 0.2. Find the acceleration.";
+
+const CLEAR: DrawCommand = { type: "CLEAR", params: [], charPosition: 0, narrationBefore: "" };
+
+const write = (text: string): DrawCommand => ({
+  type: "WRITE",
+  text,
+  params: [90, 142],
+  charPosition: 0,
+  narrationBefore: "",
+});
+
+function epochSegment(): StoredSegment {
+  return {
+    id: "seg-epoch",
+    orderIndex: 0,
+    narration: "",
+    spokenText: "",
+    command: CLEAR,
+    audioUrl: null,
+    durationMs: 50,
+    timings: null,
+  };
+}
+
+function rowSegment(orderIndex: number, row: string, audioUrl: string | null): StoredSegment {
+  return {
+    id: `seg-${orderIndex}`,
+    orderIndex,
+    narration: `so ${row}`,
+    spokenText: `so ${row}`,
+    command: serializeSegmentCommands([write(row)], { trustedDiagramGeometry: false }),
+    audioUrl,
+    durationMs: 900,
+    timings: null,
+  };
+}
+
+function turn(input: {
+  orderIndex: number;
+  question: string;
+  rows: string[];
+  opensOnClear: boolean;
+  sceneArtifacts?: unknown;
+  audio?: boolean;
+}): StoredTurn {
+  const lead = input.opensOnClear ? [epochSegment()] : [];
+  return {
+    id: `turn-${input.orderIndex}`,
+    orderIndex: input.orderIndex,
+    question: input.question,
+    rawResponse: input.rows.join(" "),
+    speedMultiplier: 1,
+    traceId: null,
+    sceneDocument: null,
+    sceneEngineVersion: null,
+    validationReport: null,
+    visualStatus: "text_only",
+    sceneArtifacts: input.sceneArtifacts ?? null,
+    segments: [
+      ...lead,
+      ...input.rows.map((row, index) =>
+        rowSegment(lead.length + index, row, input.audio === false ? null : `blob:${input.orderIndex}-${index}`),
+      ),
+    ],
+  };
+}
+
+const lessonTurn = (orderIndex: number, question: string, rows: string[], audio = true) =>
+  turn({ orderIndex, question, rows, opensOnClear: true, audio });
+
+const doubtTurn = (orderIndex: number, lessonQuestion: string, rows: string[], audio = true) =>
+  turn({
+    orderIndex,
+    question: `Doubt: row ${orderIndex}`,
+    rows,
+    opensOnClear: false,
+    sceneArtifacts: boardContinuationArtifacts(lessonQuestion),
+    audio,
+  });
+
+async function main(): Promise<void> {
+  // --- the marker ----------------------------------------------------------
+  {
+    const marker = boardContinuationOf(boardContinuationArtifacts(`  ${LESSON}  `));
+    assert(
+      marker?.schemaVersion === BOARD_CONTINUATION_VERSION && marker.lessonQuestion === LESSON,
+      "the continuation marker must round trip with the lesson question trimmed",
+    );
+    assert(
+      boardContinuationOf({
+        schemaVersion: "scene-artifacts/v3",
+        turnPlan: null,
+        ...boardContinuationArtifacts(LESSON),
+      })?.lessonQuestion === LESSON,
+      "the marker must survive beside other scene artifacts",
+    );
+    for (const forged of [
+      null,
+      "board-continuation/v1",
+      { boardContinuation: { schemaVersion: "board-continuation/v0", lessonQuestion: LESSON } },
+      { boardContinuation: { schemaVersion: BOARD_CONTINUATION_VERSION, lessonQuestion: 7 } },
+      { boardContinuation: [BOARD_CONTINUATION_VERSION, LESSON] },
+    ]) {
+      assert(
+        boardContinuationOf(forged) === null,
+        `a malformed marker must read as none: ${JSON.stringify(forged)}`,
+      );
+    }
+  }
+
+  // --- which turns continue a page ----------------------------------------
+  const lesson = lessonTurn(0, LESSON, ["N = mg cos 30", "a = g sin 30 - mu g cos 30"]);
+  const doubt = doubtTurn(1, LESSON, ["sin 30 = 0.5"]);
+  {
+    assert(!storedTurnContinuesBoard(lesson), "a lesson opens its own page");
+    assert(storedTurnContinuesBoard(doubt), "a doubt with the marker and no CLEAR continues the page");
+    assert(
+      storedTurnPageQuestion(doubt) === LESSON,
+      "a doubt's page belongs to the lesson it was asked about, not to its own title",
+    );
+    assert(storedTurnPageQuestion(lesson) === LESSON, "a lesson's page is its own question");
+
+    const clearedDoubt = turn({
+      orderIndex: 2,
+      question: "Doubt: fresh",
+      rows: ["x = 1"],
+      opensOnClear: true,
+      sceneArtifacts: boardContinuationArtifacts(LESSON),
+    });
+    assert(
+      !storedTurnContinuesBoard(clearedDoubt),
+      "a turn that opens on the CLEAR starts a page whatever its artifacts say",
+    );
+    assert(
+      storedTurnPageQuestion(clearedDoubt) === "Doubt: fresh",
+      "a turn on a page of its own keeps its own question",
+    );
+
+    // The CLEAR is identified by order, not by array position.
+    const shuffled: StoredTurn = { ...clearedDoubt, segments: [...clearedDoubt.segments].reverse() };
+    assert(
+      !storedTurnContinuesBoard(shuffled),
+      "the page opening CLEAR is the lowest orderIndex, wherever it sits in the array",
+    );
+
+    const unmarked = turn({ orderIndex: 3, question: "legacy", rows: ["y = 2"], opensOnClear: false });
+    assert(
+      !storedTurnContinuesBoard(unmarked),
+      "a turn without the marker is never read as a continuation, CLEAR or not",
+    );
+  }
+
+  // --- pages ---------------------------------------------------------------
+  const secondLesson = lessonTurn(2, "Find the range of a projectile at 20 m/s and 30 degrees.", ["R = u^2 sin 2θ / g"]);
+  const secondDoubt = doubtTurn(3, secondLesson.question, ["sin 60 = 0.866"]);
+  const thirdDoubt = doubtTurn(4, secondLesson.question, ["R = 35.3 m"], false);
+  const board = [lesson, doubt, secondLesson, secondDoubt, thirdDoubt];
+  {
+    const ids = (turns: StoredTurn[]) => turns.map((entry) => entry.id).join(",");
+    assert(
+      ids(pageTurnsEndingAt(board)) === "turn-2,turn-3,turn-4",
+      `the last page is the second lesson and both doubts under it, got ${ids(pageTurnsEndingAt(board))}`,
+    );
+    assert(ids(pageTurnsEndingAt(board, 1)) === "turn-0,turn-1", "an earlier page chains back to its lesson");
+    assert(ids(pageTurnsEndingAt(board, 2)) === "turn-2", "a lesson is a page of its own");
+    assert(ids(pageTurnsEndingAt(board, 0)) === "turn-0", "the first turn is a page of its own");
+    assert(pageTurnsEndingAt(board, 9).length === 0, "an index past the board has no page");
+    assert(pageTurnsEndingAt([]).length === 0, "an empty board has no page");
+
+    // Export takes the page the student last watched, in board order.
+    const exportPage = latestLecturePage([thirdDoubt, lesson, secondDoubt, doubt, secondLesson]);
+    assert(
+      ids(exportPage) === "turn-2,turn-3,turn-4",
+      `the video export records the whole last page, got ${ids(exportPage)}`,
+    );
+    assert(
+      pageHasExportableAudio([thirdDoubt]) === false && pageHasExportableAudio(exportPage),
+      "a page with any recorded audio is exportable; a silent one is not",
+    );
+    assert(
+      lecturePageCacheKey([secondLesson]) ===
+        `${lectureExportCacheKey(secondLesson)}@${LECTURE_EXPORT_PLAYBACK_RATE}@${LECTURE_PAGE_CACHE_REVISION}`,
+      "a page of one turn keeps that turn's cache key plus the 1.25× export rate",
+    );
+    assert(
+      lecturePageCacheKey([secondLesson, secondDoubt]) !==
+        lecturePageCacheKey([secondLesson, secondDoubt, thirdDoubt]),
+      "a doubt added to the page must change the cache key, or the old video is served",
+    );
+  }
+
+  // --- the server keeps the marker ----------------------------------------
+  {
+    const segments = [
+      {
+        orderIndex: 0,
+        narration: "sin 30 is one half",
+        spokenText: "sin 30 is one half",
+        command: serializeSegmentCommands([write("sin 30 = 0.5")], { trustedDiagramGeometry: false }),
+      },
+    ];
+    const saved = await canonicalizeTurnSceneMetadata({
+      question: "Doubt: why is sin 30 one half",
+      visualStatus: "text_only",
+      sceneArtifacts: { ...boardContinuationArtifacts(LESSON), forged: { trusted: true } },
+      segments,
+    });
+    assert(saved.ok, `a text-only doubt turn must persist: ${saved.ok ? "" : saved.error}`);
+    const artifacts = saved.value.sceneArtifacts as Record<string, unknown> | null;
+    assert(
+      boardContinuationOf(artifacts)?.lessonQuestion === LESSON,
+      "the server must keep the continuation marker on a text-only doubt turn",
+    );
+    assert(
+      artifacts !== null && !("forged" in artifacts),
+      "arbitrary artifacts beside the marker must still be dropped",
+    );
+    assert(
+      saved.value.visualStatus === "text_only" && saved.value.sceneDocument === null,
+      "a doubt turn is saved text-only",
+    );
+    const persisted: Pick<StoredTurn, "sceneArtifacts" | "segments"> = {
+      sceneArtifacts: saved.value.sceneArtifacts,
+      segments: saved.value.segments.map((segment) => ({
+        id: `saved-${segment.orderIndex}`,
+        orderIndex: segment.orderIndex,
+        narration: segment.narration,
+        spokenText: segment.spokenText,
+        command: segment.command as StoredSegment["command"],
+        audioUrl: null,
+        durationMs: null,
+        timings: null,
+      })),
+    };
+    assert(
+      storedTurnContinuesBoard(persisted),
+      "the turn the server saves must still read as a continuation",
+    );
+
+    const unmarked = await canonicalizeTurnSceneMetadata({
+      question: "What is a free body diagram?",
+      visualStatus: "text_only",
+      sceneArtifacts: { forged: { trusted: true } },
+      segments,
+    });
+    assert(
+      unmarked.ok && unmarked.value.sceneArtifacts === null,
+      "a text-only turn with no marker, failure or code lesson must still save no artifacts",
+    );
+
+    const forgedMarker = await canonicalizeTurnSceneMetadata({
+      question: "Doubt: forged",
+      visualStatus: "text_only",
+      sceneArtifacts: { boardContinuation: { schemaVersion: "board-continuation/v0", lessonQuestion: LESSON } },
+      segments,
+    });
+    assert(
+      forgedMarker.ok && forgedMarker.value.sceneArtifacts === null,
+      "a marker the client cannot prove is well formed must be dropped",
+    );
+  }
+
+  // --- the live turn in a rewind ------------------------------------------
+  {
+    const recorded: RecordedSegmentPayload[] = [0, 1].map((index) => ({
+      orderIndex: index + 3,
+      narration: `step ${index}`,
+      spokenText: `step ${index}`,
+      command: serializeSegmentCommands([write(`row ${index}`)], { trustedDiagramGeometry: false }),
+      audioBytes: null,
+      durationMs: 700,
+      timings: null,
+    }));
+    const opening = buildLiveTurnSegments(recorded, () => null);
+    assert(
+      parseStoredSegmentCommands(opening[0]!.command)[0]?.type === "CLEAR" && opening.length === 3,
+      "a live lesson still rewinds from a fresh page",
+    );
+    const continuing = buildLiveTurnSegments(recorded, () => null, { continuesBoard: true });
+    assert(
+      continuing.length === recorded.length &&
+        continuing.every((segment, index) => segment.orderIndex === index) &&
+        continuing.every((segment) =>
+          parseStoredSegmentCommands(segment.command).every((command) => command.type !== "CLEAR"),
+        ),
+      "a live doubt rewinds with no CLEAR and dense order indexes",
+    );
+
+    const live = buildLectureTimeline({
+      storedTurns: [lesson],
+      liveSegments: recorded,
+      liveQuestion: LESSON,
+      audioUrlFor: () => null,
+      liveContinuesBoard: true,
+    });
+    const liveTurn = live.turns[live.turns.length - 1]!;
+    const liveIndex = live.turns.length - 1;
+    assert(
+      liveTurn.id === "live-turn" && storedTurnContinuesBoard(liveTurn),
+      "a live doubt must read as a continuation to the replay engine",
+    );
+    assert(
+      storedTurnPageQuestion(liveTurn) === LESSON,
+      "a live doubt's page is the lesson's page",
+    );
+    assert(
+      live.timeline.cues
+        .filter((cue) => cue.turnIndex === liveIndex)
+        .every((cue) => cue.commands.every((command) => command.type !== "CLEAR")),
+      "rewinding into a live doubt must never wipe the lesson's page",
+    );
+    assert(
+      pageTurnsEndingAt(live.turns).map((entry) => entry.id).join(",") === "turn-0,live-turn",
+      "a live doubt shares the page of the lesson it continues",
+    );
+
+    const fresh = buildLectureTimeline({
+      storedTurns: [lesson],
+      liveSegments: recorded,
+      liveQuestion: LESSON,
+      audioUrlFor: () => null,
+    });
+    const freshTurn = fresh.turns[fresh.turns.length - 1]!;
+    assert(
+      !storedTurnContinuesBoard(freshTurn) && freshTurn.sceneArtifacts === null,
+      "a live lesson is a page of its own, exactly as before",
+    );
+  }
+
+  // --- a saved doubt's pointing replays against the lesson's figure ---------
+  // The doubt names the lesson turn whose figure it pointed at; the server
+  // keeps its FOCUS only when it resolves on that figure. Replay keeps the
+  // lesson's figure active through the doubt (the sync guard checked below),
+  // so the saved FOCUS traces the same part it traced live.
+  {
+    const fixture = await checkpointSceneFixture();
+    const lessonId = "11111111-1111-4111-8111-111111111111";
+    const lessonSaved = await canonicalizeTurnSceneMetadata(fixture.metadata);
+    assert(lessonSaved.ok, "the figure lesson saves");
+    const figureLesson: StoredTurn = {
+      id: lessonId, orderIndex: 0, question: fixture.question, rawResponse: "The sum is five.", speedMultiplier: 1, traceId: null,
+      ...lessonSaved.value,
+      segments: [epochSegment(), ...lessonSaved.value.segments.map((segment, index) => ({
+        id: `lesson-${index}`, orderIndex: index + 1, narration: segment.narration, spokenText: segment.spokenText,
+        command: segment.command as StoredSegment["command"], audioUrl: null, durationMs: 900, timings: null,
+      }))],
+    };
+    const focus: DrawCommand = { type: "FOCUS", params: [], text: "start_value", charPosition: 0, narrationBefore: "" };
+    const loaderTurn = (turn: StoredTurn): PageFigureTurn => ({ ...turn, boardId: "b1", userId: "u1" });
+    const doubtSaved = await canonicalizeTurnSceneMetadata({
+      question: "Doubt: why does it start at 2?",
+      visualStatus: "text_only",
+      sceneArtifacts: {
+        ...boardContinuationArtifacts(fixture.question),
+        ...doubtFigureRefArtifacts({ schemaVersion: DOUBT_FIGURE_REF_VERSION, turnId: lessonId, kind: "verified_scene" }),
+      },
+      segments: [{ orderIndex: 0, narration: "It starts at two.", spokenText: "It starts at two.",
+        command: serializeSegmentCommands([focus], { trustedDiagramGeometry: false }) }],
+    }, {
+      loadPageFigure: bindPageFigureLoader({ boardId: "b1", userId: "u1", turnId: null }, {
+        store: {
+          findTurn: async (id) => (id === lessonId ? loaderTurn(figureLesson) : null),
+          turnsBetween: async () => [],
+          turnsBefore: async () => [],
+        },
+      }),
+    });
+    assert(doubtSaved.ok, "the pointed doubt saves");
+    const pointedDoubt: StoredTurn = {
+      id: "22222222-2222-4222-8222-222222222222", orderIndex: 1, question: "Doubt: why does it start at 2?",
+      rawResponse: "It starts at two.", speedMultiplier: 1, traceId: null, ...doubtSaved.value,
+      segments: doubtSaved.value.segments.map((segment, index) => ({
+        id: `doubt-${index}`, orderIndex: index, narration: segment.narration, spokenText: segment.spokenText,
+        command: segment.command as StoredSegment["command"], audioUrl: null, durationMs: 900, timings: null,
+      })),
+    };
+    assert(storedTurnContinuesBoard(pointedDoubt), "the pointed doubt continues the lesson's page");
+    const replayTurns = [figureLesson, pointedDoubt];
+    const replay = buildReplayTimeline(replayTurns);
+    const doubtCues = replay.cues.filter((cue) => cue.turnIndex === 1);
+    const doubtFocus = doubtCues.flatMap((cue) => cue.commands).filter((command) => command.type === "FOCUS");
+    assert(doubtFocus.some((command) => command.text === "start_value"), "the saved doubt's FOCUS reaches the replay timeline");
+    // The replay sync rule: a continuing turn keeps the figure the page has.
+    let active: VerifiedDiagram | null = null;
+    const activeAt: (VerifiedDiagram | null)[] = replayTurns.map((turn) => {
+      if (!storedTurnContinuesBoard(turn)) active = restoreVerifiedDiagramFromTurn(turn);
+      return active;
+    });
+    assert(activeAt[1] !== null && activeAt[1] === activeAt[0], "replay keeps the lesson's figure active through the doubt");
+    assert(
+      doubtFocus.every((command) => resolveVerifiedDiagramFocusTargets(command, activeAt[1]).length > 0),
+      "every saved doubt FOCUS resolves against the lesson's figure in replay",
+    );
+    assert(
+      restoreVerifiedDiagramFromTurn(pointedDoubt) === null &&
+        doubtFocus.every((command) => resolveVerifiedDiagramFocusTargets(command, null).length === 0),
+      "rebuilt from the doubt itself there is no figure: only the continuation guard keeps the pointing alive",
+    );
+  }
+
+  // --- the surfaces that rebuild the board consult the marker --------------
+  const root = resolve(import.meta.dirname, "../..");
+  const read = (path: string) => readFileSync(resolve(root, path), "utf8");
+  // Both anchors are checked before slicing. A missing start makes `slice(-1)`
+  // hand back the file's last character; a missing end silently widens the
+  // slice to the rest of the file, where a later function can satisfy the
+  // assertion and the gate passes on code it was never meant to read.
+  const between = (path: string, start: string, end: string): string => {
+    const source = read(path);
+    const from = source.indexOf(start);
+    assert(from >= 0, `${path}: start anchor "${start}" is gone; repoint this gate, do not relax it`);
+    const to = source.indexOf(end, from + start.length);
+    assert(to > from, `${path}: end anchor "${end}" is gone; repoint this gate, do not relax it`);
+    return source.slice(from, to);
+  };
+
+  {
+    const sync = between(
+      "features/tutor-session/hooks/useReplay.ts",
+      "const syncReplayTurn = useCallback(",
+      "const runReplaySegmentDraw = useCallback(",
+    );
+    const guard = sync.indexOf("storedTurnContinuesBoard(turn)");
+    assert(guard >= 0, "replay must keep the page's figure and code panel through a doubt");
+    assert(
+      guard < sync.indexOf("restoreVerifiedDiagramFromTurn(turn)") &&
+        guard < sync.indexOf("controller.commit(plan)"),
+      "replay must check for a continuing turn before it rebuilds the figure or the code panel",
+    );
+  }
+
+  {
+    const restore = between(
+      "features/tutor-session/hooks/useBoardSession.ts",
+      "const restoreBoardFromApi = useCallback(",
+      "const restoreBoardFromApiRef = useRef(restoreBoardFromApi);",
+    );
+    assert(
+      restore.includes("storedTurnContinuesBoard(turn)"),
+      "restore must recognise a doubt answered on the lesson's page",
+    );
+    assert(
+      restore.includes("if (restoredInk && !continuesPage)"),
+      "restore must not split a lesson and its doubts into two notes pages",
+    );
+    assert(
+      restore.includes("liveQuestionRef.current = storedTurnPageQuestion(turn)"),
+      "a restored doubt's page must keep the lesson's question",
+    );
+    const keep = restore.indexOf("if (!continuesPage) {");
+    assert(
+      keep >= 0 && keep < restore.indexOf("restoreVerifiedDiagramFromTurn(turn)"),
+      "restore must keep the page's figure and code panel through a doubt",
+    );
+  }
+
+  {
+    const edge = between(
+      "features/tutor-session/hooks/useLectureRewind.ts",
+      "const measureLiveEdge = useCallback(",
+      "// --- rewind runtime",
+    );
+    assert(
+      edge.includes("liveContinuesBoard:"),
+      "rewinding a live doubt must keep the lesson's page",
+    );
+  }
+
+  {
+    // Owner decision 2: the video covers the whole board, from the lesson's
+    // start to now, so the encoder gets every turn (not only the last page).
+    // Doubts stay on their lesson's page through `storedTurnContinuesBoard` in
+    // the timeline; a live doubt continues it in the export source.
+    const exporter = between(
+      "features/tutor-session/hooks/useLectureExport.ts",
+      "const downloadVideo = useCallback(",
+      "const downloadNotesPdf = useCallback(",
+    );
+    assert(
+      exporter.includes("pageTurns: turns,") && !exporter.includes("latestCompletedTurn("),
+      "the video export must hand every turn of the board to the encoder",
+    );
+    assert(
+      read("lib/lecture-export/lectureExportSource.ts").includes("boardContinuationOf(live.sceneArtifacts)"),
+      "a live doubt must continue its lesson's page in the export",
+    );
+    assert(
+      read("lib/lecture-export/exportLectureMp4.ts").includes("buildReplayTimeline(pageTurns)"),
+      "the encoder must draw every turn",
+    );
+  }
+
+  // --- the rest of a stopped lesson stays on the lesson's page -------------
+  // A resume is saved under the lesson's question with no CLEAR. Without the
+  // marker a reload read it as a new page: the notes split, the figure was drawn
+  // a second time, and the server rebuilt the whole intro into it.
+  {
+    const lessonPlan = { schemaVersion: "turn-plan/v3", question: LESSON };
+    const validated: PersistedTurnScene = {
+      sceneDocument: { id: "incline" },
+      sceneEngineVersion: "test",
+      validationReport: { ok: true },
+      visualStatus: "validated",
+      sceneArtifacts: { schemaVersion: "scene-artifacts/v3", turnPlan: lessonPlan },
+    };
+    const page = resumePageRecord({
+      boardId: "b1",
+      lessonQuestion: LESSON,
+      figureDrawn: true,
+      turnPlan: null,
+      solverProjection: null,
+      scene: validated,
+    });
+    const scene = page.turn.scene!;
+    assert(page.turn.continuesBoard && page.turn.question === LESSON, "a resume continues the page under the lesson's question");
+    assert(boardContinuationOf(scene.sceneArtifacts)?.lessonQuestion === LESSON, "the resume's scene carries the continuation marker");
+    assert(
+      scene.visualStatus === "validated" && scene.sceneDocument === validated.sceneDocument &&
+        (scene.sceneArtifacts as { turnPlan?: unknown }).turnPlan === lessonPlan,
+      "the marker rides beside the lesson's own scene and plan",
+    );
+    assert(boardContinuationOf(validated.sceneArtifacts) === null, "the lesson's own scene is not mutated");
+    const textOnly = resumePageRecord({
+      boardId: "b1", lessonQuestion: LESSON, figureDrawn: false, turnPlan: null, solverProjection: null, scene: null,
+    });
+    assert(
+      textOnly.turn.scene?.visualStatus === "text_only" &&
+        boardContinuationOf(textOnly.turn.scene.sceneArtifacts)?.lessonQuestion === LESSON,
+      "a text-only resume still carries the marker",
+    );
+
+    // Every scene the progressive save sends for the resume keeps the marker:
+    // live, stopped with or without its figure, complete, and the text-only retry.
+    const sent = [
+      liveTurnScene({ page, kind: "resume", preview: LESSON, opensPage: false, status: "live", textOnly: false }),
+      liveTurnScene({ page, kind: "resume", preview: LESSON, opensPage: false, status: "stopped", textOnly: false }),
+      liveTurnScene({ page: { ...page, figureDrawn: false }, kind: "resume", preview: LESSON, opensPage: false, status: "stopped", textOnly: false }),
+      liveTurnScene({ page, kind: "resume", preview: LESSON, opensPage: false, status: "complete", textOnly: false }),
+      liveTurnScene({ page, kind: "resume", preview: LESSON, opensPage: false, status: "live", textOnly: true }),
+    ];
+    sent.forEach((sentScene, index) => {
+      assert(
+        boardContinuationOf(sentScene.sceneArtifacts)?.lessonQuestion === LESSON,
+        `a resume save (case ${index}) must keep the continuation marker`,
+      );
+    });
+
+    // Saved, it reads as a continuation: one page, the lesson's question.
+    const lesson = lessonTurn(0, LESSON, ["F = ma"]);
+    const resumed: StoredTurn = {
+      ...turn({ orderIndex: 1, question: LESSON, rows: ["a = 3.2 m/s^2"], opensOnClear: false }),
+      sceneArtifacts: sent[3]!.sceneArtifacts,
+      kind: "resume",
+    };
+    assert(storedTurnContinuesBoard(resumed), "a saved resume continues the lesson's page");
+    assert(
+      pageTurnsEndingAt([lesson, resumed]).map((entry) => entry.id).join(",") === "turn-0,turn-1",
+      "lesson and resume are one page",
+    );
+    assert(storedTurnPageQuestion(resumed) === LESSON, "the resume's page is the lesson's");
+
+    // The server keeps the marker on a text-only resume (the validated path is
+    // covered by verify-partial-turn-restore with the real canonicalizer).
+    const savedText = await canonicalizeTurnSceneMetadata({
+      question: LESSON,
+      visualStatus: "text_only",
+      sceneArtifacts: textOnly.turn.scene!.sceneArtifacts,
+      segments: [{
+        orderIndex: 0, narration: "so a is 3.2", spokenText: "so a is 3.2",
+        command: serializeSegmentCommands([write("a = 3.2")], { trustedDiagramGeometry: false }),
+      }],
+    });
+    assert(
+      savedText.ok && boardContinuationOf(savedText.value.sceneArtifacts)?.lessonQuestion === LESSON,
+      "the server keeps a text-only resume's marker",
+    );
+
+    const handler = read("features/tutor-session/hooks/turn/useQuestionHandler.ts");
+    assert(
+      /\? resumePageRecord\(\{/.test(handler) && handler.includes('kind: doubt ? "doubt" : resume ? "resume" : "lesson",'),
+      "a resume runs on its own page record and saves as kind resume",
+    );
+  }
+
+  // --- a doubt that drew its own figure is still on the lesson's page -------
+  // DIAGRAM_DOUBT_FIGURES: the doubt is saved as its own validated scene, yet
+  // it continues the page. Every surface keeps one page, one question and one
+  // notes page across it, and the figure step runs inside the continuation
+  // branch, never instead of it.
+  {
+    const fixture = await doubtFigurePageFixture();
+    const [, doubtFigureTurn] = fixture.turns;
+    assert(doubtFigureTurn!.visualStatus === "validated" && storedTurnContinuesBoard(doubtFigureTurn!),
+      "a doubt figure is a validated scene that continues the lesson's page");
+    assert(pageTurnsEndingAt(fixture.turns).length === 4 && latestLecturePage(fixture.turns).length === 4,
+      "the lesson, the doubt figure, the doubt after it and the resume are one page");
+    assert(storedTurnPageQuestion(doubtFigureTurn!) === fixture.lesson.question,
+      "the doubt figure's page belongs to the lesson's question");
+    const timeline = buildReplayTimeline(fixture.turns);
+    assert(!timeline.cues.some((cue) => cue.turnIndex > 0 && cue.commands.some((command) => command.type === "CLEAR")),
+      "nothing after the opener clears the page in replay");
+    const record = resumePageRecord({ boardId: "b1", lessonQuestion: fixture.lesson.question, figureDrawn: true,
+      turnPlan: null, solverProjection: null, scene: null });
+    record.turn = { ...record.turn, kind: "doubt", question: DOUBT_TITLE,
+      scene: doubtFigureTurnScene(doubtFigureTurn as unknown as PersistedTurnScene, fixture.lesson.question, null) };
+    const live = liveTurnScene({ page: record, kind: "doubt", preview: DOUBT_TITLE, opensPage: false, status: "complete", textOnly: false });
+    assert(live.visualStatus === "validated" && boardContinuationOf(live.sceneArtifacts)?.lessonQuestion === fixture.lesson.question,
+      "the live doubt figure save keeps the continuation marker beside its scene");
+
+    const sync = between("features/tutor-session/hooks/useReplay.ts", "const syncReplayTurn = useCallback(", "const runReplaySegmentDraw = useCallback(");
+    const guard = sync.indexOf("storedTurnContinuesBoard(turn)");
+    const step = sync.indexOf("syncStoredPageFigure(");
+    assert(guard >= 0 && step > guard && step < sync.indexOf("controller.commit(plan)"),
+      "replay runs the figure step inside the continuation branch, before any rebuild");
+    const restore = between("features/tutor-session/hooks/useBoardSession.ts", "const restoreBoardFromApi = useCallback(", "const restoreBoardFromApiRef = useRef(restoreBoardFromApi);");
+    const keep = restore.indexOf("if (!continuesPage) {");
+    assert(keep >= 0 && restore.indexOf("syncStoredPageFigure(", keep) > keep,
+      "restore runs the figure step for a continuing turn, after the page's own figure");
+  }
+
+  console.log("verify-board-continuation: ok");
+}
+
+void main().catch((error: unknown) => {
+  console.error(error instanceof Error ? error.message : error);
+  process.exit(1);
+});

@@ -1,0 +1,29 @@
+{
+  "name": "@heytutor/drawing",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --clean",
+    "dev": "tsup src/index.ts --format esm --dts --watch",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/",
+    "verify": "tsx scripts/verify-drawing-protocol.ts && tsx scripts/verify-focus-keep.ts && tsx scripts/verify-coordinate-less-write.ts && tsx scripts/verify-write-audio-clock.ts && tsx scripts/verify-handwriting-glyphs.ts && tsx scripts/verify-handwriting-hand.ts && tsx scripts/verify-handwriting-accents.ts && tsx scripts/verify-board-typography.ts && tsx scripts/verify-shape-paths.ts && tsx scripts/verify-chemistry-notation.ts && tsx scripts/verify-step-speech.ts && tsx scripts/verify-handwriting-notation.ts && tsx scripts/verify-board-text-unit-qualifiers.ts && tsx scripts/verify-board-ascii-math.ts",
+    "clean": "rm -rf dist",
+    "preview:typography": "tsx scripts/preview-board-typography.ts"
+  },
+  "devDependencies": {
+    "@heytutor/eslint-config": "workspace:*",
+    "@heytutor/typescript-config": "workspace:*",
+    "eslint": "^9.39.4",
+    "tsup": "^8.5.0",
+    "tsx": "^4.22.4",
+    "typescript": "^5.8.3"
+  }
+}

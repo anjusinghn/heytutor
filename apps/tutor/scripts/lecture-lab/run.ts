@@ -1,0 +1,1350 @@
+import { parseDiagramYieldPolicy } from "@heytutor/scene-engine";
+/**
+ * Lecture lab batch runner.
+ *
+ * Usage (dev server must be up, AUTH_DISABLED=1, LECTURE_LAB_TOKEN set on
+ * both the server and this process):
+ *   pnpm --filter @heytutor/tutor exec tsx scripts/lecture-lab/run.ts \
+ *     --difficulty hard --per-unit 1 --concurrency 3 --max-usd 5 --out .lecture-lab/run-01
+ */
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { resolve } from "node:path";
+import { parseProbeFile, type ProbeQuestion } from "@/features/admin/lib/probes";
+import { unitIdFromTopicId } from "@/features/admin/lib/probes";
+import { gradeLecture, type LectureGrade } from "./grade";
+import { printSummary, summarize } from "./summarize";
+import { runLecture, type LectureRun } from "./lecturePipeline";
+import { PRODUCTION_SCENE_SELECTION_VERSION } from "../../features/tutor-session/lib/scene/productionSceneSelection";
+import { LAB_VISUAL_NEED_POLICY, budgetedVisualNeedFetch, parseVisualNeedReplay, summarizeVisualNeedCalls,
+  type VisualNeedCallAccounting } from "./labVisualNeed";
+import { applyLectureLabHeaders } from "./labAuth";
+import {
+  LECTURE_LAB_STANDARD_MODEL_HEADER,
+  LECTURE_LAB_ZERO_RETENTION_HEADER,
+} from "../../lib/billing/flags";
+import { parseDiagramSubject, type DiagramSubject, type SubjectFamiliarity } from "@heytutor/tutor-core";
+import {
+  assertEvaluationCostAllowed,
+  assertUniqueArtifactIds,
+  labArtifactSlug,
+  assertRoundPlannerStarted,
+  combineDiagramEvalRows,
+  evaluationRunFastMode,
+  estimateEvaluationCostUsd,
+  evaluationUsesExamples,
+  labUsesStandardModelHeader,
+  estimateLabCallWorstCaseUsd,
+  parseDiagramEvalJsonl,
+  PlannerUsageTracker,
+  sampleDiagramEvalRows,
+  summarizeDiagramFailures,
+  type DiagramEvalArm,
+  type DiagramEvalModel,
+  type DiagramEvalRow,
+} from "./diagramEval";
+import { writeRoundGallery } from "./gallery";
+import { currentJudgeSummary, priorSubsetJudgeSummary, readRoundJudgments } from "./judging";
+import {
+  buildDiagramExampleCatalogue,
+  loadDiagramExemplarLibrary,
+} from "./diagramExamples";
+import { completionTokenCap, providerChatBody, RELAY_HIDDEN_PROMPT_TOKENS, resolveLlmEndpoint, type LlmEndpoint } from "../../lib/llm/llmProvider";
+import { acceptedLabResponseModels, buildLabModelProfile, expectedLabRequestModel, labModelProfilesMatch, type LabModelProfile } from "../../lib/llm/labModelProfile";
+import { parseProviderUsage } from "../../lib/obs/providerUsage";
+import { normalizeTutorQuestion } from "@heytutor/tutor-core";
+import { calculateLlmCostDetails, resolveLlmRates, type LlmRate } from "../../lib/obs/usageCost";
+import { assertLabSpendMode, assertLabUsageCheckpoint, hasPricedUsage, LabRequestNotDispatchedError, type LabSpendMode, type LabUnresolvedCall, type LabUsageObservation } from "./labSpend";
+import type { SceneDeclinePolicy } from "./sceneDeclineExperiment";
+import {
+  budgetedReferencePictureFetch,
+  labReferencePicturePolicy,
+  referencePictureImageFile,
+  type LabReferencePictureImage,
+  type LabReferencePictureRecord,
+  type ReferencePictureCallAccounting,
+} from "./labReferencePicture";
+
+export interface Options {
+  difficulty: string;
+  units: number[] | null;
+  subjects: string[];
+  perUnit: number | null;
+  limit: number | null;
+  concurrency: number;
+  out: string;
+  origin: string;
+  familiarity: SubjectFamiliarity;
+  narrationLanguage: "english" | "hinglish";
+  only: string[] | null;
+  seed: number;
+  /**
+   * A file of ad-hoc questions, one per line, replayed instead of the probe
+   * bank. The bank is written by us; the lessons that go wrong are the ones a
+   * student typed, and until this existed there was no way to put one of those
+   * through the lab.
+   */
+  ask: string | null;
+  evalFiles: string[];
+  sample: number | null;
+  topics: string[] | null;
+  arm: DiagramEvalArm;
+  model: DiagramEvalModel;
+  /** Evaluation-only end-to-end scene planning budget. */
+  scenePlannerLimitMs: 60_000 | 120_000;
+  figureOnly: boolean;
+  yes: boolean;
+  maxUsd: number;
+  spendMode: LabSpendMode;
+  resume: boolean;
+  /** Conservative allowance for an interrupted pre-checkpoint run. */
+  resumeExtraUsd: number;
+  sceneDeclinePolicy: SceneDeclinePolicy;
+  visualNeedReplay: string | null;
+  exampleExclusions: string | null;
+  productionStrictSubjects: readonly DiagramSubject[] | null;
+  /** Replay the live reference picture tier (paid, `POST /api/reference-picture`); off by default. */
+  referencePicture: boolean;
+  /**
+   * Point at the picture's located parts and key rows, as live with
+   * `REFERENCE_PICTURE_PART_FOCUS=on`. Must match the dev server's env: the
+   * server strips `parts` from records when its flag is off.
+   */
+  referencePicturePartFocus: boolean;
+}
+
+export interface LabSpendSummary {
+  maxUsd: number;
+  chargedUsd: number;
+  reservedUsd: number;
+  stoppedForBudget: boolean;
+  rowsDone: number;
+  rowsPlanned: number;
+  spendMode: LabSpendMode;
+  knownUsageUsd: number;
+  unresolvedCalls: LabUnresolvedCall[];
+  unresolvedAllowanceUsd: number;
+  inFlightCalls: number;
+}
+
+/** Reserve concurrent dispatch headroom; the mode decides how unresolved usage settles. */
+export class LabSpendCap {
+  private chargedUsd = 0;
+  private reservedUsd = 0;
+  private stoppedForBudget = false;
+  private knownUsageUsd = 0;
+  private inFlightCalls = 0;
+  private readonly unresolvedCalls: LabUnresolvedCall[] = [];
+  private readonly waiters = new Set<() => void>();
+
+  constructor(readonly maxUsd: number, readonly spendMode: LabSpendMode = "conservative") {
+    if (!Number.isFinite(maxUsd) || maxUsd <= 0) {
+      throw new Error("--max-usd must be a positive number");
+    }
+  }
+
+  recordCost(usd: number): void {
+    if (!Number.isFinite(usd) || usd <= 0) return;
+    this.chargedUsd += usd;
+    if (this.chargedUsd >= this.maxUsd) this.stoppedForBudget = true;
+  }
+
+  reserveCall(worstCaseUsd: number): boolean {
+    if (!Number.isFinite(worstCaseUsd) || worstCaseUsd <= 0) {
+      throw new Error("paid lab calls require a positive cost ceiling");
+    }
+    if (this.stoppedForBudget || this.chargedUsd + this.reservedUsd + worstCaseUsd > this.maxUsd + 1e-9) {
+      this.stoppedForBudget = true;
+      return false;
+    }
+    this.reservedUsd += worstCaseUsd;
+    this.inFlightCalls += 1;
+    return true;
+  }
+
+  /** Wait for existing responses to free headroom rather than rejecting a concurrent row. */
+  async reserveCallAsync(worstCaseUsd: number, signal?: AbortSignal | null): Promise<boolean> {
+    signal?.throwIfAborted();
+    if (this.spendMode === "conservative") return this.reserveCall(worstCaseUsd);
+    if (!Number.isFinite(worstCaseUsd) || worstCaseUsd <= 0) throw new Error("paid lab calls require a positive cost ceiling");
+    for (;;) {
+      signal?.throwIfAborted();
+      if (this.stoppedForBudget) return false;
+      if (this.chargedUsd + this.reservedUsd + worstCaseUsd <= this.maxUsd + 1e-9) {
+        this.reservedUsd += worstCaseUsd;
+        this.inFlightCalls += 1;
+        return true;
+      }
+      if (this.inFlightCalls === 0) { this.stoppedForBudget = true; return false; }
+      await new Promise<void>((resolveWait, reject) => {
+        const wake = () => { this.waiters.delete(wake); signal?.removeEventListener("abort", abort); resolveWait(); };
+        const abort = () => { this.waiters.delete(wake); signal?.removeEventListener("abort", abort); reject(signal?.reason); };
+        this.waiters.add(wake);
+        signal?.addEventListener("abort", abort, { once: true });
+      });
+    }
+  }
+
+  recordUnresolved(call: LabUnresolvedCall): void {
+    if (!Number.isFinite(call.allowanceUsd) || call.allowanceUsd < 0 || !Number.isInteger(call.attempts) || call.attempts < 1) throw new Error("invalid unresolved spend checkpoint");
+    this.unresolvedCalls.push({ ...call });
+  }
+
+  settleCall(reservedUsd: number, chargedUsd: number, observation?: LabUsageObservation, context?: Pick<LabUnresolvedCall, "traceId" | "kind">): void {
+    this.reservedUsd = Math.max(0, this.reservedUsd - reservedUsd);
+    this.inFlightCalls = Math.max(0, this.inFlightCalls - 1);
+    this.knownUsageUsd += observation?.measuredUsd ?? 0;
+    if (observation && observation.unresolvedAttempts > 0) this.recordUnresolved({
+      traceId: context?.traceId ?? null, kind: context?.kind ?? "planner", model: observation.model,
+      attempts: observation.unresolvedAttempts, allowanceUsd: observation.unresolvedAllowanceUsd,
+      reason: observation.reason ?? "usage_missing",
+    });
+    this.recordCost(chargedUsd);
+    for (const wake of [...this.waiters]) wake();
+  }
+
+  restoreKnownUsage(usd: number): void {
+    if (!Number.isFinite(usd) || usd < 0) throw new Error("invalid known usage checkpoint");
+    this.knownUsageUsd = usd;
+  }
+
+  restoreUnresolvedCheckpoint(checkpoint: { unresolvedCalls?: LabUnresolvedCall[]; reservedUsd: number; inFlightCalls?: number }, model: string): void {
+    if (!Array.isArray(checkpoint.unresolvedCalls) || !Number.isInteger(checkpoint.inFlightCalls) || checkpoint.inFlightCalls! < 0 || !Number.isFinite(checkpoint.reservedUsd) || checkpoint.reservedUsd < 0) throw new Error("response_usage checkpoint lacks valid unresolved call evidence");
+    for (const call of checkpoint.unresolvedCalls) this.recordUnresolved(call);
+    if (checkpoint.reservedUsd > 0) this.recordUnresolved({
+      traceId: null, kind: "checkpoint", model, attempts: checkpoint.inFlightCalls!,
+      allowanceUsd: checkpoint.reservedUsd, reason: "interrupted_checkpoint_inflight_usage_unknown_attempt_count",
+    });
+  }
+
+  canStartRow(): boolean {
+    return !this.stoppedForBudget;
+  }
+
+  summary(rowsDone: number, rowsPlanned: number): LabSpendSummary {
+    return {
+      maxUsd: this.maxUsd,
+      chargedUsd: Math.round(this.chargedUsd * 1_000_000) / 1_000_000,
+      reservedUsd: Math.round(this.reservedUsd * 1_000_000) / 1_000_000,
+      stoppedForBudget: this.stoppedForBudget,
+      rowsDone,
+      rowsPlanned,
+      spendMode: this.spendMode,
+      knownUsageUsd: Math.round(this.knownUsageUsd * 1_000_000) / 1_000_000,
+      unresolvedCalls: this.unresolvedCalls.map((call) => ({ ...call })),
+      unresolvedAllowanceUsd: Math.round(this.unresolvedCalls.reduce((sum, call) => sum + call.allowanceUsd, 0) * 1_000_000) / 1_000_000,
+      inFlightCalls: this.inFlightCalls,
+    };
+  }
+}
+
+export async function reserveLabRequest(cap: LabSpendCap, worstCaseUsd: number, signal?: AbortSignal | null): Promise<void> {
+  try {
+    if (!await cap.reserveCallAsync(worstCaseUsd, signal)) {
+      throw new LabRequestNotDispatchedError("lab request denied before sending: --max-usd dispatch headroom exhausted");
+    }
+  } catch (error) {
+    if (error instanceof LabRequestNotDispatchedError) throw error;
+    throw new LabRequestNotDispatchedError(error instanceof Error ? error.message : String(error), { cause: error });
+  }
+}
+
+export async function runBudgetedLabRows<T>(
+  rows: readonly T[],
+  concurrency: number,
+  spendCap: LabSpendCap,
+  runRow: (row: T, index: number) => Promise<void>,
+): Promise<number> {
+  let cursor = 0;
+  let done = 0;
+  let failed = false;
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      if (failed || !spendCap.canStartRow()) return;
+      const index = cursor;
+      cursor += 1;
+      if (index >= rows.length) return;
+      try { await runRow(rows[index]!, index); }
+      catch (error) { failed = true; throw error; }
+      done += 1;
+    }
+  };
+  const outcomes = await Promise.allSettled(
+    Array.from({ length: Math.max(1, concurrency) }, () => worker()),
+  );
+  const rejected = outcomes.find((outcome) => outcome.status === "rejected");
+  if (rejected?.status === "rejected") throw rejected.reason;
+  return done;
+}
+
+/**
+ * Which subjects the lab puts on the production strict path. Production runs
+ * maths strict, so maths is always in; `maths,physics` adds physics while a
+ * `maths` run keeps physics on the current production path. Recorded in the
+ * run's execution config.
+ */
+function parseProductionStrictSubjects(flags: ReadonlyMap<string, string>): DiagramSubject[] | null {
+  if (!flags.has("production-strict-subjects")) return null;
+  const listed = (flags.get("production-strict-subjects") ?? "").split(",").map((entry) => entry.trim());
+  const allowed: readonly DiagramSubject[] = ["maths", "physics"];
+  if (!listed.includes("maths") || new Set(listed).size !== listed.length ||
+      listed.some((entry) => !allowed.includes(entry as DiagramSubject))) {
+    throw new Error("--production-strict-subjects takes maths or maths,physics");
+  }
+  return allowed.filter((subject) => listed.includes(subject));
+}
+
+export function parseOptions(argv: string[]): Options {
+  const flags = new Map<string, string>();
+  const evalFiles: string[] = [];
+  const booleans = new Set(["figure-only", "yes", "resume", "reference-picture", "reference-picture-part-focus"]);
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index];
+    if (!token.startsWith("--")) continue;
+    const eq = token.indexOf("=");
+    if (eq > 0) {
+      const name = token.slice(2, eq);
+      const value = token.slice(eq + 1);
+      if (name === "eval") evalFiles.push(value);
+      else flags.set(name, value);
+    } else {
+      const name = token.slice(2);
+      const next = argv[index + 1];
+      if (name === "eval") {
+        if (!next || next.startsWith("--")) throw new Error("--eval needs a JSONL file");
+        evalFiles.push(next);
+        index += 1;
+        continue;
+      }
+      if (booleans.has(name) || !next || next.startsWith("--")) {
+        flags.set(name, "true");
+      } else {
+        flags.set(name, next);
+        index += 1;
+      }
+    }
+  }
+  const list = (name: string): string[] | null => {
+    const raw = flags.get(name);
+    return raw ? raw.split(",").map((entry) => entry.trim()).filter(Boolean) : null;
+  };
+  const number = (name: string, fallback: number | null): number | null => {
+    const raw = flags.get(name);
+    if (raw === undefined || raw === "") return fallback;
+    const value = Number.parseInt(raw, 10);
+    return Number.isFinite(value) ? value : fallback;
+  };
+  const arm = flags.get("arm") ?? "current";
+  if (
+    arm !== "current" &&
+    arm !== "planner_first" &&
+    arm !== "planner_examples" &&
+    arm !== "planner_examples_strict"
+  ) {
+    throw new Error(
+      `--arm must be current, planner_first, planner_examples or planner_examples_strict, received ${arm}`,
+    );
+  }
+  const model = flags.get("model") ?? "configured";
+  if (model !== "configured" && model !== "standard" && model !== "fast") {
+    throw new Error(`--model must be configured, standard or fast, received ${model}`);
+  }
+  const scenePlannerLimitRaw = flags.get("scene-planner-limit-ms");
+  if (scenePlannerLimitRaw !== undefined && evalFiles.length === 0) {
+    throw new Error("--scene-planner-limit-ms is evaluation-only");
+  }
+  const parsedScenePlannerLimit = scenePlannerLimitRaw === undefined
+    ? 60_000
+    : Number(scenePlannerLimitRaw);
+  if (parsedScenePlannerLimit !== 60_000 && parsedScenePlannerLimit !== 120_000) {
+    throw new Error("--scene-planner-limit-ms must be 60000 or 120000");
+  }
+  const maxUsdRaw = flags.get("max-usd");
+  const spendMode = flags.get("spend-mode") ?? "conservative";
+  if (spendMode !== "conservative" && spendMode !== "response_usage") throw new Error("--spend-mode must be conservative or response_usage");
+  const sceneDeclinePolicy = flags.get("scene-decline-policy") ?? "unchanged";
+  if (sceneDeclinePolicy !== "unchanged" && sceneDeclinePolicy !== "qualitative_setup_v1") {
+    throw new Error("--scene-decline-policy must be unchanged or qualitative_setup_v1");
+  }
+  if (flags.has("scene-decline-policy") && evalFiles.length === 0) throw new Error("--scene-decline-policy is evaluation-only");
+  if (flags.has("example-exclusions") && evalFiles.length === 0) throw new Error("--example-exclusions is evaluation-only");
+  if (maxUsdRaw === undefined) {
+    throw new Error("paid lecture-lab runs require --max-usd <positive dollars>");
+  }
+  const maxUsd = Number.parseFloat(maxUsdRaw);
+  if (!Number.isFinite(maxUsd) || maxUsd <= 0) {
+    throw new Error("--max-usd must be a positive number");
+  }
+  const resume = flags.get("resume") === "true";
+  if ((flags.has("visual-need-replay") || flags.has("example-exclusions")) && evalFiles.length === 0) {
+    throw new Error("--visual-need-replay and --example-exclusions are evaluation-only");
+  }
+  const resumeExtraUsd = Number(flags.get("resume-extra-usd") ?? 0);
+  if (!Number.isFinite(resumeExtraUsd) || resumeExtraUsd < 0) throw new Error("--resume-extra-usd must be nonnegative");
+  if (flags.has("resume-extra-usd") && !resume) throw new Error("--resume-extra-usd requires --resume");
+  const productionStrictSubjects = parseProductionStrictSubjects(flags);
+  // An --ask round runs the same live subject policy, so questions a student
+  // typed can be measured on production's strict path too.
+  if (productionStrictSubjects && ((evalFiles.length === 0 && !flags.has("ask")) || arm !== "planner_examples_strict")) {
+    throw new Error("--production-strict-subjects requires a strict maths evaluation: --eval or --ask with --arm planner_examples_strict");
+  }
+  let parsedOrigin: URL;
+  try {
+    parsedOrigin = new URL(flags.get("origin") ?? "http://127.0.0.1:3000");
+  } catch {
+    throw new Error("--origin must be an HTTP(S) origin without credentials, a path, query or fragment");
+  }
+  if (!["http:", "https:"].includes(parsedOrigin.protocol) || parsedOrigin.username || parsedOrigin.password ||
+      parsedOrigin.pathname !== "/" || parsedOrigin.search || parsedOrigin.hash) {
+    throw new Error("--origin must be an HTTP(S) origin without credentials, a path, query or fragment");
+  }
+  if (spendMode === "response_usage" && resumeExtraUsd > 0) throw new Error("--resume-extra-usd is an unmetered allowance; response_usage requires checkpoint evidence instead");
+  return {
+    difficulty: flags.get("difficulty") ?? "hard",
+    units: list("units")?.map((entry) => Number.parseInt(entry, 10)) ?? null,
+    subjects: list("subjects") ?? ["physics"],
+    perUnit: number("per-unit", null),
+    limit: number("limit", null),
+    concurrency: number("concurrency", 3) ?? 3,
+    out: flags.get("out") ?? `.lecture-lab/run-${Date.now()}`,
+    origin: parsedOrigin.origin,
+    familiarity: (flags.get("familiarity") as SubjectFamiliarity) ?? "normal",
+    narrationLanguage: flags.get("narration") === "hinglish" ? "hinglish" : "english",
+    only: list("only"),
+    seed: number("seed", 1) ?? 1,
+    ask: flags.get("ask") ?? null,
+    evalFiles,
+    sample: number("sample", null),
+    topics: list("topics"),
+    arm,
+    model,
+    scenePlannerLimitMs: parsedScenePlannerLimit,
+    figureOnly: flags.has("figure-only") ? flags.get("figure-only") !== "false" : evalFiles.length > 0,
+    yes: flags.get("yes") === "true",
+    maxUsd,
+    spendMode,
+    resume,
+    resumeExtraUsd,
+    sceneDeclinePolicy,
+    visualNeedReplay: flags.get("visual-need-replay") ?? null,
+    exampleExclusions: flags.get("example-exclusions") ?? null,
+    productionStrictSubjects,
+    referencePicture: flags.get("reference-picture") === "true",
+    referencePicturePartFocus: flags.get("reference-picture-part-focus") === "true",
+  };
+}
+
+/** Keep the full original evaluation for retrieval exclusions; skip only execution. */
+export function restoredDiagramPng(diagram: { svg?: string | null; png?: string | null }, available: (path: string) => boolean): string | null {
+  const path = diagram.png ?? diagram.svg?.replace(/\.svg$/i, ".png");
+  return path && available(path) ? path : null;
+}
+
+export function labResponseUsagePricing(deployment: string) {
+  return {
+    pricing: resolveLlmRates(deployment),
+    visualNeedPricing: resolveLlmRates(LAB_VISUAL_NEED_POLICY.model),
+  };
+}
+
+export function selectResumeProbes<T extends { id: string; question: string }>(
+  probes: readonly T[],
+  saved: readonly { probeId: string; question: string; evaluation?: { question: string } | null; arm?: string; providerConfig?: { provider: string; deployment?: string | null }; executionConfig?: Record<string, unknown> }[],
+  arm: string,
+  provider: { provider: string; deployment?: string | null },
+  executionConfig?: Record<string, unknown>,
+): T[] {
+  const byId = new Map(probes.map((probe) => [probe.id, probe]));
+  const done = new Set<string>();
+  for (const row of saved) {
+    if (done.has(row.probeId) || (row.evaluation ? byId.get(row.probeId)?.question !== row.evaluation.question : !byId.has(row.probeId) || normalizeTutorQuestion(byId.get(row.probeId)!.question) !== row.question) || row.arm !== arm ||
+      row.providerConfig?.provider !== provider.provider || row.providerConfig?.deployment !== provider.deployment ||
+      (executionConfig && JSON.stringify(row.executionConfig) !== JSON.stringify(executionConfig))) {
+      throw new Error(`incompatible saved row for resume: ${row.probeId}`);
+    }
+    done.add(row.probeId);
+  }
+  return probes.filter((probe) => !done.has(probe.id));
+}
+
+export function labSampleFingerprint(rows: readonly unknown[]): string {
+  return createHash("sha256").update(JSON.stringify(rows)).digest("hex");
+}
+
+export function assertLabOutputReusable(checkpointExists: boolean, savedRows: number, resume: boolean): void {
+  if (!resume && (checkpointExists || savedRows > 0)) throw new Error("output already has paid evidence; use --resume");
+  if (resume && !checkpointExists) throw new Error("resume requires a spend checkpoint with proven execution identity");
+}
+
+export function restoredLabCharge(
+  storedRowUsd: number,
+  checkpoint: { chargedUsd: number; reservedUsd: number } | null,
+  extraUsd: number,
+  spendMode: LabSpendMode = "conservative",
+): number {
+  const values = [storedRowUsd, extraUsd, ...(checkpoint ? [checkpoint.chargedUsd, checkpoint.reservedUsd] : [])];
+  if (values.some((value) => typeof value !== "number" || !Number.isFinite(value) || value < 0)) {
+    throw new Error("invalid spend checkpoint: charges must be finite nonnegative numbers");
+  }
+  return Math.max(storedRowUsd, checkpoint ? checkpoint.chargedUsd + (spendMode === "conservative" ? checkpoint.reservedUsd : 0) : 0) + extraUsd;
+}
+
+/** Azure's endpoint fixes the deployment; direct Fireworks requests name their own model. */
+export function directProviderRequestModel(init: RequestInit | undefined, endpoint: { provider: string; deployment: string | null }): string {
+  if (endpoint.provider === "azure" && endpoint.deployment) return endpoint.deployment;
+  if (typeof init?.body !== "string") throw new Error("direct provider budgeting requires the exact JSON request body");
+  const body = JSON.parse(init.body) as { model?: unknown };
+  if (typeof body.model !== "string" || !body.model.trim()) throw new Error("direct provider budgeting requires a model identity");
+  return body.model.trim();
+}
+
+export function plannerRequestWorstCaseUsd(
+  init: RequestInit | undefined,
+  model: string,
+  serverOutputCap = 0,
+  inputBound: { inputByteMultiplier: number; addedInputBytes: number } = { inputByteMultiplier: 1, addedInputBytes: 0 },
+  pricing?: { endpoint: Pick<LlmEndpoint, "provider">; rates: LlmRate },
+): number {
+  let messages: unknown = [];
+  let maxTokens = 4_000;
+  if (typeof init?.body === "string") {
+    try {
+      const body = providerChatBody(JSON.parse(init.body) as Record<string, unknown>,
+        pricing?.endpoint ?? resolveLlmEndpoint(), pricing ? {} : process.env);
+      messages = body.messages ?? [];
+      const cap = completionTokenCap(body);
+      if (Number.isFinite(cap)) {
+        maxTokens = cap;
+      }
+    } catch {
+      // The output ceiling still provides a conservative charge for malformed bodies.
+    }
+  }
+  // A relay bills a hidden prompt on most calls; reserve it as production does.
+  const relay = (pricing?.endpoint ?? resolveLlmEndpoint()).provider === "openai_compat";
+  return estimateLabCallWorstCaseUsd({ messages, maxTokens: Math.max(maxTokens, serverOutputCap), model,
+    ...inputBound, addedInputBytes: inputBound.addedInputBytes + (relay ? RELAY_HIDDEN_PROMPT_TOKENS : 0), rates: pricing?.rates });
+}
+
+type LabInputBound = { inputByteMultiplier: number; addedInputBytes: number };
+
+export interface LabBudgetServerConfig {
+  configured: boolean;
+  provider: string;
+  deployment: string | null;
+  modelProfile: LabModelProfile;
+  /** Why the server could not build its profile (relay prices unset, fallback on). */
+  modelProfileError?: string | null;
+  /** Production Fireworks Fast routing; null on Azure or an unsupported Fast identity. */
+  fastModelProfile?: LabModelProfile | null;
+  inputBounds: Record<"picker" | "scene", LabInputBound>;
+  plannerOutputCap: number;
+  teachingOutputCap: number;
+  planningSpeed?: { priority?: boolean };
+}
+
+/** Fail before dispatch if the authenticated server's models, prices or bounds drift. */
+export function assertLabBudgetPreflight(profile: LabModelProfile, serverConfig: LabBudgetServerConfig): void {
+  // A Fast lab compares against the server's advertised Fast routing, standard against standard.
+  const serverProfile = profile.fastMode === true ? serverConfig.fastModelProfile : serverConfig.modelProfile;
+  if (!serverConfig.configured || serverConfig.provider !== profile.provider || serverConfig.deployment !== profile.deployment ||
+    !labModelProfilesMatch(profile, serverProfile) ||
+    !Number.isSafeInteger(serverConfig.plannerOutputCap) || serverConfig.plannerOutputCap <= 0 ||
+    !Number.isSafeInteger(serverConfig.teachingOutputCap) || serverConfig.teachingOutputCap <= 0) {
+    throw new Error(`server provider/models/prices do not match the configured lab${serverConfig.modelProfileError ? `: ${serverConfig.modelProfileError}` : ""}`);
+  }
+  for (const kind of ["picker", "scene"] as const) {
+    const bound = serverConfig.inputBounds?.[kind];
+    if (!bound || !Number.isSafeInteger(bound.inputByteMultiplier) || bound.inputByteMultiplier < 1 ||
+      !Number.isSafeInteger(bound.addedInputBytes) || bound.addedInputBytes < 0) {
+      throw new Error("server lacks a valid prepared-input expansion bound");
+    }
+  }
+}
+
+export interface LabRequestBudgetInput {
+  url: string;
+  origin: string;
+  headers: Headers;
+  init?: RequestInit;
+  endpoint: Pick<LlmEndpoint, "provider" | "deployment" | "url">;
+  profile: LabModelProfile;
+  serverConfig: LabBudgetServerConfig;
+}
+
+export interface LabRequestBudgetDecision {
+  shouldBudget: boolean;
+  chatRequest: boolean;
+  plannerRequest: boolean;
+  directProviderRequest: boolean;
+  model: string;
+  inputBound: LabInputBound | undefined;
+  maxAttempts: number;
+  worstCaseUsd: number;
+}
+
+/** Pure reservation policy used by the real fetch wrapper; no env, network or cap mutation. */
+export function labRequestBudgetDecision(input: LabRequestBudgetInput): LabRequestBudgetDecision {
+  const { url, origin, headers, init, endpoint, profile, serverConfig } = input;
+  assertLabBudgetPreflight(profile, serverConfig);
+  if (endpoint.provider !== profile.provider || endpoint.deployment !== profile.deployment) {
+    throw new Error("budget endpoint does not match the configured lab");
+  }
+  const requestUrl = new URL(url);
+  const chatRequest = requestUrl.origin === origin && requestUrl.pathname === "/api/chat"
+    && Boolean(headers.get("x-heytutor-trace-id"));
+  const plannerRequest = chatRequest && headers.get("x-planner") === "1";
+  const directProviderRequest = url === endpoint.url;
+  const model = directProviderRequest ? directProviderRequestModel(init, endpoint) : expectedLabRequestModel(profile, headers);
+  const lane = directProviderRequest
+    ? (Object.keys(profile.models) as Array<keyof LabModelProfile["models"]>).find(key => profile.models[key] === model)
+    : headers.get("x-diagram-example-picker") === "1" ? "picker"
+      : headers.get("x-problem-ir-version") === "1" ? "problemIR" : plannerRequest ? "planner" : "teaching";
+  if (!lane) throw new Error("direct provider model is not in the captured lab profile");
+  const inputBound = plannerRequest && headers.get("x-diagram-example-picker") === "1"
+    ? serverConfig.inputBounds.picker
+    : plannerRequest && headers.get("x-scene-planner-version") === "2" && requestUrl.searchParams.get("diagramExampleIds")
+      ? serverConfig.inputBounds.scene : undefined;
+  const shouldBudget = chatRequest || directProviderRequest;
+  // The proxy can dispatch two planner attempts or three teaching attempts.
+  const maxAttempts = chatRequest ? plannerRequest ? 2 : 3 : 1;
+  const worstCaseUsd = shouldBudget
+    ? plannerRequestWorstCaseUsd(init, model, chatRequest ? plannerRequest ? serverConfig.plannerOutputCap : serverConfig.teachingOutputCap : 0,
+      inputBound, { endpoint, rates: profile.rates[lane] }) * maxAttempts * (plannerRequest && serverConfig.planningSpeed?.priority ? 2 : 1)
+    : 0;
+  return { shouldBudget, chatRequest, plannerRequest, directProviderRequest, model, inputBound, maxAttempts, worstCaseUsd };
+}
+
+/** Deterministic shuffle so a "sample one per unit" run is reproducible. */
+function pick<T>(items: T[], count: number, seed: number): T[] {
+  if (items.length <= count) return items;
+  const ordered = [...items];
+  let state = seed * 2654435761;
+  for (let index = ordered.length - 1; index > 0; index -= 1) {
+    state = (state * 1103515245 + 12345) & 0x7fffffff;
+    const swap = state % (index + 1);
+    [ordered[index], ordered[swap]] = [ordered[swap], ordered[index]];
+  }
+  return ordered.slice(0, count);
+}
+
+/** Ad-hoc questions from `--ask`: one per line, `#` comments and blanks skipped. */
+function loadAskFile(path: string): ProbeQuestion[] {
+  if (!existsSync(path)) throw new Error(`--ask file not found: ${path}`);
+  return readFileSync(path, "utf8")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith("#"))
+    .map((question, index) => ({
+      id: `ask|${index + 1}|${question.slice(0, 40).replace(/[^a-z0-9]+/gi, "-").toLowerCase()}`,
+      topicId: "ask|0|ad-hoc",
+      difficulty: "medium" as const,
+      question,
+    }));
+}
+
+function loadProbes(repoRoot: string, options: Options): ProbeQuestion[] {
+  const probesDir = resolve(repoRoot, "data/syllabus-probes");
+  const files = readdirSync(probesDir).filter((name) => name.endsWith(".json"));
+  const selected: ProbeQuestion[] = [];
+  for (const file of files.sort()) {
+    const match = /^([a-z]+)-unit-(\d+)\.json$/.exec(file);
+    if (!match) continue;
+    const [, subject, unitNumber] = match;
+    if (!options.subjects.includes(subject)) continue;
+    if (options.units && !options.units.includes(Number.parseInt(unitNumber, 10))) continue;
+    const questions = parseProbeFile(
+      JSON.parse(readFileSync(resolve(probesDir, file), "utf8")),
+    ).filter((probe) => options.difficulty === "all" || probe.difficulty === options.difficulty);
+    selected.push(
+      ...(options.perUnit ? pick(questions, options.perUnit, options.seed) : questions),
+    );
+  }
+  const filtered = options.only
+    ? selected.filter((probe) => options.only?.includes(probe.id))
+    : selected;
+  return options.limit ? filtered.slice(0, options.limit) : filtered;
+}
+
+function loadEvaluationRows(paths: readonly string[], options: Options): DiagramEvalRow[] {
+  const groups = paths.map((path) => {
+    if (!existsSync(path)) throw new Error(`--eval file not found: ${path}`);
+    return parseDiagramEvalJsonl(readFileSync(path, "utf8"));
+  });
+  let rows = combineDiagramEvalRows(groups);
+  if (options.topics) {
+    const topics = new Set(options.topics);
+    rows = rows.filter((row) => topics.has(row.topic_id));
+  }
+  return options.sample === null
+    ? rows
+    : sampleDiagramEvalRows(rows, options.sample, options.seed);
+}
+
+function seconds(ms: number | null | undefined): string {
+  return typeof ms === "number" ? `${Math.round(ms / 100) / 10}s` : "n/a";
+}
+
+/** The picture outcome and the whole turn's stage timings, for `--reference-picture` rounds. */
+export function referencePictureTranscript(run: LectureRun, picture: LabReferencePictureRecord): string[] {
+  const stages = run.timings.stages;
+  const lines = ["## Reference picture"];
+  lines.push(`status ${picture.status} | reason ${picture.reason ?? "none"} | attempted ${picture.attempted} | speculative ${picture.speculative} | subject ${picture.subject ?? "n/a"}`);
+  if (picture.answer) {
+    lines.push(`route answer ${picture.answer.status}${picture.answer.reason ? ` (${picture.answer.reason})` : ""}${picture.answer.cached ? " | cached" : ""}`);
+  }
+  if (picture.pictureId) {
+    lines.push(`picture ${picture.pictureId} | ${picture.title ?? "untitled"} | ${picture.source ?? "?"} | ${picture.license ?? "?"} | ${picture.artist ?? "?"}`);
+    if (picture.shows) lines.push(`shows: ${picture.shows}`);
+    lines.push(`labels: ${picture.labels.join(" | ") || "none"}`);
+    if (picture.legend?.length) lines.push(`legend: ${picture.legend.map((entry) => `${entry.mark} ${entry.label}`).join(" | ")}`);
+  }
+  if (picture.image) lines.push(`image: ${picture.image}`);
+  lines.push(`timings: planner ${seconds(stages?.turnPlanMs)} | ProblemIR ${seconds(stages?.problemIrMs)} | scene planning ${seconds(stages?.scenePlannerMs)} | plan total ${seconds(run.timings.planMs)} | picture request ${seconds(picture.requestMs)} (started at ${seconds(picture.startedAtMs)}) | picture wait ${seconds(picture.waitMs)} | first teaching token ${seconds(run.timings.firstTeachingTokenMs)} | total ${seconds(run.timings.totalMs)}`);
+  if (picture.accounting) {
+    lines.push(`picture spend: reserved $${picture.accounting.reservedUsd.toFixed(2)}, charged $${picture.accounting.chargedUsd.toFixed(2)} (the route reports no usage, so the ceiling is charged)`);
+  }
+  if (picture.steps?.length) {
+    lines.push("", "### Search and judge trail");
+    for (const step of picture.steps) lines.push(`- ${step}`);
+  }
+  return lines;
+}
+
+export function transcript(run: LectureRun, grade: LectureGrade): string {
+  const lines: string[] = [];
+  lines.push(`# ${run.probeId}`);
+  lines.push("");
+  lines.push(`**Question.** ${run.question}`);
+  lines.push("");
+  lines.push(
+    `score ${grade.score} | ${grade.passed ? "passed" : "FAILED"} | steps ${grade.metrics.steps} (budget ${run.lessonBudget.minSteps}-${run.lessonBudget.maxSteps}, ${run.lessonBudget.scope}) | rows ${grade.metrics.writes} | figure ${grade.metrics.diagramTier} (${grade.metrics.diagramPrimitives} primitives) | plan ${Math.round(run.timings.planMs / 100) / 10}s | teach ${Math.round(run.timings.teachMs / 100) / 10}s`,
+  );
+  lines.push("");
+  if (grade.findings.length > 0) {
+    lines.push("## Findings");
+    for (const finding of grade.findings) {
+      lines.push(`- **${finding.severity}** \`${finding.code}\` ${finding.detail}`);
+    }
+    lines.push("");
+  }
+  lines.push("## Turn plan");
+  const quantity = (item: { symbol?: string; id: string; value: unknown; unit?: string }) =>
+    `${item.symbol ?? item.id} = ${String(item.value)}${item.unit ? " " + item.unit : ""}`;
+  lines.push(
+    `visualRequirement ${run.plan?.visualRequirement ?? "?"} | laws ${run.plan?.lawIds.join(", ") || "none"}`,
+  );
+  lines.push(
+    `givens: ${(run.plan?.givens ?? []).map((given) => quantity(given as never)).join("; ") || "none"}`,
+  );
+  lines.push(
+    `unknowns: ${(run.plan?.unknowns ?? []).map((unknown) => (unknown as { symbol?: string; id: string }).symbol ?? (unknown as { id: string }).id).join(", ") || "none"}`,
+  );
+  lines.push(`derived: ${run.plan?.derived.map(quantity).join("; ") || "none"}`);
+  lines.push(
+    `solver: ${run.solver ? `${run.solver.status}${run.solver.issueCodes.length ? " (" + run.solver.issueCodes.join(", ") + ")" : ""}` : "unavailable"}`,
+  );
+  lines.push("");
+  lines.push("## Figure");
+  lines.push(
+    `source ${run.diagram.figureSource ?? "unrecorded"} | tier ${run.diagram.tier ?? "none"} | family ${run.diagram.family ?? "none"} | archetype ${run.diagram.archetypeId ?? "none"} | reason ${run.diagram.reason ?? "none"}`,
+  );
+  lines.push(`entities: ${run.diagram.entityIds.join(", ") || "none"}`);
+  if (run.diagram.renderedLabels.length > 0) {
+    lines.push(`text drawn on the figure: ${run.diagram.renderedLabels.join(" | ")}`);
+  } else if (run.diagram.committed) {
+    lines.push("text drawn on the figure: none");
+  }
+  if (run.diagram.focusableIds.length > 0) {
+    lines.push(`focusable: ${run.diagram.focusableIds.join(", ")}`);
+  }
+  if (run.diagram.candidateErrorCodes.length > 0) {
+    lines.push(`rejected candidates: ${run.diagram.candidateErrorCodes.join(", ")}`);
+  }
+  lines.push("");
+  if (run.referencePicture) lines.push(...referencePictureTranscript(run, run.referencePicture), "");
+  lines.push("## Lesson");
+  if (run.givenRows.length > 0) {
+    lines.push(`_runtime wrote:_ ${run.givenRows.join(" / ")}`);
+    lines.push("");
+  }
+  for (const step of run.teaching.steps) {
+    const tags = step.tags
+      .map((tag) =>
+        tag.text !== undefined
+          ? `[${tag.type}:${tag.text}${tag.params.length ? "," + tag.params.join(",") : ""}]`
+          : `[${tag.type}${tag.params.length ? ":" + tag.params.join(",") : ""}]`,
+      )
+      .join(" ");
+    lines.push(`${step.index}. ${step.speech}`);
+    if (tags) lines.push(`   ${tags}`);
+  }
+  if (run.error) {
+    lines.push("");
+    lines.push(`**Error.** ${run.error}`);
+  }
+  return lines.join("\n");
+}
+
+export function summarizeEvaluation(runs: readonly LectureRun[]) {
+  const sourceCounts: Record<string, number> = {};
+  const tierCounts: Record<string, number> = {};
+  const familyCounts: Record<string, number> = {};
+  let figureCommitMs = 0;
+  let timedFigures = 0;
+  let plannerCalls = 0;
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let totalTokens = 0;
+  let estimatedCostUsd = 0;
+  let pickerInputTokens = 0;
+  let pickerOutputTokens = 0;
+  let pickerCostUsd = 0;
+  let pickerCriticalPathMs = 0;
+  const pickerStatusCounts: Record<string, number> = {};
+  let scenePromptChars = 0;
+  let scenePromptCalls = 0;
+  const modelCounts: Record<string, number> = {};
+  const diagramFailures = summarizeDiagramFailures(runs.map((run) => run.diagram));
+  for (const run of runs) {
+    const source = run.diagram.figureSource ?? "unrecorded";
+    const tier = run.diagram.tier ?? "none";
+    const family = run.diagram.family ?? "none";
+    sourceCounts[source] = (sourceCounts[source] ?? 0) + 1;
+    tierCounts[tier] = (tierCounts[tier] ?? 0) + 1;
+    familyCounts[family] = (familyCounts[family] ?? 0) + 1;
+    if (run.timings.figureCommitMs !== null && run.timings.figureCommitMs !== undefined) {
+      figureCommitMs += run.timings.figureCommitMs;
+      timedFigures += 1;
+    }
+    plannerCalls += run.planner?.calls ?? 0;
+    inputTokens += run.planner?.inputTokens ?? 0;
+    outputTokens += run.planner?.outputTokens ?? 0;
+    totalTokens += run.planner?.totalTokens ?? 0;
+    estimatedCostUsd += run.planner?.estimatedCostUsd ?? 0;
+    if (run.examplePicker) {
+      pickerInputTokens += run.examplePicker.inputTokens;
+      pickerOutputTokens += run.examplePicker.outputTokens;
+      pickerCostUsd += run.examplePicker.estimatedCostUsd;
+      pickerCriticalPathMs += run.examplePicker.criticalPathMs;
+      pickerStatusCounts[run.examplePicker.status] = (pickerStatusCounts[run.examplePicker.status] ?? 0) + 1;
+    }
+    for (const outcome of run.diagram.plannerCallOutcomes ?? []) {
+      scenePromptChars += outcome.promptChars;
+      scenePromptCalls += 1;
+    }
+    for (const call of run.planner?.modelCalls ?? []) {
+      modelCounts[call.model] = (modelCounts[call.model] ?? 0) + 1;
+    }
+  }
+  return {
+    rows: runs.length,
+    figuresCommitted: runs.filter((run) => run.diagram.committed).length,
+    noFigure: runs.filter((run) => !run.diagram.committed).length,
+    errors: runs.filter((run) => run.error !== null).length,
+    sourceCounts,
+    tierCounts,
+    familyCounts,
+    ...diagramFailures,
+    meanFigureCommitMs: timedFigures > 0 ? Math.round(figureCommitMs / timedFigures) : null,
+    planner: {
+      calls: plannerCalls,
+      inputTokens,
+      outputTokens,
+      totalTokens,
+      estimatedCostUsd: Math.round(estimatedCostUsd * 1_000_000) / 1_000_000,
+      meanPromptChars: scenePromptCalls > 0 ? Math.round(scenePromptChars / scenePromptCalls) : null,
+      modelCounts,
+    },
+    examplePicker: {
+      calls: runs.filter((run) => run.examplePicker).length,
+      inputTokens: pickerInputTokens,
+      outputTokens: pickerOutputTokens,
+      estimatedCostUsd: Math.round(pickerCostUsd * 1_000_000) / 1_000_000,
+      criticalPathMs: pickerCriticalPathMs,
+      statusCounts: pickerStatusCounts,
+    },
+  };
+}
+
+async function main(): Promise<void> {
+  if (existsSync(resolve(process.cwd(), ".env.local"))) process.loadEnvFile(resolve(process.cwd(), ".env.local"));
+  const endpoint = resolveLlmEndpoint();
+  const options = parseOptions(process.argv.slice(2));
+  if (options.model === "fast" && endpoint.provider !== "fireworks") {
+    throw new Error("--model fast is the Fireworks production routing; Azure has one deployment");
+  }
+  // Fast is production's Fireworks routing; standard (the default) pins K3.
+  const modelProfile = buildLabModelProfile({ endpoint, env: process.env, fastMode: options.model === "fast" });
+  const providerConfig = { provider: endpoint.provider, deployment: endpoint.deployment,
+    model: modelProfile.models.planner, modelProfile };
+  const repoRoot = resolve(process.cwd(), "../..");
+  if (options.evalFiles.length > 0 && options.ask) throw new Error("--eval and --ask cannot be combined");
+  const evaluationRows = options.evalFiles.length > 0
+    ? loadEvaluationRows(options.evalFiles.map((path) => resolve(path)), options)
+    : null;
+  const evaluationById = new Map(evaluationRows?.map((row) => [row.id, row]) ?? []);
+  const exclusionQuestions = options.exampleExclusions
+    ? parseDiagramEvalJsonl(readFileSync(resolve(options.exampleExclusions), "utf8")).map((row) => row.question)
+    : [];
+  const exampleExclusionFingerprint = labSampleFingerprint(exclusionQuestions);
+  const askProbes = !evaluationRows && options.ask ? loadAskFile(resolve(options.ask)) : null;
+  // Production's strict profile picks examples for any lesson, so an --ask
+  // round on it gets the same leak-filtered library an evaluation does.
+  const exampleQuestions = evaluationRows?.map((row) => row.question)
+    ?? (askProbes && options.productionStrictSubjects ? askProbes.map((probe) => probe.question) : null);
+  const diagramExamples = exampleQuestions && evaluationUsesExamples(options.arm)
+    ? loadDiagramExemplarLibrary(
+        resolve(repoRoot, "data/diagram-eval/v1/exemplars/_library.jsonl"),
+        [...exampleQuestions, ...exclusionQuestions],
+      )
+    : [];
+  const diagramExampleCatalogue = diagramExamples.length > 0
+    ? buildDiagramExampleCatalogue(diagramExamples)
+    : undefined;
+  const probes = evaluationRows
+    ? evaluationRows.map((row): ProbeQuestion => ({
+        id: row.id,
+        topicId: row.topic_id,
+        difficulty: row.difficulty,
+        question: row.question,
+      }))
+    : askProbes ?? loadProbes(repoRoot, options);
+  const preflightEstimateUsd = evaluationRows
+    ? estimateEvaluationCostUsd(probes.length, options.arm, options.model)
+    : null;
+  assertUniqueArtifactIds(probes);
+  const replayText = options.visualNeedReplay ? readFileSync(resolve(options.visualNeedReplay), "utf8") : null;
+  const visualNeedReplay = replayText === null ? null : parseVisualNeedReplay(replayText, probes);
+  // Verify the server (not just this CLI's environment) before sending any model call.
+  const configHeaders = new Headers();
+  applyLectureLabHeaders(configHeaders);
+  const configResponse = await fetch(`${options.origin}/api/lecture-lab/config`, { headers: configHeaders });
+  if (!configResponse.ok) throw new Error("authenticated lab provider preflight failed");
+  const serverConfig = await configResponse.json() as LabBudgetServerConfig & { visualNeed?: Record<string, unknown>;
+    planningSpeed?: { sceneEffort: string; priority: boolean; requestTier: string } };
+  assertLabBudgetPreflight(modelProfile, serverConfig);
+  if (!serverConfig.visualNeed || Object.entries(LAB_VISUAL_NEED_POLICY).some(([key, value]) => serverConfig.visualNeed?.[key] !== value)) {
+    throw new Error("server visual-need policy does not match the live-matching lab");
+  }
+  execFileSync(process.execPath, [resolve(process.cwd(), "scripts/lecture-lab/svg2png.mjs"), "--check-browser"], { stdio: "pipe" });
+  const executionConfig = {
+    modelProfile: modelProfile.fastMode ? serverConfig.fastModelProfile : serverConfig.modelProfile, inputBounds: serverConfig.inputBounds,
+    plannerOutputCap: serverConfig.plannerOutputCap, teachingOutputCap: serverConfig.teachingOutputCap,
+    planningSpeed: { sceneEffort: serverConfig.planningSpeed?.sceneEffort ?? "low",
+      requestTier: serverConfig.planningSpeed?.requestTier ?? "auto",
+      priority: serverConfig.planningSpeed?.priority === true },
+    figureSelectionPolicy: PRODUCTION_SCENE_SELECTION_VERSION,
+    diagramYieldPolicy: parseDiagramYieldPolicy(process.env.DIAGRAM_YIELD_POLICY),
+    figureOnly: options.figureOnly, scenePlannerLimitMs: options.scenePlannerLimitMs,
+    familiarity: options.familiarity, narrationLanguage: options.narrationLanguage,
+    exampleLibraryFingerprint: labSampleFingerprint(diagramExamples),
+    sceneDeclinePolicy: options.sceneDeclinePolicy, exampleExclusionFingerprint,
+    visualNeedPolicy: LAB_VISUAL_NEED_POLICY,
+    visualNeedReplayFingerprint: replayText === null ? null : labSampleFingerprint([replayText]),
+    ...(options.productionStrictSubjects ? { productionStrictSubjects: options.productionStrictSubjects,
+      examplePickerProfile: "live-client-4000ms-subject-shelf/v2", subjectClassification: "existing-turn-plan" } : {}),
+    ...(options.referencePicture ? { referencePicture: labReferencePicturePolicy() } : {}),
+    ...(options.spendMode === "response_usage" ? { spendMode: options.spendMode,
+      ...labResponseUsagePricing(providerConfig.model),
+      plannerOutputCap: serverConfig.plannerOutputCap, teachingOutputCap: serverConfig.teachingOutputCap,
+    } : {}),
+  };
+  if (preflightEstimateUsd !== null) {
+    console.log(
+      `diagram eval: ${probes.length} rows, arm ${options.arm}, provider ${endpoint.provider}, model ${providerConfig.model}, deployment ${endpoint.deployment}, scene planner limit ${options.scenePlannerLimitMs}ms, figure-only ${options.figureOnly}, estimated cost $${preflightEstimateUsd.toFixed(2)}`,
+    );
+    if (evaluationUsesExamples(options.arm)) {
+      console.log(`diagram eval: ${diagramExamples.length} leak-filtered examples available`);
+      console.log(
+        `diagram eval: ${diagramExampleCatalogue?.entries.length ?? 0} picker catalogue entries, ` +
+        `~${diagramExampleCatalogue?.estimatedTokens ?? 0} tokens`,
+      );
+    }
+    assertEvaluationCostAllowed(preflightEstimateUsd, options.yes);
+  }
+
+  const outDir = resolve(process.cwd(), options.out);
+  const checkpointPath = `${outDir}/spend-checkpoint.json`;
+  if (existsSync(checkpointPath) && !options.resume) throw new Error("output has a spend checkpoint; use --resume, never erase prior spend");
+  mkdirSync(`${outDir}/runs`, { recursive: true });
+  mkdirSync(`${outDir}/transcripts`, { recursive: true });
+  const savedFiles = readdirSync(`${outDir}/runs`).filter((name) => name.endsWith(".json"));
+  assertLabOutputReusable(existsSync(checkpointPath), savedFiles.length, options.resume);
+  if (savedFiles.length > 0 && !options.resume) throw new Error("output has saved runs; use --resume to avoid overwriting and duplicate spend");
+  const savedRuns: Array<LectureRun & { providerConfig: typeof providerConfig }> = options.resume
+    ? savedFiles.map((name) => JSON.parse(readFileSync(`${outDir}/runs/${name}`, "utf8")))
+    : [];
+  const pendingProbes = selectResumeProbes(probes, savedRuns, options.arm, providerConfig, executionConfig);
+  const runs: LectureRun[] = [...savedRuns];
+  const grades: LectureGrade[] = runs.map(gradeLecture);
+  const previousSummary = options.resume && existsSync(`${outDir}/summary.json`)
+    ? JSON.parse(readFileSync(`${outDir}/summary.json`, "utf8")) as Record<string, unknown> : {};
+  const reviewedIds = new Set(readRoundJudgments(outDir).map((row) => row.id));
+  const sampleFingerprint = labSampleFingerprint(evaluationRows ?? probes);
+  const oldCheckpoint = options.resume && existsSync(checkpointPath)
+    ? JSON.parse(readFileSync(checkpointPath, "utf8")) as { chargedUsd: number; reservedUsd: number; spendMode?: LabSpendMode; knownUsageUsd?: number; unresolvedCalls?: LabUnresolvedCall[]; inFlightCalls?: number; arm: string; providerConfig: typeof providerConfig; scenePlannerLimitMs: number; probeIds: string[]; sampleFingerprint: string; sceneDeclinePolicy?: SceneDeclinePolicy; exampleExclusionFingerprint?: string; executionConfig?: Record<string, unknown>; visualNeedCalls?: VisualNeedCallAccounting[]; referencePictureCalls?: ReferencePictureCallAccounting[] }
+    : null;
+  if (oldCheckpoint && !oldCheckpoint.sampleFingerprint) throw new Error("legacy spend checkpoint lacks a sample fingerprint; verify the original sample before migrating it");
+  if (options.resume && !oldCheckpoint) throw new Error("resume requires a spend checkpoint with proven execution identity");
+  if (oldCheckpoint) {
+    assertLabSpendMode(oldCheckpoint.spendMode, options.spendMode);
+    assertLabUsageCheckpoint(oldCheckpoint, options.spendMode);
+  }
+  if (oldCheckpoint && (oldCheckpoint.arm !== options.arm || oldCheckpoint.providerConfig.provider !== providerConfig.provider ||
+    oldCheckpoint.providerConfig.deployment !== providerConfig.deployment || oldCheckpoint.scenePlannerLimitMs !== options.scenePlannerLimitMs ||
+    JSON.stringify(oldCheckpoint.executionConfig) !== JSON.stringify(executionConfig) ||
+    JSON.stringify(oldCheckpoint.probeIds) !== JSON.stringify(probes.map((probe) => probe.id)) || oldCheckpoint.sampleFingerprint !== sampleFingerprint)) {
+    throw new Error("resume requires the identical provider, arm, scene limit and full original sample");
+  }
+  if (oldCheckpoint && ((oldCheckpoint.sceneDeclinePolicy ?? "unchanged") !== options.sceneDeclinePolicy ||
+    (oldCheckpoint.exampleExclusionFingerprint ?? labSampleFingerprint([])) !== exampleExclusionFingerprint)) {
+    throw new Error("resume requires the identical decline experiment and example exclusions");
+  }
+  const storedRowUsd = runs.reduce((sum, run) => sum + (run.planner?.estimatedCostUsd ?? 0) + (run.examplePicker?.estimatedCostUsd ?? 0)
+    + (run.visualNeed?.origin === "live_service" ? run.visualNeed.accounting?.chargedUsd ?? 0 : 0)
+    + (run.referencePicture?.accounting?.chargedUsd ?? 0), 0);
+  const priorChargeUsd = restoredLabCharge(storedRowUsd, oldCheckpoint, options.resumeExtraUsd, options.spendMode);
+  console.log(`resume: ${runs.length} saved, ${pendingProbes.length} pending, prior ${options.spendMode} charge $${priorChargeUsd.toFixed(6)}`);
+
+  const landing = await fetch(`${options.origin}/`, { redirect: "manual" });
+  const cookie = (landing.headers.getSetCookie?.() ?? [])
+    .map((entry) => entry.split(";")[0])
+    .join("; ");
+  if (!cookie) throw new Error("dev server issued no anonymous session cookie");
+
+  // Every planner in tutor-core builds its own request; the cookie is the one
+  // thing they cannot know about. Adding it here keeps the call sites identical
+  // to the browser's. Eval rounds also account every non-streaming planner
+  // response by the trace id already carried on the request.
+  const nativeFetch = globalThis.fetch;
+  const spendCap = new LabSpendCap(options.maxUsd, options.spendMode);
+  spendCap.recordCost(priorChargeUsd);
+  if (options.spendMode === "response_usage") {
+    spendCap.restoreKnownUsage(priorChargeUsd);
+    if (oldCheckpoint) spendCap.restoreUnresolvedCheckpoint(oldCheckpoint, providerConfig.model);
+  } else {
+    spendCap.restoreKnownUsage(oldCheckpoint?.knownUsageUsd ?? 0);
+    if (oldCheckpoint?.unresolvedCalls) spendCap.restoreUnresolvedCheckpoint(oldCheckpoint, providerConfig.model);
+  }
+  const visualNeedCalls: VisualNeedCallAccounting[] = [...(oldCheckpoint?.visualNeedCalls ?? [])];
+  const visualNeedAccountingByTrace = new Map<string, VisualNeedCallAccounting>();
+  const referencePictureCalls: ReferencePictureCallAccounting[] = [...(oldCheckpoint?.referencePictureCalls ?? [])];
+  const referencePictureAccountingByTrace = new Map<string, ReferencePictureCallAccounting>();
+  const checkpointSpend = () => writeFileSync(checkpointPath, `${JSON.stringify({
+    ...spendCap.summary(runs.length, probes.length), arm: options.arm, providerConfig,
+    scenePlannerLimitMs: options.scenePlannerLimitMs, probeIds: probes.map((probe) => probe.id),
+    sampleFingerprint, executionConfig,
+    sceneDeclinePolicy: options.sceneDeclinePolicy, exampleExclusionFingerprint,
+    visualNeedCalls,
+    ...(options.referencePicture || referencePictureCalls.length > 0 ? { referencePictureCalls } : {}),
+  }, null, 1)}\n`);
+  checkpointSpend();
+  const budgetDeniedTraces = new Set<string>();
+  const budgetTerminatedRows: string[] = [];
+  const writeSummary = () => {
+    const judgingStatus = {
+      preservedJudgeSummary: Boolean(previousSummary.judge ?? previousSummary.priorSubsetJudgeSummary),
+      reviewedRows: runs.filter((row) => reviewedIds.has(row.probeId)).length,
+      unreviewedRows: runs.filter((row) => !reviewedIds.has(row.probeId)).length,
+    };
+    const summary = {
+      ...previousSummary, options, providerConfig, executionConfig,
+      judge: currentJudgeSummary({ judge: previousSummary.judge, judgingStatus }),
+      priorSubsetJudgeSummary: priorSubsetJudgeSummary(previousSummary, judgingStatus.unreviewedRows),
+      evaluationConfig: evaluationRows ? { ...providerConfig, scenePlannerLimitMs: options.scenePlannerLimitMs,
+        sceneDeclinePolicy: options.sceneDeclinePolicy, exampleExclusionFingerprint } : null,
+      preflightEstimateUsd,
+      visualNeed: { ...summarizeVisualNeedCalls(visualNeedCalls),
+        replayedRows: runs.filter((run) => run.visualNeed?.origin === "frozen_replay").length,
+        interruptedUsdUnattributed: oldCheckpoint?.reservedUsd ?? 0 },
+      resumeAccounting: { savedRows: savedFiles.length, priorChargeUsd, interruptedAllowanceUsd: options.resumeExtraUsd },
+      ...(options.referencePicture ? { referencePictureCalls: {
+        calls: referencePictureCalls.length, reservationUsd: executionConfig.referencePicture?.reservationUsd ?? null,
+        chargedUsd: Math.round(referencePictureCalls.reduce((sum, call) => sum + call.chargedUsd, 0) * 1_000_000) / 1_000_000,
+        provedNoDispatch: referencePictureCalls.filter((call) => call.provedNoDispatch).length,
+      } } : {}),
+      ...spendCap.summary(runs.length, probes.length), budgetTerminatedRows,
+      evaluation: evaluationRows ? summarizeEvaluation(runs) : null,
+      ...summarize(grades, runs),
+      judgingStatus,
+    };
+    writeFileSync(`${outDir}/summary.json`, JSON.stringify(summary, null, 1) + "\n");
+    return summary;
+  };
+  writeSummary();
+  const settleSpend = (reservedUsd: number, usd: number, observation?: LabUsageObservation, context?: Pick<LabUnresolvedCall, "traceId" | "kind">) => {
+    spendCap.settleCall(reservedUsd, usd, observation, context); checkpointSpend();
+  };
+  const usageTracker = new PlannerUsageTracker((usd, reservedUsd, observation, context) => settleSpend(reservedUsd, usd, observation, context), options.spendMode);
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    const headers = new Headers(input instanceof Request ? input.headers : undefined);
+    new Headers(init?.headers).forEach((value, key) => headers.set(key, value));
+    if (url.startsWith(options.origin)) {
+      headers.set("cookie", cookie);
+      applyLectureLabHeaders(headers);
+      if (evaluationRows) headers.set(LECTURE_LAB_ZERO_RETENTION_HEADER, "1");
+      // The standard Fireworks lab profile is standard in every lane, so
+      // authenticated lab probes/asks must not fall through to Fast IR either.
+      // `--model fast` omits the header and runs production's Fast routing.
+      if (labUsesStandardModelHeader(endpoint.provider, Boolean(evaluationRows), options.model)) {
+        headers.set(LECTURE_LAB_STANDARD_MODEL_HEADER, "1");
+      }
+    }
+    const traceId = headers.get("x-heytutor-trace-id");
+    if (url === `${options.origin}/api/visual-need`) {
+      return budgetedVisualNeedFetch(input, { ...init, headers }, nativeFetch, {
+        reserve: (usd) => options.spendMode === "response_usage" ? spendCap.reserveCallAsync(usd, init?.signal) : spendCap.reserveCall(usd), spendMode: options.spendMode,
+        beforeDispatch: checkpointSpend,
+        settle: (reserved, charged, observation) => settleSpend(reserved, charged, observation, { traceId, kind: "visual_need" }),
+        onAccounting: (call) => { visualNeedCalls.push(call); if (traceId) visualNeedAccountingByTrace.set(traceId, call); checkpointSpend(); },
+        onDenied: () => { if (traceId) budgetDeniedTraces.add(traceId); },
+      });
+    }
+    // Paid, but not a chat request: the decision below would let it through
+    // unbudgeted. The route returns no usage, so its fixed ceiling is reserved
+    // and settled whatever the flag says.
+    if (url === `${options.origin}/api/reference-picture`) {
+      return budgetedReferencePictureFetch(input, { ...init, headers }, nativeFetch, {
+        reserve: (usd) => options.spendMode === "response_usage" ? spendCap.reserveCallAsync(usd, init?.signal) : spendCap.reserveCall(usd),
+        spendMode: options.spendMode, traceId,
+        reservationUsd: executionConfig.referencePicture?.reservationUsd ?? labReferencePicturePolicy().reservationUsd,
+        beforeDispatch: checkpointSpend,
+        settle: (reserved, charged, observation) => settleSpend(reserved, charged, observation, { traceId, kind: "reference_picture" }),
+        onAccounting: (call) => { referencePictureCalls.push(call); if (traceId) referencePictureAccountingByTrace.set(traceId, call); checkpointSpend(); },
+        onDenied: () => { if (traceId) budgetDeniedTraces.add(traceId); },
+      });
+    }
+    const budget = labRequestBudgetDecision({ url, origin: options.origin, headers, init, endpoint, profile: modelProfile, serverConfig });
+    const { plannerRequest, directProviderRequest, model: requestModel, maxAttempts, worstCaseUsd: requestWorstCaseUsd } = budget;
+    const chatRequest = budget.chatRequest && traceId;
+    if (chatRequest) usageTracker.assertTraceOpen(traceId);
+    const operation = (async () => {
+      if (budget.shouldBudget) {
+        try {
+          await reserveLabRequest(spendCap, requestWorstCaseUsd, init?.signal);
+        } catch (error) {
+          if (traceId) budgetDeniedTraces.add(traceId);
+          throw error;
+        }
+      }
+      if (budget.shouldBudget) checkpointSpend();
+      if (chatRequest) {
+        usageTracker.recordRequest(traceId, requestWorstCaseUsd, plannerRequest ? "planner" : "teaching", maxAttempts);
+      }
+      let accounted = false;
+      let requestChars: number | undefined;
+      try {
+        if (typeof init?.body === "string") requestChars = JSON.stringify((JSON.parse(init.body) as { messages?: unknown }).messages ?? []).length;
+      } catch {
+        // Diagnostic metadata must not alter dispatch or usage settlement.
+      }
+      const requestProfile = {
+        requestKind: headers.get("x-turn-planner-version") === "3" ? "turn_plan" as const
+          : headers.get("x-problem-ir-version") === "1" ? "problem_ir" as const
+          : headers.get("x-diagram-example-picker") === "1" ? "picker" as const
+          : headers.get("x-scene-planner-version") === "2" ? "scene" as const : "other" as const,
+        phase: headers.get("x-scene-planner-phase") ?? headers.get("x-turn-plan-phase") ?? "plan",
+        lane: headers.get("x-scene-planner-lane") ?? headers.get("x-turn-planner-lane"),
+        serviceTierRequested: serverConfig.planningSpeed?.requestTier ?? "auto",
+        requestChars,
+      };
+      const requestStartedAt = Date.now();
+      try {
+        const response = await nativeFetch(input, { ...init, headers });
+        // A Fast teaching stream may be served by production's teaching fallback.
+        // Usage is priced by the model the stream names (requestModel, the Fast
+        // ceiling, only when it names none).
+        const servedModel = response.headers.get(plannerRequest ? "x-heytutor-planner-model" : "x-heytutor-model");
+        const acceptedModels = acceptedLabResponseModels(modelProfile, headers);
+        if (plannerRequest && traceId) await usageTracker.recordResponse(traceId, response, requestWorstCaseUsd, maxAttempts, requestModel, {
+          ...requestProfile,
+          elapsedMs: Date.now() - requestStartedAt,
+        });
+        else if (chatRequest) usageTracker.recordStreamingResponse(traceId, response, requestWorstCaseUsd, maxAttempts, requestModel);
+        else if (directProviderRequest) {
+          let measuredUsd: number | null = null;
+          try {
+            const payload = await response.clone().json() as { usage?: unknown };
+            const usage = parseProviderUsage(payload.usage);
+            if (hasPricedUsage(usage)) measuredUsd = calculateLlmCostDetails(usage, { model: requestModel }).total ?? 0;
+          } catch {
+            // Missing usage is recorded separately from the known token cost.
+          }
+          accounted = true;
+          settleSpend(requestWorstCaseUsd, measuredUsd ?? (options.spendMode === "conservative" ? requestWorstCaseUsd : 0), {
+            model: requestModel, measuredUsd, unresolvedAttempts: measuredUsd === null ? 1 : 0,
+            unresolvedAllowanceUsd: measuredUsd === null ? requestWorstCaseUsd : 0, reason: measuredUsd === null ? "picker_usage_missing" : null,
+          }, { traceId, kind: "picker" });
+        }
+        accounted = true;
+        if (chatRequest && response.ok && !(servedModel !== null && acceptedModels.includes(servedModel))) {
+          throw new Error("lab received an unexpected or unrecorded server model; paid usage has been retained");
+        }
+        return response;
+      } catch (error) {
+        if (!accounted && chatRequest) usageTracker.recordFailure(traceId, requestModel, requestWorstCaseUsd,
+          plannerRequest ? { ...requestProfile, elapsedMs: Date.now() - requestStartedAt } : {});
+        else if (!accounted && directProviderRequest) settleSpend(requestWorstCaseUsd, options.spendMode === "conservative" ? requestWorstCaseUsd : 0, {
+          model: requestModel, measuredUsd: null, unresolvedAttempts: 1, unresolvedAllowanceUsd: requestWorstCaseUsd, reason: "picker_transport_failed_or_interrupted",
+        }, { traceId, kind: "picker" });
+        throw error;
+      }
+    })();
+    if (chatRequest) usageTracker.trackOperation(traceId, operation);
+    return operation;
+  }) as typeof fetch;
+
+  console.log(
+    `lecture lab: ${probes.length} ${evaluationRows ? "evaluation rows" : `${options.difficulty} probes`}, concurrency ${options.concurrency}, ${options.spendMode} max $${options.maxUsd.toFixed(2)}, familiarity ${options.familiarity} -> ${options.out}`,
+  );
+  if (options.referencePicture) {
+    console.log(`reference picture: on, $${executionConfig.referencePicture?.reservationUsd.toFixed(2)} reserved and charged per request (the route reports no usage), text only wait ${executionConfig.referencePicture?.textOnlyWaitMs}ms`);
+    if (!options.productionStrictSubjects) {
+      console.log("reference picture: no --production-strict-subjects, so the planner classifies no subject and nothing starts early (live with DIAGRAM_STRICT_SUBJECTS empty)");
+    }
+  }
+
+  let done = runs.length;
+  let newRowsDone = 0;
+  try {
+    await runBudgetedLabRows(
+      pendingProbes,
+      options.concurrency,
+      spendCap,
+      async (probe) => {
+        const startedAt = Date.now();
+        const traceId = crypto.randomUUID();
+        let pictureImage: LabReferencePictureImage | null = null;
+        const run = await runLecture(probe.question, {
+          origin: options.origin,
+          cookie,
+          familiarity: options.familiarity,
+          narrationLanguage: options.narrationLanguage,
+          probeId: probe.id,
+          topicId: probe.topicId,
+          unitId: unitIdFromTopicId(probe.topicId),
+          difficulty: probe.difficulty,
+          arm: options.arm,
+          figureOnly: options.figureOnly,
+          fastMode: evaluationRunFastMode(Boolean(evaluationRows), options.model),
+          scenePlannerDeadlineMs: evaluationRows ? options.scenePlannerLimitMs : undefined,
+          subject: parseDiagramSubject(evaluationById.get(probe.id)?.subject),
+          productionStrictSubjects: options.productionStrictSubjects,
+          sceneDeclinePolicy: options.sceneDeclinePolicy,
+          traceId,
+          visualNeedReplay: visualNeedReplay?.get(probe.id),
+          diagramExamples,
+          diagramExampleCatalogue,
+          spendMode: options.spendMode,
+          referencePicture: options.referencePicture,
+          referencePicturePartFocus: options.referencePicturePartFocus,
+          onReferencePictureImage: (image) => { pictureImage = image; },
+        });
+        run.planner = await usageTracker.finishAsync(traceId);
+        if (run.visualNeed?.origin === "live_service") run.visualNeed.accounting = visualNeedAccountingByTrace.get(traceId);
+        if (run.referencePicture) run.referencePicture.accounting = referencePictureAccountingByTrace.get(traceId);
+        if (budgetDeniedTraces.has(traceId)) {
+          budgetTerminatedRows.push(probe.id);
+          mkdirSync(`${outDir}/interrupted`, { recursive: true });
+          writeFileSync(`${outDir}/interrupted/${labArtifactSlug(probe.id)}-${traceId}.json`, JSON.stringify({
+            ...run, providerConfig, executionConfig, evaluation: evaluationById.get(probe.id) ?? null,
+            status: "untested_budget", traceId,
+          }, null, 1) + "\n");
+          console.log(`budget ended during ${probe.id}; untested, not an empty-figure verdict`);
+          writeSummary();
+          return;
+        }
+        const grade = gradeLecture(run);
+        grades.push(grade);
+        runs.push(run);
+        const slug = labArtifactSlug(probe.id);
+        const svgPath = run.diagram.svg ? `frames/${slug}.svg` : null;
+        const pngPath = run.diagram.svg ? `frames/${slug}.png` : null;
+        if (run.diagram.svg) {
+          mkdirSync(`${outDir}/frames`, { recursive: true });
+          writeFileSync(`${outDir}/frames/${slug}.svg`, run.diagram.svg);
+        }
+        run.diagram.png = pngPath;
+        const shownPicture = pictureImage as LabReferencePictureImage | null;
+        if (shownPicture && run.referencePicture) {
+          // What the student saw, for the human reading the round.
+          const file = referencePictureImageFile(slug, shownPicture.contentType);
+          mkdirSync(`${outDir}/pictures`, { recursive: true });
+          writeFileSync(`${outDir}/${file}`, shownPicture.bytes);
+          run.referencePicture.image = file;
+        }
+        writeFileSync(`${outDir}/runs/${slug}.json`, `${JSON.stringify({
+          ...run,
+          providerConfig,
+          executionConfig,
+          evaluation: evaluationById.get(probe.id) ?? null,
+          diagram: { ...run.diagram, svg: svgPath, png: pngPath },
+        }, null, 1)}\n`);
+        writeFileSync(`${outDir}/transcripts/${slug}.md`, `${transcript(run, grade)}\n`);
+        done += 1;
+        newRowsDone += 1;
+        checkpointSpend();
+        writeSummary();
+        if (evaluationRows && newRowsDone === 5) {
+          assertRoundPlannerStarted(runs.slice(-5).map((completedRun) => completedRun.planner), 5);
+        }
+        const state = evaluationRows
+          ? run.error ? "dead" : run.diagram.committed ? "fig " : "none"
+          : grade.transportFailure ? "dead" : grade.passed ? "ok  " : "FAIL";
+        const pictureState = run.referencePicture
+          ? ` picture ${run.referencePicture.status}${run.referencePicture.reason ? `:${run.referencePicture.reason}` : ""}`
+          : "";
+        console.log(`[${done}/${probes.length}] ${state} ${Math.round((Date.now() - startedAt) / 1000)}s${pictureState} ${probe.id}`);
+        // A server with the tier off answers 404 before any spend; every later row would measure nothing.
+        if (run.referencePicture?.accounting?.httpStatus === 404) {
+          throw new Error("the dev server answered 404 for /api/reference-picture: start it with DIAGRAM_REFERENCE_PICTURE=on");
+        }
+      },
+    );
+  } catch (error) {
+    // Keep the settled paid evidence before surfacing a failed round.
+    writeSummary();
+    throw error;
+  } finally {
+    globalThis.fetch = nativeFetch;
+    checkpointSpend();
+  }
+
+  // Paid records and summary exist before optional rendering can fail.
+  const summary = writeSummary();
+  const artifactErrors: string[] = [];
+  try {
+    if (existsSync(`${outDir}/frames`)) execFileSync(process.execPath, [resolve(process.cwd(), "scripts/lecture-lab/svg2png.mjs"), `${outDir}/frames`], { stdio: "inherit" });
+  } catch (error) { artifactErrors.push(`rasterization failed: ${error instanceof Error ? error.message : String(error)}`); }
+  for (const file of readdirSync(`${outDir}/runs`).filter((name) => name.endsWith(".json"))) {
+    const path = `${outDir}/runs/${file}`;
+    const row = JSON.parse(readFileSync(path, "utf8"));
+    const png = restoredDiagramPng(row.diagram, (candidate) => existsSync(resolve(outDir, candidate)));
+    if (png !== row.diagram.png) {
+      row.diagram.png = png;
+      writeFileSync(path, JSON.stringify(row, null, 1) + "\n");
+    }
+  }
+  let galleryPath: string | null = null;
+  try { galleryPath = evaluationRows ? writeRoundGallery(outDir) : null; }
+  catch (error) { artifactErrors.push(`gallery failed: ${error instanceof Error ? error.message : String(error)}`); }
+  writeFileSync(`${outDir}/summary.json`, JSON.stringify({ ...summary, artifactErrors }, null, 1) + "\n");
+  console.log("");
+  if (evaluationRows) console.log(JSON.stringify(summary.evaluation, null, 2));
+  else printSummary(summary);
+  if (summary.stoppedForBudget) {
+    console.log(
+      `lecture lab stopped for budget after ${summary.rowsDone}/${summary.rowsPlanned} rows at $${summary.chargedUsd.toFixed(6)} / $${summary.maxUsd.toFixed(2)}`,
+    );
+  }
+  if (summary.unresolvedCalls.length > 0) console.log(`spend has ${summary.unresolvedCalls.reduce((sum, call) => sum + call.attempts, 0)} unmetered attempts; $${summary.knownUsageUsd.toFixed(6)} known usage, $${summary.unresolvedAllowanceUsd.toFixed(6)} unresolved allowance (not measured spend). Reconcile provider metrics before claiming a real total.`);
+  if (galleryPath) console.log(`gallery: ${galleryPath}`);
+}
+
+// Anchored to the file name: doubt-run.ts and dsa-run.ts also end in "run.ts".
+if (/(^|[\\/])run\.ts$/.test(process.argv[1] ?? "")) {
+  void main().catch((error) => { console.error(error); process.exitCode = 1; });
+}

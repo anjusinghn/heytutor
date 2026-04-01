@@ -1,0 +1,163 @@
+import type { ReactNode } from "react";
+import type { BillingFailure } from "@/lib/billing/billingClient";
+import { InputBar, type InputBarProps } from "@/features/tutor-session/components/InputBar";
+import { MarkedDoubtBar } from "@/features/tutor-session/components/MarkedDoubtBar";
+import { PausedLectureBar } from "@/features/tutor-session/components/PausedLectureBar";
+import type { SubjectFamiliarity } from "@heytutor/tutor-core";
+import type { BoardMark } from "../lib/board/boardMarking";
+import type { TutorPhase } from "../types";
+import { PAUSED_LECTURE_PLACEHOLDER } from "../lib/turn/lessonFollowUp";
+
+interface SessionInputChromeProps {
+  isInputOverlay: boolean;
+  phase: TutorPhase;
+  isPaused: boolean;
+  inputSubmitMode: "ask" | "doubt" | "follow-up";
+  /** Reads the page's lesson question, for the figure size note on a doubt. */
+  pageQuestion?: () => string;
+  onSubmit: InputBarProps["onSubmit"];
+  onAskDoubt: (question: string) => void;
+  onPauseToggle: (source?: "control" | "doubt-composer") => void;
+  onCancel: () => void;
+  onUserInteractionChange: (interacted: boolean) => void;
+  onOpenSettings?: () => void;
+  /** The student's marker, when this board has something worth marking. */
+  canMark?: boolean;
+  markingArmed?: boolean;
+  marks?: BoardMark[];
+  atMarkLimit?: boolean;
+  onToggleMarking?: () => void;
+  onRemoveMark?: (id: string, targetIndex?: number) => void;
+  onClearMarks?: () => void;
+  onDisarmMarking?: () => void;
+  /** How well the student knows this topic; chosen per question in the bar. */
+  familiarity?: SubjectFamiliarity;
+  onFamiliarityChange?: (familiarity: SubjectFamiliarity) => void;
+  /** Icon-only controls so the composer fits a phone. */
+  compact?: boolean;
+  /** A stopped lesson on this board can continue. */
+  pausedLessonOffer?: boolean;
+  /** Why it stopped, for the bar's words. */
+  pausedLessonReason?: "stop" | "doubt" | null;
+  onContinueLecture?: () => void;
+  /** Unplanned opening-only lesson: explicit fresh attempt, never Continue. */
+  earlyLessonRestartOffer?: boolean;
+  earlyLessonRestartReason?: "stop" | "doubt" | null;
+  onRestartEarlyLesson?: () => void;
+  /** The end-of-lecture rating card, shown above the paused lesson bar. */
+  lectureRating?: ReactNode;
+  /**
+   * Text to place in the composer without sending it (Teach it again on an old
+   * unsaved board, decision 13). A new `nonce` places it again.
+   */
+  prefill?: { text: string; nonce: number } | null;
+  billingNotice?: BillingFailure | null;
+  onUpgrade?: () => void;
+  onBillingFailure?: (failure: BillingFailure) => void;
+}
+
+export function SessionInputChrome({
+  isInputOverlay,
+  phase,
+  isPaused,
+  inputSubmitMode,
+  pageQuestion,
+  onSubmit,
+  onAskDoubt,
+  onPauseToggle,
+  onCancel,
+  onUserInteractionChange,
+  onOpenSettings,
+  canMark = false,
+  markingArmed = false,
+  marks = [],
+  atMarkLimit = false,
+  onToggleMarking,
+  onRemoveMark,
+  onClearMarks,
+  onDisarmMarking,
+  familiarity,
+  onFamiliarityChange,
+  compact = false,
+  pausedLessonOffer = false,
+  pausedLessonReason = null,
+  onContinueLecture,
+  earlyLessonRestartOffer = false,
+  earlyLessonRestartReason = null,
+  onRestartEarlyLesson,
+  lectureRating = null,
+  prefill = null,
+  billingNotice = null,
+  onUpgrade,
+  onBillingFailure,
+}: SessionInputChromeProps) {
+  return (
+    <div
+      className="flex w-full flex-col items-stretch gap-2"
+      style={{
+        maxWidth: isInputOverlay
+          ? "min(720px, 100%)"
+          : "min(48rem, calc(100vw - 1.5rem))",
+        margin: "0 auto",
+      }}
+    >
+      {earlyLessonRestartOffer ? <PausedLectureBar
+        visible={phase === "idle"}
+        mode="restart"
+        reason={earlyLessonRestartReason ?? "stop"}
+        onRestart={() => onRestartEarlyLesson?.()}
+      /> : <PausedLectureBar
+        visible={pausedLessonOffer && phase === "idle"}
+        reason={pausedLessonReason ?? "doubt"}
+        onContinue={() => onContinueLecture?.()}
+      />}
+      {/* Shown above the paused bar, but after it in the tree: the restart gate
+          reads that bar as the first child. */}
+      {phase === "idle" && lectureRating ? <div className="order-first">{lectureRating}</div> : null}
+      {/* What the board understood, directly above where the doubt is typed —
+          so the student reads the resolved line before pressing Ask. */}
+      <MarkedDoubtBar
+        armed={markingArmed}
+        marks={marks}
+        atMarkLimit={atMarkLimit}
+        onRemove={(id, targetIndex) => onRemoveMark?.(id, targetIndex)}
+        onClear={() => onClearMarks?.()}
+        onDone={() => onDisarmMarking?.()}
+      />
+      <div className="flex w-full min-w-0 items-center gap-3">
+        <div className="min-w-0 flex-1">
+          <InputBar
+            onSubmit={onSubmit}
+            onAskDoubt={onAskDoubt}
+            disabled={phase !== "idle"}
+            placeholder={
+              pausedLessonOffer
+                ? PAUSED_LECTURE_PLACEHOLDER
+                : inputSubmitMode === "follow-up"
+                  ? "Ask a doubt or the next question"
+                  : "Ask a question or paste a photo"
+            }
+            submitMode={inputSubmitMode}
+            pageQuestion={pageQuestion}
+            isPaused={isPaused}
+            onPauseToggle={onPauseToggle}
+            onCancel={onCancel}
+            onUserInteractionChange={onUserInteractionChange}
+            onOpenSettings={onOpenSettings}
+            canMark={canMark}
+            markingArmed={markingArmed}
+            markCount={marks.length}
+            onToggleMarking={onToggleMarking}
+            familiarity={familiarity}
+            onFamiliarityChange={onFamiliarityChange}
+            compact={compact}
+            billingNotice={billingNotice}
+            onUpgrade={onUpgrade}
+            onBillingFailure={onBillingFailure}
+            prefill={prefill}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}

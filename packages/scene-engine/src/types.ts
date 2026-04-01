@@ -1,0 +1,230 @@
+import type { ChemistryRepresentation, ChemistryStructureSymbolProvenance } from "./chemistry/representation/types";
+
+export interface SceneSource extends Record<string, unknown> { chemistryRepresentation?: ChemistryRepresentation }
+export interface SceneProvenance extends Record<string, unknown> { chemistryRepresentation?: ChemistryStructureSymbolProvenance }
+
+export const SCENE_DOCUMENT_VERSION = "scene-document/v2" as const;
+export const SCENE_ENGINE_VERSION = "scene-engine/2.0.0" as const;
+
+export type VisualMode = "scene" | "text_only";
+export type Severity = "fatal" | "warning";
+
+export interface SceneIssue {
+  /** A proof gap may be removed locally; a contradiction must remain fatal. */
+  failureKind?: "truth" | "proof";
+  /** A numerically matching label lacks only its source unit declaration. */
+  proofKind?: "unit_declaration";
+  code: string;
+  message: string;
+  severity: Severity;
+  path?: string;
+  /** Stable diagnostic identity after reader pruning/normalization shifts indexes. */
+  assertionId?: string;
+  constructionId?: string;
+  entityIds?: string[];
+  expected?: unknown;
+  actual?: unknown;
+  residual?: number;
+}
+
+export interface ValidationReport {
+  engineVersion: string;
+  valid: boolean;
+  issues: SceneIssue[];
+  stats: {
+    entityCount: number;
+    constructionCount: number;
+    primitiveCount: number;
+    assertionCount: number;
+  };
+}
+
+export interface SceneEntity {
+  id: string;
+  kind: string;
+  role: string;
+  label?: string;
+  semantic?: Record<string, unknown>;
+  provenance?: SceneProvenance;
+}
+
+export interface SceneConstruction {
+  id: string;
+  operator: string;
+  inputs: Record<string, unknown>;
+  outputs: string[];
+  reason?: string;
+}
+
+export interface SceneRelation {
+  id: string;
+  predicate: string;
+  entities: string[];
+  value?: unknown;
+}
+
+export interface SceneAssertion {
+  id: string;
+  predicate: string;
+  entities: string[];
+  expected?: unknown;
+  tolerance?: unknown;
+  severity: Severity;
+  reason?: string;
+}
+
+export const SCENE_ANNOTATION_KINDS = [
+  "label",
+  "callout",
+  "narration",
+  "enclose",
+  "highlight",
+  "trace",
+  "badge",
+  "spin",
+  "equal_tick",
+  "equal_arc",
+  "parallel_mark",
+  "hatch",
+  "brace",
+  "endpoint",
+  "loop",
+  "sense",
+  "drop",
+  "ghost",
+  "extend",
+  "frame",
+  "polarity",
+  "slope_triangle",
+] as const;
+
+export type SceneAnnotationKind = (typeof SCENE_ANNOTATION_KINDS)[number];
+
+export type SceneAnnotationPointStyle = "filled" | "open" | "cross" | "square";
+
+export interface SceneAnnotationStyle {
+  count?: 1 | 2 | 3;
+  pointStyle?: SceneAnnotationPointStyle;
+  transient?: boolean;
+}
+
+export interface SceneAnnotation {
+  id: string;
+  kind: string;
+  targetIds: string[];
+  text?: string;
+  quantityId?: string;
+  /** Opt-in text-only supplemental label; omission retains replacement semantics. */
+  labelMode?: "append" | "replace";
+  placementIntent?: string;
+  style?: SceneAnnotationStyle;
+}
+
+export interface SceneRevealGroup {
+  id: string;
+  entityIds: string[];
+  dependsOn: string[];
+  narrationCue: string;
+}
+
+export interface SceneTeachingAction {
+  id: string;
+  action: "reveal" | "focus" | "annotate";
+  targetId: string;
+  dependsOn: string[];
+  narrationIntent: string;
+}
+
+export interface SceneDocument {
+  schemaVersion: typeof SCENE_DOCUMENT_VERSION;
+  visualDecision: { mode: VisualMode; reason: string };
+  source: SceneSource;
+  quantities: Array<Record<string, unknown> & { id: string }>;
+  entities: SceneEntity[];
+  constructions: SceneConstruction[];
+  relations: SceneRelation[];
+  assertions: SceneAssertion[];
+  annotations: SceneAnnotation[];
+  requiredEntityIds: string[];
+  revealGroups: SceneRevealGroup[];
+  teachingTimeline: SceneTeachingAction[];
+}
+
+export interface RenderPoint { x: number; y: number }
+
+export type RenderPrimitiveKind =
+  | "point"
+  | "line"
+  | "ray"
+  | "circle"
+  | "arc"
+  | "rectangle"
+  | "polygon"
+  | "polyline"
+  | "vector"
+  | "axes"
+  | "label"
+  | "dimension";
+
+export interface RenderPrimitive {
+  id: string;
+  entityId: string;
+  groupId: string;
+  kind: RenderPrimitiveKind;
+  points: RenderPoint[];
+  radius?: number;
+  startAngle?: number;
+  endAngle?: number;
+  text?: string;
+  labelPlacement?: string;
+  provenance?: SceneProvenance;
+}
+
+export interface RenderScene {
+  engineVersion: string;
+  primitives: RenderPrimitive[];
+  revealGroups: SceneRevealGroup[];
+  timeline: SceneTeachingAction[];
+  entityBounds: Record<string, { x: number; y: number; width: number; height: number }>;
+  caption?: string;
+}
+
+export interface CompileResult {
+  ok: boolean;
+  renderScene: RenderScene | null;
+  report: ValidationReport;
+}
+
+export interface ValidationResult {
+  document: SceneDocument | null;
+  report: ValidationReport;
+}
+
+export interface CompileOptions {
+  /** Explicit rollout override. Otherwise retain an admitted document's policy. */
+  yieldPolicy?: "off" | "verified_parts";
+  /**
+   * Refuse ink that contradicts a model authored document (compile/figureConsistency.ts).
+   * Planner candidate admission turns this on; engine built figures keep their own conventions.
+   */
+  figureConsistency?: boolean;
+  viewport?: { x: number; y: number; width: number; height: number; padding?: number };
+  /**
+   * Ink measure for label collision boxes. Defaults to the shared exact
+   * argument cache over the renderer's own `measureTextInkBounds`; a measure
+   * given here is used as is, uncached (gates compare the two).
+   */
+  measureLabelInkBounds?: (
+    text: string,
+    x: number,
+    y: number,
+    fontHeightPx: number,
+  ) => { x: number; y: number; width: number; height: number } | null;
+  /**
+   * Judge point labels against rival marks (other points' dots, straight
+   * lines across from the point). Off gives the layout without the rule,
+   * which the label engine falls back to on its own; gates compare the two.
+   * Defaults to on.
+   */
+  pointLabelRivals?: boolean;
+}

@@ -1,0 +1,27 @@
+{
+  "provenance": {
+    "baseHead": "e61b75ed1a948b97d63c4339b66613748b624d33",
+    "baseSceneEngineSha256": "81b3b4af3a5d2b3cd5b8f227c61567a7eb7a081c05968bdb94ae18551d4c4bcb",
+    "originalScientificFixtureSha256": "4dfe832120d38a66fcfa3c6cc488460e610847b32edd4dfcb964b63b79979223",
+    "completeBaseCurrentParityReceiptSha256": "2159da217257358e86989158c1d8a26678be4caeb93bf722a63a4ec2eb1d3bb3",
+    "scope": "All four complete source documents, compiled renders, presentations and openings matched the updated base. Original source/render/opening golds are unchanged. Only inherited whole-diagram snapshots are updated."
+  },
+  "diagrams": [
+    {
+      "id": "vsepr-SF4",
+      "fullDiagramSha256": "c4a929a26eaa8fb254dbd6aff0e4d8358fa16e206206685a22b475627eb33190"
+    },
+    {
+      "id": "vsepr-NH3",
+      "fullDiagramSha256": "bb8c2ad019aa7f3b3d1e60b4378115f27b86c69197c801c788c8d69bd0bd738d"
+    },
+    {
+      "id": "orbital-nitrogen",
+      "fullDiagramSha256": "2c55440545b52f40b647f2ad148b2d3052ee471aea4edd62224afe2cc9ab3f9c"
+    },
+    {
+      "id": "kinetics-ln",
+      "fullDiagramSha256": "365416a617b97ba4c998938b3b52ae0952919fdaa740838316f652befdf78612"
+    }
+  ]
+}

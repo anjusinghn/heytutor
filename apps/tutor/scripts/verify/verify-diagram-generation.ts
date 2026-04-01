@@ -1,0 +1,354 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import {
+  finalizeScenePlanAfterAuthority,
+  REQUIRED_DIAGRAM_RETRY_ENABLED,
+  PROBLEM_AUTHORITY_DEADLINE_MS,
+  TURN_PLAN_ATTEMPT_DEADLINE_MS,
+  TURN_PLAN_DEADLINE_MS,
+  diagramFailureVisualStatus,
+  resolvePlannedSceneVisualStatus,
+  selectBestAvailableTurnPlan,
+  shouldAttemptExactScene,
+  shouldBlockLessonForDiagram,
+  shouldRevalidateSceneCandidatesAfterAuthority,
+} from "../../features/tutor-session/lib/scene/diagramGeneration";
+import { isTurnMetadataPersistable } from "../../lib/scene/turnPersistencePolicy";
+import {
+  prepareVerifiedLessonSegments,
+  type DrawCommand,
+  type VerifiedDiagram,
+} from "@heytutor/drawing";
+import { cursorOpacity } from "@heytutor/whiteboard";
+
+function assert(condition: unknown, message: string): asserts condition {
+  if (!condition) throw new Error(message);
+}
+
+assert(REQUIRED_DIAGRAM_RETRY_ENABLED, "required-diagram failure status stays recorded unless explicitly disabled");
+assert(
+  !shouldBlockLessonForDiagram("retry_required"),
+  "a failed diagram must skip the canvas without stopping the lesson",
+);
+assert(TURN_PLAN_DEADLINE_MS === 20_000, "turn-plan work must leave 40 seconds for scene synthesis and repair");
+assert(
+  TURN_PLAN_ATTEMPT_DEADLINE_MS >= 10_000 && TURN_PLAN_ATTEMPT_DEADLINE_MS < TURN_PLAN_DEADLINE_MS,
+  "the initial turn plan must tolerate observed latency while reserving a bounded audit window",
+);
+assert(PROBLEM_AUTHORITY_DEADLINE_MS <= 18_000, "solver authority must preserve at least twenty-two seconds for scene synthesis");
+
+// A question with no deterministic family and no named figure must not hold
+// the student in silence awaiting the LLM scene planner. The 1 Oct 2026
+// missionaries puzzle ("3 villagers and 3 carribans problem") sat 30s in
+// planning before the page went away; with no family it must teach text-only
+// instead of awaiting the exact attempt.
+assert(
+  !shouldAttemptExactScene({ visualRequirement: "optional", chemistryLane: false, familyCount: 0, hasArchetype: false }),
+  "no family and no archetype must skip the exact planner and teach in text",
+);
+assert(
+  shouldAttemptExactScene({ visualRequirement: "optional", chemistryLane: false, familyCount: 1, hasArchetype: false }),
+  "an inferred family must still attempt the exact planner",
+);
+assert(
+  shouldAttemptExactScene({ visualRequirement: "optional", chemistryLane: false, familyCount: 0, hasArchetype: true }),
+  "a named archetype must still attempt the exact planner without a family",
+);
+assert(
+  !shouldAttemptExactScene({ visualRequirement: "none", chemistryLane: false, familyCount: 1, hasArchetype: true }),
+  "visualRequirement none never attempts the exact planner",
+);
+assert(
+  !shouldAttemptExactScene({ visualRequirement: "optional", chemistryLane: true, familyCount: 1, hasArchetype: true }),
+  "the chemistry lane never goes to the LLM scene planner",
+);
+{
+  const turnHandler = readFileSync(
+    resolve(process.cwd(), "features/tutor-session/hooks/turn/useQuestionHandler.ts"),
+    "utf8",
+  );
+  assert(
+    turnHandler.includes("shouldAttemptLlmScene"),
+    "the live turn must gate the LLM scene planner on families/archetype, not just visualRequirement",
+  );
+  assert(
+    turnHandler.includes("skippedExactForMissingCapability"),
+    "a skipped exact attempt must record missing_capability instead of planner_unavailable",
+  );
+}
+
+// The turn-plan audit is deliberately NOT on the live path.
+//
+// It was a second LLM opinion on the turn plan, awaited before the scene
+// planner could start. Measured on "Concave mirror, f = 15 cm, object at 20 cm"
+// it cost 8.9s of a 37s planning phase, on every question, while
+// `selectBestAvailableTurnPlan` already fell back to the primary plan whenever
+// it timed out — so the lesson had to be correct without it anyway. Removed on
+// the owner's call, 4 Sep 2026, to cut time-to-first-word.
+//
+// `auditTurnPlanV3` still exists in tutor-core and keeps `verify-turn-planner-v3`,
+// so this is about where it runs, not whether it works. Putting it back on the
+// critical path is a product decision about latency, not a refactor — hence
+// this gate.
+{
+  const turnHandler = readFileSync(
+    resolve(process.cwd(), "features/tutor-session/hooks/turn/useQuestionHandler.ts"),
+    "utf8",
+  );
+  const LIVE_PLANNER_ANCHOR = "const plannedTurn = await awaitCurrentTurn(planTurnV3(";
+  assert(
+    turnHandler.includes(LIVE_PLANNER_ANCHOR),
+    `this gate reads useQuestionHandler.ts by looking for "${LIVE_PLANNER_ANCHOR}", which is gone — repoint it at whatever now plans the turn, do not relax the assertion below`,
+  );
+  assert(
+    !turnHandler.includes("auditTurnPlanV3("),
+    "the turn-plan audit is back on the live path; it costs ~9s before the scene planner can start, so restore it only as a deliberate latency decision",
+  );
+}
+const plannedTurn = { source: "planned" };
+const auditedTurn = { source: "audited" };
+const fallbackTurn = { source: "fallback" };
+assert(
+  selectBestAvailableTurnPlan(auditedTurn, plannedTurn, fallbackTurn) === auditedTurn,
+  "an audited turn plan must take precedence",
+);
+assert(
+  selectBestAvailableTurnPlan(null, plannedTurn, fallbackTurn) === plannedTurn,
+  "an unavailable audit must not discard a validated primary turn plan",
+);
+assert(
+  selectBestAvailableTurnPlan(null, null, fallbackTurn) === fallbackTurn,
+  "the conservative fallback is only for total turn-planner failure",
+);
+const completePrimary = {
+  unknowns: [{ id: "d_i", symbol: "d_i" }, { id: "a", symbol: "a" }],
+  derived: [
+    { id: "d_i_calc", symbol: "d_i", value: 60 },
+    { id: "a_value", symbol: "a", value: 2 },
+  ],
+};
+const incompleteAudit = {
+  unknowns: [{ id: "d_i", symbol: "d_i" }, { id: "a", symbol: "a" }],
+  derived: [{ id: "angular_speed", symbol: "alpha", value: 10 }],
+};
+assert(
+  selectBestAvailableTurnPlan(incompleteAudit, completePrimary, completePrimary) === completePrimary,
+  "an audit must not replace a primary plan while dropping a requested numerical result",
+);
+const disagreeingCompleteAudit = {
+  unknowns: completePrimary.unknowns,
+  derived: [
+    { id: "d_i_calc", symbol: "d_i", value: 50 },
+    { id: "a_value", symbol: "a", value: 4 },
+  ],
+};
+const agreeingPeer = structuredClone(completePrimary);
+assert(
+  selectBestAvailableTurnPlan(
+    disagreeingCompleteAudit,
+    completePrimary,
+    incompleteAudit,
+    [agreeingPeer],
+  ) === completePrimary,
+  "two agreeing complete plans must outvote a disagreeing complete audit",
+);
+assert(
+  !shouldRevalidateSceneCandidatesAfterAuthority({
+    problemAuthorityAvailable: false,
+    planningTurnPlan: completePrimary,
+    authoritativeTurnPlan: structuredClone(completePrimary),
+  }),
+  "scene candidates must not be revalidated again when solver authority is unavailable and the plan is unchanged",
+);
+assert(
+  shouldRevalidateSceneCandidatesAfterAuthority({
+    problemAuthorityAvailable: true,
+    planningTurnPlan: completePrimary,
+    authoritativeTurnPlan: structuredClone(completePrimary),
+  }),
+  "solver authority must always trigger final candidate revalidation",
+);
+assert(
+  shouldRevalidateSceneCandidatesAfterAuthority({
+    problemAuthorityAvailable: false,
+    planningTurnPlan: completePrimary,
+    authoritativeTurnPlan: disagreeingCompleteAudit,
+  }),
+  "scene candidates must be revalidated when the authoritative plan differs even without solver authority",
+);
+
+const unchangedResult = { strategy: "already_validated" };
+async function verifyAuthorityFinalization(): Promise<void> {
+  let skippedRevalidationCalls = 0;
+  const reusedResult = await finalizeScenePlanAfterAuthority(unchangedResult, {
+    problemAuthorityAvailable: false,
+    planningTurnPlan: completePrimary,
+    authoritativeTurnPlan: structuredClone(completePrimary),
+    revalidate: async () => {
+      skippedRevalidationCalls += 1;
+      return { strategy: "unexpected_revalidation" };
+    },
+  });
+  assert(reusedResult === unchangedResult, "safe finalization must preserve the validated result object");
+  assert(skippedRevalidationCalls === 0, "safe finalization must perform zero revalidation calls");
+
+  let authorityRevalidationCalls = 0;
+  const revalidatedResult = await finalizeScenePlanAfterAuthority(unchangedResult, {
+    problemAuthorityAvailable: true,
+    planningTurnPlan: completePrimary,
+    authoritativeTurnPlan: structuredClone(completePrimary),
+    revalidate: async (result) => {
+      authorityRevalidationCalls += 1;
+      return { ...result, strategy: "revalidated" };
+    },
+  });
+  assert(authorityRevalidationCalls === 1, "solver authority must force exactly one final revalidation call");
+  assert(revalidatedResult?.strategy === "revalidated", "forced finalization must return the revalidated result");
+
+  let changedPlanRevalidationCalls = 0;
+  const changedPlanResult = await finalizeScenePlanAfterAuthority(unchangedResult, {
+    problemAuthorityAvailable: false,
+    planningTurnPlan: completePrimary,
+    authoritativeTurnPlan: disagreeingCompleteAudit,
+    revalidate: async (result) => {
+      changedPlanRevalidationCalls += 1;
+      return { ...result, strategy: "changed_plan_revalidated" };
+    },
+  });
+  assert(changedPlanRevalidationCalls === 1, "a changed plan must force exactly one final revalidation call");
+  assert(
+    changedPlanResult?.strategy === "changed_plan_revalidated",
+    "changed-plan finalization must return the revalidated result",
+  );
+}
+
+assert(
+  resolvePlannedSceneVisualStatus({
+    visualRequirement: "required",
+    hasValidatedScene: false,
+    requiredRetryEnabled: true,
+  }) === "retry_required",
+  "a missing required diagram is recorded as retry_required without implying a student-facing stop",
+);
+assert(
+  resolvePlannedSceneVisualStatus({
+    visualRequirement: "optional",
+    hasValidatedScene: false,
+    requiredRetryEnabled: true,
+  }) === "text_only",
+  "optional diagrams may degrade to text-only",
+);
+assert(
+  resolvePlannedSceneVisualStatus({
+    visualRequirement: "none",
+    hasValidatedScene: false,
+    requiredRetryEnabled: true,
+  }) === "text_only",
+  "no-visual turns must continue teaching without a diagram",
+);
+assert(
+  diagramFailureVisualStatus("required", true) === "retry_required",
+  "required failure status must honor the retry gate",
+);
+assert(
+  isTurnMetadataPersistable({
+    question: "Draw the circuit",
+    rawResponse: "",
+    visualStatus: "retry_required",
+    sceneArtifacts: { schemaVersion: "scene-artifacts/v3" },
+  }),
+  "required diagram failures with artifacts must persist without narration",
+);
+assert(
+  !isTurnMetadataPersistable({
+    question: "Draw the circuit",
+    rawResponse: "",
+    visualStatus: "text_only",
+  }),
+  "ordinary empty turns must remain invalid",
+);
+
+const compiledBottomBranch = {
+  type: "DRAW_LINE",
+  params: [570.77, 547.8, 729.23, 547.8],
+  charPosition: 0,
+  narrationBefore: "",
+} satisfies DrawCommand;
+const compiledSummary = {
+  type: "LABEL",
+  text: "Rs = 36Ω",
+  params: [452.926, 55, 24],
+  charPosition: 0,
+  narrationBefore: "",
+} satisfies DrawCommand;
+assert(compiledSummary.params[1] === 55, "verified summary labels must retain the compiler's reserved title band");
+assert(cursorOpacity("idle") === 0, "the marker cursor must be hidden after a turn completes");
+assert(cursorOpacity("drawing") > 0, "the marker cursor must remain visible while drawing");
+
+const verifiedDiagram: VerifiedDiagram = {
+  id: "verified_scene",
+  name: "test scene",
+  commands: [],
+  anchors: [],
+  reveals: [],
+  promptAddon: "",
+};
+const rejectedDraw = prepareVerifiedLessonSegments([
+  {
+    narration: "the reflected rays converge at the image point.",
+    command: { ...compiledBottomBranch, params: [500, 200, 700, 300] },
+  },
+], verifiedDiagram);
+assert(rejectedDraw.blockedCommandCount === 1, "teaching-model structural ink must be rejected");
+assert(rejectedDraw.segments.length === 1, "rejecting marker ink must not discard useful narration");
+assert(rejectedDraw.segments[0]?.command === null, "rejected marker ink must not reach execution");
+
+const markerOnly = prepareVerifiedLessonSegments([
+  {
+    narration: "let me draw the ray.",
+    command: { ...compiledBottomBranch, params: [500, 200, 700, 300] },
+  },
+], verifiedDiagram);
+assert(markerOnly.droppedSegmentCount === 1, "empty marker-action segments should be removed");
+
+const workWriting = prepareVerifiedLessonSegments([
+  {
+    narration: "the equivalent resistance is thirty six ohms.",
+    command: {
+      type: "WRITE",
+      text: "R_eq = 36 Ω",
+      params: [90, 145],
+      charPosition: 0,
+      narrationBefore: "",
+    },
+  },
+], verifiedDiagram);
+assert(workWriting.blockedCommandCount === 0, "verified scenes must allow work-area equations");
+
+const misplacedWriting = prepareVerifiedLessonSegments([
+  {
+    narration: "this equation belongs in the work area.",
+    command: {
+      type: "WRITE",
+      text: "x = 2",
+      params: [1000, 600],
+      charPosition: 0,
+      narrationBefore: "",
+    },
+  },
+], verifiedDiagram);
+assert(misplacedWriting.blockedCommandCount === 0, "equations must be repaired into the work area");
+assert(misplacedWriting.segments[0]?.narration.length, "repaired writing must retain narration");
+assert(
+  misplacedWriting.segments[0]?.command?.params[0] === 90,
+  "model-provided equation coordinates must not control work-area placement",
+);
+
+verifyAuthorityFinalization()
+  .then(() => {
+    console.log("diagram generation V3 verification passed");
+  })
+  .catch((error: unknown) => {
+    console.error(error);
+    process.exitCode = 1;
+  });

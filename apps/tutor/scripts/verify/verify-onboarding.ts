@@ -1,0 +1,136 @@
+/**
+ * Login is one Google button for every account. Onboarding asks college
+ * student or individual, then about you, then lessons, and names where the
+ * learner goes next (checkout, credits, or their saved question).
+ * Age still gates under-13. DSA stays a coming-soon chip.
+ */
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import {
+  CLASS_YEAR_LABELS,
+  COLLEGE_EXAM_GOALS,
+  COLLEGE_YEARS,
+  SCHOOL_EXAM_GOALS,
+  SCHOOL_YEARS,
+  classYearFitsRole,
+  classYearsForRole,
+  examGoalFitsRole,
+  examGoalsForRole,
+  isLearnerRole,
+  profileSubtitle,
+} from "../../lib/account/types";
+import { ONBOARDING_COPY } from "../../lib/account/onboardingCopy";
+import { signupIntent } from "../../lib/auth/signupIntent";
+
+function assert(condition: unknown, message: string): asserts condition {
+  if (!condition) throw new Error(message);
+}
+
+assert(isLearnerRole("college") && isLearnerRole("other"), "the two learner roles must exist");
+assert(!isLearnerRole("student"), "an unknown role must not pass");
+
+assert(
+  classYearsForRole("college").join(",") === COLLEGE_YEARS.join(","),
+  "college onboarding must use college years",
+);
+assert(
+  classYearsForRole("other").join(",") === SCHOOL_YEARS.join(","),
+  "the other path must use school years",
+);
+assert(classYearFitsRole("college", "ug1") && !classYearFitsRole("college", "11"), "college is not class 11");
+assert(classYearFitsRole("other", "12") && !classYearFitsRole("other", "ug2"), "school is not a college year");
+assert(examGoalFitsRole("college", "coding") && !examGoalFitsRole("college", "jee_main"), "college is not JEE");
+assert(examGoalFitsRole("other", "jee_main") && !examGoalFitsRole("other", "course"), "school is not course exams");
+assert(
+  examGoalsForRole("college").join(",") === COLLEGE_EXAM_GOALS.join(","),
+  "college goals are coding, course, learning",
+);
+assert(
+  examGoalsForRole("other").join(",") === SCHOOL_EXAM_GOALS.join(","),
+  "the other path keeps JEE and school exams",
+);
+assert(
+  CLASS_YEAR_LABELS.ug1 === "First year" && CLASS_YEAR_LABELS["11"] === "Class 11",
+  "college years and school years keep their own labels",
+);
+assert(
+  SCHOOL_YEARS.join(",") === "8,9,10,11,12,dropper,ug,other",
+  "the individual path runs from Class 8 through undergraduate",
+);
+assert(
+  COLLEGE_YEARS.join(",") === "ug1,ug2,ug3,ug4,pg,other",
+  "the college path runs from first year through postgraduate",
+);
+assert(
+  CLASS_YEAR_LABELS["8"] === "Class 8" && CLASS_YEAR_LABELS.pg === "Postgraduate",
+  "new years carry plain labels",
+);
+assert(classYearFitsRole("other", "9") && !classYearFitsRole("college", "10"), "school classes stay off the college path");
+assert(
+  classYearFitsRole("other", "ug") && !classYearFitsRole("college", "ug") && CLASS_YEAR_LABELS.ug === "UG (undergraduate)",
+  "undergraduate is an individual year",
+);
+assert(classYearFitsRole("college", "pg") && !classYearFitsRole("other", "pg"), "postgraduate is a college year");
+assert(
+  Object.values(CLASS_YEAR_LABELS).every((label) => !/[—–]/.test(label)),
+  "year labels carry no dash punctuation",
+);
+
+assert(
+  profileSubtitle({ learnerRole: "college", examGoal: "coding", classYear: "ug2" }) ===
+    "College student · Coding interview · Second year",
+  "a college profile names the role, the goal, and the year",
+);
+
+assert(ONBOARDING_COPY.role.title === "College student or individual?", "the first question is college student or individual");
+assert(ONBOARDING_COPY.role.college.label === "College student", "college card is College student");
+assert(ONBOARDING_COPY.role.other.label === "Individual", "the other card is Individual, not not-in-college");
+assert(
+  /Class 8 to 12/.test(ONBOARDING_COPY.role.other.hint) && /JEE/.test(ONBOARDING_COPY.role.other.hint),
+  "the individual card says school students and JEE prep belong there",
+);
+assert(
+  ONBOARDING_COPY.college.title.includes("college") && ONBOARDING_COPY.other.title.includes("classroom"),
+  "the two setup pages must not share a title",
+);
+assert(!/[—–]| - /.test(ONBOARDING_COPY.role.title), "the first question carries no dash punctuation");
+assert(ONBOARDING_COPY.steps.length === 3, "onboarding is three short steps");
+
+assert(signupIntent("/usage?plan=plus&currency=INR") === "plus", "the landing Plus button carries the Plus intent");
+assert(signupIntent("/settings/usage?currency=USD") === "credits", "the landing credits button carries the credits intent");
+assert(signupIntent("/?q=Why%20is%20the%20sky%20blue") === "question", "a landing question carries the lesson intent");
+assert(signupIntent("/") === null && signupIntent("//evil.example") === null, "no intent without a destination");
+assert(
+  signupIntent("/onboarding?next=%2Fusage%3Fplan%3Dplus") === "plus",
+  "login reads the destination wrapped in the signed-out onboarding redirect",
+);
+assert(signupIntent("/onboarding?next=%2F%2Fevil.example") === null, "a wrapped destination is still made safe");
+
+const root = resolve(import.meta.dirname, "../..");
+const screen = readFileSync(resolve(root, "features/account/OnboardingScreen.tsx"), "utf8");
+assert(screen.includes('type Step = "role" | "about" | "lessons"'), "onboarding is role, about you, then lessons");
+assert(screen.includes("SIGNUP_INTENT_COPY"), "onboarding tells the learner where setup leads");
+assert(screen.includes("pickRole(\"college\")") && screen.includes("pickRole(\"other\")"), "both answers on the first page");
+assert(screen.includes("GraduationCap") && screen.includes("User"), "role cards carry college and individual logos");
+assert(screen.includes("classYearsForRole"), "the setup page is chosen from the role");
+assert(screen.includes("role=\"listbox\"") && screen.includes("YearSelect"), "the year menu is themed, not a system select");
+assert(!screen.includes("Why are you here?"), "onboarding does not ask why you are here");
+assert(screen.includes('examGoal: "learning"'), "a hidden default goal still satisfies the account");
+assert(screen.includes("learnerRole"), "the chosen role is sent with the rest of onboarding");
+
+const api = readFileSync(resolve(root, "app/api/account/onboarding/route.ts"), "utf8");
+assert(api.includes("isLearnerRole") && api.includes("classYearFitsRole"), "the server must keep the role and the year together");
+assert(api.includes("learnerRole: body.learnerRole"), "the role is stored on the account");
+
+const page = readFileSync(resolve(root, "app/onboarding/page.tsx"), "utf8");
+assert(page.includes("isStudentEmail") && page.includes("suggestedRole"), "a school email preselects the college card");
+
+const login = readFileSync(resolve(root, "features/account/LoginScreen.tsx"), "utf8");
+assert(login.includes("Continue with Google"), "login has one Google button");
+assert(!login.includes("Continue as a student") && !login.includes("Continue as an Individual"), "login no longer asks for a role");
+assert(login.includes("GoogleMark"), "the Google sign-in button carries the Google logo");
+assert(!login.includes("isStudentEmail"), "login does not refuse personal accounts");
+assert(login.includes("SIGNUP_INTENT_COPY"), "login names where the visitor was going");
+assert(!/[—–]/.test(login), "login copy carries no dash punctuation");
+
+console.log("onboarding verification passed");

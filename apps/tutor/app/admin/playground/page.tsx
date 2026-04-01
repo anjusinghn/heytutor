@@ -1,0 +1,55 @@
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import type { Metadata } from "next";
+import { redirect } from "next/navigation";
+import { AdminPlayground, syllabusTreeFromTaxonomy } from "@/features/admin";
+import {
+  parseProbeFile,
+  type ProbeQuestion,
+} from "@/features/admin/lib/probes";
+import { auth } from "@/auth";
+import { isAuthDisabled } from "@/lib/authDisabled";
+import { isAdminEmail } from "@/lib/auth/admins";
+
+export const metadata: Metadata = {
+  title: "Test playground",
+};
+
+function repoDataPath(...segments: string[]): string {
+  return join(process.cwd(), "../../data", ...segments);
+}
+
+function loadSyllabusTaxonomy(): unknown {
+  return JSON.parse(
+    readFileSync(repoDataPath("question-bank/syllabus-taxonomy.json"), "utf8"),
+  ) as unknown;
+}
+
+function loadProbeQuestions(): ProbeQuestion[] {
+  const probesDir = repoDataPath("syllabus-probes");
+  const files = readdirSync(probesDir)
+    .filter((name) => name.endsWith(".json"))
+    .sort();
+  const questions: ProbeQuestion[] = [];
+  for (const file of files) {
+    const raw = JSON.parse(
+      readFileSync(join(probesDir, file), "utf8"),
+    ) as unknown;
+    questions.push(...parseProbeFile(raw));
+  }
+  return questions;
+}
+
+export default async function AdminPlaygroundPage() {
+  if (!isAuthDisabled()) {
+    const session = await auth();
+    if (!(await isAdminEmail(session?.user?.email))) {
+      redirect("/login?next=/admin/playground");
+    }
+  }
+
+  const tree = syllabusTreeFromTaxonomy(loadSyllabusTaxonomy());
+  const probes = loadProbeQuestions();
+
+  return <AdminPlayground tree={tree} probes={probes} />;
+}

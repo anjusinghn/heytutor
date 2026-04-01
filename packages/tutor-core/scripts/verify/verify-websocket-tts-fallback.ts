@@ -1,0 +1,462 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { TUTOR_VOICE_SETTINGS, TUTOR_VOICE_STYLE_RANGE } from "../../src/tts/voiceSettings";
+import {
+  ElevenLabsWebSocketTTSClient,
+  shouldCompleteTtsJobAfterSilence,
+  TTS_WS_CONNECT_TIMEOUT_MS,
+} from "../../src/tts/elevenLabsWebSocketClient";
+import {
+  createLectureAudioContext,
+  getSharedAudioContext,
+  releaseLectureAudioContext,
+} from "../../src/tts/audioContext";
+
+type MessageListener = (event: { data: string }) => void;
+
+class FakeWebSocket {
+  static readonly CONNECTING = 0;
+  static readonly OPEN = 1;
+  static sendCount = 0;
+
+  readyState = FakeWebSocket.CONNECTING;
+  onerror: (() => void) | null = null;
+  onclose: (() => void) | null = null;
+  private readonly messageListeners = new Set<MessageListener>();
+
+  constructor(_url: string) {
+    setTimeout(() => {
+      this.readyState = FakeWebSocket.OPEN;
+      this.emit({ type: "ready" });
+    }, 0);
+  }
+
+  addEventListener(type: string, listener: MessageListener): void {
+    if (type === "message") this.messageListeners.add(listener);
+  }
+
+  removeEventListener(type: string, listener: MessageListener): void {
+    if (type === "message") this.messageListeners.delete(listener);
+  }
+
+  send(data: string): void {
+    FakeWebSocket.sendCount += 1;
+    const payload = JSON.parse(data) as { flush?: boolean };
+    if (payload.flush) {
+      setTimeout(() => this.emit({ isFinal: true }), 0);
+    }
+  }
+
+  close(): void {
+    this.readyState = FakeWebSocket.CONNECTING;
+  }
+
+  private emit(payload: object): void {
+    const event = { data: JSON.stringify(payload) };
+    for (const listener of this.messageListeners) listener(event);
+  }
+}
+
+class FakeAudioBufferSource {
+  buffer: { duration: number } | null = null;
+  onended: (() => void) | null = null;
+  playbackRate = { value: 1 };
+
+  connect(_destination: unknown): void {}
+
+  start(_at: number): void {
+    setTimeout(() => this.onended?.(), 0);
+  }
+
+  stop(): void {
+    this.onended?.();
+  }
+}
+
+class FakeAudioContext {
+  state: AudioContextState = "running";
+  currentTime = 0;
+  sampleRate = 44_100;
+  readonly destination = {};
+
+  async resume(): Promise<void> {
+    this.state = "running";
+  }
+
+  async suspend(): Promise<void> {
+    this.state = "suspended";
+  }
+
+  async decodeAudioData(_bytes: ArrayBuffer): Promise<AudioBuffer> {
+    const length = 4410;
+    const data = [new Float32Array(length)];
+    return {
+      duration: 0.1,
+      length,
+      sampleRate: 44_100,
+      numberOfChannels: 1,
+      getChannelData: (channel: number) => data[channel] ?? data[0],
+    } as AudioBuffer;
+  }
+
+  createBuffer(channels: number, length: number, sampleRate: number): AudioBuffer {
+    const data = Array.from({ length: channels }, () => new Float32Array(length));
+    return {
+      duration: length / sampleRate,
+      length,
+      sampleRate,
+      numberOfChannels: channels,
+      getChannelData: (channel: number) => data[channel] ?? data[0],
+    } as AudioBuffer;
+  }
+
+  createBufferSource(): AudioBufferSourceNode {
+    return new FakeAudioBufferSource() as unknown as AudioBufferSourceNode;
+  }
+
+  createGain(): GainNode {
+    return {
+      gain: { value: 1 },
+      connect(_destination: unknown) {},
+    } as GainNode;
+  }
+
+  async close(): Promise<void> {
+    this.state = "closed";
+  }
+}
+
+function assert(condition: unknown, message: string): asserts condition {
+  if (!condition) throw new Error(message);
+}
+
+Object.defineProperty(globalThis, "window", {
+  configurable: true,
+  value: globalThis,
+});
+Object.defineProperty(globalThis, "WebSocket", {
+  configurable: true,
+  value: FakeWebSocket,
+});
+Object.defineProperty(globalThis, "AudioContext", {
+  configurable: true,
+  value: FakeAudioContext,
+});
+
+let httpCalls = 0;
+const httpPayload = {
+  audio_base64: "AQIDBA==",
+  normalizedAlignment: {
+    charStartTimesMs: [0, 60],
+    charDurationsMs: [60, 60],
+  },
+};
+Object.defineProperty(globalThis, "fetch", {
+  configurable: true,
+  value: async (input: unknown) => {
+    const url = String(input);
+    if (!url.includes("/api/tts/stream")) {
+      return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+    }
+    httpCalls++;
+    return new Response(`data: ${JSON.stringify(httpPayload)}\n\n`, {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    });
+  },
+});
+
+const client = new ElevenLabsWebSocketTTSClient();
+let starts = 0;
+let ends = 0;
+let errors = 0;
+let capturedBytes = 0;
+
+await client.speakSegment("This segment must survive an empty websocket result.", {
+  onStart: () => starts++,
+  onEnd: () => ends++,
+  onError: () => errors++,
+  onAudioCaptured: ({ bytes }) => {
+    capturedBytes += bytes.length;
+  },
+});
+
+assert(httpCalls === 1, "empty websocket completion did not trigger HTTP fallback");
+assert(starts === 1, "fallback audio must start exactly once");
+assert(ends === 1, "fallback audio must complete exactly once");
+assert(errors === 0, "recoverable websocket failure leaked through onError");
+assert(capturedBytes > 0, "fallback audio was not captured for replay");
+const sendsAfterEmptyAudio = FakeWebSocket.sendCount;
+await client.speakSegment("The next sentence must not wait on the same failed websocket.");
+assert(httpCalls === 2, "the sentence after empty websocket audio must speak on HTTP");
+assert(
+  FakeWebSocket.sendCount === sendsAfterEmptyAudio,
+  "empty websocket audio must disable websocket so later lines do not pause",
+);
+
+client.stop();
+
+class SkipWebSocket {
+  static readonly CONNECTING = 0;
+  static readonly OPEN = 1;
+  readyState = SkipWebSocket.CONNECTING;
+  onerror: (() => void) | null = null;
+  onclose: (() => void) | null = null;
+  private readonly messageListeners = new Set<MessageListener>();
+
+  constructor(_url: string) {
+    setTimeout(() => {
+      this.readyState = SkipWebSocket.OPEN;
+      this.emit({ type: "ready" });
+    }, 0);
+  }
+
+  addEventListener(type: string, listener: MessageListener): void {
+    if (type === "message") this.messageListeners.add(listener);
+  }
+
+  removeEventListener(type: string, listener: MessageListener): void {
+    if (type === "message") this.messageListeners.delete(listener);
+  }
+
+  send(data: string): void {
+    const payload = JSON.parse(data) as { flush?: boolean };
+    if (payload.flush) {
+      setTimeout(() => this.emit({ type: "skip", reason: "tts_budget" }), 0);
+    }
+  }
+
+  close(): void {
+    this.readyState = SkipWebSocket.CONNECTING;
+  }
+
+  private emit(payload: object): void {
+    const event = { data: JSON.stringify(payload) };
+    for (const listener of this.messageListeners) listener(event);
+  }
+}
+
+Object.defineProperty(globalThis, "WebSocket", {
+  configurable: true,
+  value: SkipWebSocket,
+});
+
+let skipHttpCalls = 0;
+Object.defineProperty(globalThis, "fetch", {
+  configurable: true,
+  value: async (input: unknown) => {
+    if (!String(input).includes("/api/tts/stream")) {
+      return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+    }
+    skipHttpCalls++;
+    return new Response(`data: ${JSON.stringify(httpPayload)}\n\n`, {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    });
+  },
+});
+
+const skipClient = new ElevenLabsWebSocketTTSClient();
+let skipStarts = 0;
+await skipClient.speakSegment("Relay skip must not leave the lecture waiting for audio.", {
+  onStart: () => skipStarts++,
+});
+assert(skipHttpCalls === 1, "a relay skip must fall back to HTTP instead of hanging");
+assert(skipStarts === 1, "HTTP fallback after a relay skip must start playback");
+skipClient.stop();
+
+let pendingHttpSignal: AbortSignal | null = null;
+let notifyHttpStarted: (() => void) | null = null;
+const httpStarted = new Promise<void>((resolve) => {
+  notifyHttpStarted = resolve;
+});
+Object.defineProperty(globalThis, "fetch", {
+  configurable: true,
+  value: async (input: unknown, init?: RequestInit) => {
+    if (!String(input).includes("/api/tts/stream")) {
+      return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+    }
+    pendingHttpSignal = init?.signal ?? null;
+    notifyHttpStarted?.();
+    return await new Promise<Response>((_resolve, reject) => {
+      pendingHttpSignal?.addEventListener("abort", () => {
+        reject(new DOMException("aborted", "AbortError"));
+      }, { once: true });
+    });
+  },
+});
+
+const stoppedClient = new ElevenLabsWebSocketTTSClient();
+let stoppedStarts = 0;
+let stoppedEnds = 0;
+let stoppedCapturedBytes = 0;
+const stoppedSpeak = stoppedClient.speakSegment("Stop this fallback before its first chunk.", {
+  onStart: () => stoppedStarts++,
+  onEnd: () => stoppedEnds++,
+  onAudioCaptured: ({ bytes }) => {
+    stoppedCapturedBytes += bytes.length;
+  },
+});
+await httpStarted;
+stoppedClient.stop();
+await stoppedSpeak;
+
+assert(pendingHttpSignal?.aborted === true, "stop did not abort the in-flight HTTP fallback");
+assert(stoppedStarts === 0, "stopped HTTP fallback invoked onStart");
+assert(stoppedEnds === 0, "stopped HTTP fallback invoked onEnd");
+assert(stoppedCapturedBytes === 0, "stopped HTTP fallback captured stale audio");
+
+assert(
+  shouldCompleteTtsJobAfterSilence({
+    contextFinal: false,
+    scheduledEnd: 0,
+    currentTime: 1,
+  }) === false,
+  "a short network silence must not end speech before context-final",
+);
+assert(
+  shouldCompleteTtsJobAfterSilence({
+    contextFinal: true,
+    scheduledEnd: 1.2,
+    currentTime: 0.2,
+  }) === false,
+  "context-final must still wait for scheduled audio to finish",
+);
+assert(
+  shouldCompleteTtsJobAfterSilence({
+    contextFinal: true,
+    scheduledEnd: 1.0,
+    currentTime: 0.95,
+  }) === true,
+  "speech may complete only after context-final and playback drain",
+);
+
+class HangWebSocket {
+  static readonly CONNECTING = 0;
+  static readonly OPEN = 1;
+  readyState = HangWebSocket.CONNECTING;
+  onerror: (() => void) | null = null;
+  onclose: (() => void) | null = null;
+  addEventListener(): void {}
+  removeEventListener(): void {}
+  send(): void {}
+  close(): void {
+    this.readyState = HangWebSocket.CONNECTING;
+    this.onclose?.();
+  }
+}
+
+Object.defineProperty(globalThis, "WebSocket", {
+  configurable: true,
+  value: HangWebSocket,
+});
+
+let hangHttpCalls = 0;
+Object.defineProperty(globalThis, "fetch", {
+  configurable: true,
+  value: async (input: unknown) => {
+    if (!String(input).includes("/api/tts/stream")) {
+      return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+    }
+    hangHttpCalls++;
+    return new Response(`data: ${JSON.stringify(httpPayload)}\n\n`, {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    });
+  },
+});
+
+const hangClient = new ElevenLabsWebSocketTTSClient();
+const firstHangStarted = Date.now();
+await hangClient.speakSegment("First line after a dead websocket.");
+const firstHangMs = Date.now() - firstHangStarted;
+assert(hangHttpCalls >= 1, "dead websocket did not fall back to HTTP");
+assert(
+  firstHangMs < 5_000,
+  `dead websocket still used the old 5s connect wait (${firstHangMs}ms)`,
+);
+
+const secondHangStarted = Date.now();
+await hangClient.speakSegment("Second line must not wait for websocket again.");
+const secondHangMs = Date.now() - secondHangStarted;
+assert(hangHttpCalls >= 2, "second sentence did not use HTTP");
+assert(
+  secondHangMs < TTS_WS_CONNECT_TIMEOUT_MS,
+  `second sentence retried websocket (${secondHangMs}ms)`,
+);
+
+let prefetchFetches = 0;
+Object.defineProperty(globalThis, "fetch", {
+  configurable: true,
+  value: async (input: unknown) => {
+    if (!String(input).includes("/api/tts/stream")) {
+      return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+    }
+    prefetchFetches++;
+    return new Response(`data: ${JSON.stringify(httpPayload)}\n\n`, {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    });
+  },
+});
+const prefetchClient = new ElevenLabsWebSocketTTSClient();
+prefetchClient.prefetchSegment("Prefetch this sentence so the next beat is ready.");
+await new Promise((resolve) => setTimeout(resolve, 20));
+assert(prefetchFetches === 1, "prefetch did not start HTTP generation early");
+await prefetchClient.speakSegment("Prefetch this sentence so the next beat is ready.");
+assert(prefetchFetches === 1, "speaking a prefetched sentence generated it a second time");
+
+const shared = getSharedAudioContext();
+const lectureA = createLectureAudioContext();
+const lectureB = createLectureAudioContext();
+assert(lectureA !== shared, "a lecture must not reuse the unlock AudioContext");
+assert(lectureB !== lectureA, "concurrent lectures must not share an AudioContext");
+releaseLectureAudioContext(lectureA);
+releaseLectureAudioContext(lectureB);
+
+// --- Both paths to the voice must sound like the same teacher. ---
+{
+  // The WebSocket stream and the HTTP fallback each held their own copy of the
+  // voice settings, so a lesson could change character mid-sentence the moment
+  // the socket dropped. One constant now, read by the streaming client that
+  // owns both paths: a literal reintroduced in either speech file is the drift
+  // this catches.
+  const sources = [
+    readFileSync(resolve(import.meta.dirname, "../../src/tts/speechClient.ts"), "utf8"),
+    readFileSync(resolve(import.meta.dirname, "../../src/tts/streamingSpeechClient.ts"), "utf8"),
+  ];
+  assert(
+    sources[1]!.includes("from \"./httpTtsPolicy\"") && !sources[1]!.includes("MAX_HTTP_PREFETCH = 6"),
+    "HTTP prefetch must come from the shared policy, not a local storm of 6",
+  );
+  assert(
+    sources[1]!.includes("TUTOR_VOICE_SETTINGS"),
+    "the streaming TTS client must read the shared voice settings",
+  );
+  for (const source of sources) {
+    assert(
+      !/stability:\s*[\d.]+/.test(source),
+      "a TTS client redeclared the voice settings instead of sharing them",
+    );
+  }
+
+  // Expression has to stay inside its working range. Flat delivery over a
+  // minutes-long lesson is what the owner heard as a full stop after every
+  // small thing; over-performing wanders off the cloned voice.
+  assert(
+    TUTOR_VOICE_SETTINGS.style >= TUTOR_VOICE_STYLE_RANGE.min &&
+      TUTOR_VOICE_SETTINGS.style <= TUTOR_VOICE_STYLE_RANGE.max,
+    `voice style ${TUTOR_VOICE_SETTINGS.style} is outside ${TUTOR_VOICE_STYLE_RANGE.min}-${TUTOR_VOICE_STYLE_RANGE.max}`,
+  );
+  assert(
+    TUTOR_VOICE_SETTINGS.similarity_boost >= 0.7,
+    "raising style without similarity_boost lets the timbre drift",
+  );
+  // Generation speed, not playback rate: playback rate shifts pitch.
+  assert(
+    TUTOR_VOICE_SETTINGS.speed > 0.7 && TUTOR_VOICE_SETTINGS.speed <= 1,
+    `voice speed ${TUTOR_VOICE_SETTINGS.speed} is not a teachable pace`,
+  );
+}
+
+console.log("verified websocket fallback and HTTP stop cancellation");

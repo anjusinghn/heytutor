@@ -1,0 +1,475 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { serializeSegmentCommands, type DrawCommand } from "@heytutor/drawing";
+import { shouldHideCursorForCapture } from "@heytutor/whiteboard";
+import {
+  withBoardEpochSegment,
+  type RecordedSegmentPayload,
+  type StoredTurn,
+} from "../../lib/boards/boardsClient";
+import {
+  canEncodeLectureMp4,
+  canExportLectureTurn,
+  latestCompletedTurn,
+  lectureDownloadFilename,
+  lecturePageCacheKey,
+  LECTURE_PAGE_CACHE_REVISION,
+  shouldCancelLectureExport,
+  speakingLectureSegments,
+  turnHasExportableAudio,
+} from "../../lib/lecture-export/canExportLectureMp4";
+import { pickLectureExportProfile } from "../../lib/lecture-export/lectureExportProfile";
+import {
+  lectureExportCacheKey,
+  lectureExportProgressLabel,
+  lectureFramesLookSame,
+  planLectureEncodeSpans,
+} from "../../lib/lecture-export/lectureExportFrames";
+import { waitUntilExportClock } from "../../lib/lecture-export/drawLectureTimeline";
+import {
+  isAllowedLectureAudioSource,
+  lectureAudioFetchUrl,
+} from "../../lib/lecture-export/lectureAudioUrl";
+import {
+  buildLectureAudioTrack,
+  type PcmTrack,
+  concatPcm,
+  fitPcmToDuration,
+  mixCueAudio,
+  resolveLectureAudioUrl,
+  silencePcm,
+  speedPcmTrack,
+} from "../../lib/lecture-export/lectureAudioTrack";
+import {
+  LECTURE_EXPORT_PLAYBACK_RATE,
+  lectureExportFileMs,
+  lectureExportMediaMs,
+} from "../../lib/lecture-export/lectureExportSpeed";
+import { buildReplayTimeline, type ReplayCue } from "../../lib/replay/replayTimeline";
+
+const write = (text: string): DrawCommand => ({
+  type: "WRITE",
+  text,
+  params: [90, 142],
+  charPosition: 0,
+  narrationBefore: "",
+});
+
+const storedSegment = (
+  orderIndex: number,
+  narration: string,
+  durationMs: number,
+  audioUrl: string | null,
+): StoredTurn["segments"][number] => ({
+  id: `seg-${orderIndex}`,
+  orderIndex,
+  narration,
+  spokenText: narration,
+  command: serializeSegmentCommands([write(narration || "x")], {
+    trustedDiagramGeometry: false,
+  }),
+  audioUrl,
+  durationMs,
+  timings: null,
+});
+
+const storedTurn = (
+  orderIndex: number,
+  question: string,
+  segments: StoredTurn["segments"],
+): StoredTurn => ({
+  id: `turn-${orderIndex}`,
+  orderIndex,
+  question,
+  rawResponse: "",
+  speedMultiplier: 1,
+  traceId: null,
+  sceneDocument: null,
+  sceneEngineVersion: null,
+  validationReport: null,
+  visualStatus: null,
+  sceneArtifacts: null,
+  segments,
+});
+
+const first = storedTurn(0, "find v", [
+  storedSegment(0, "", 50, null),
+  storedSegment(1, "so v equals sixty", 1200, "blob:turn-0"),
+]);
+const second = storedTurn(1, "find a", [
+  storedSegment(0, "", 50, null),
+  storedSegment(1, "the block slides", 800, "https://example.test/a.mp3"),
+]);
+
+const single = buildReplayTimeline([first]);
+const both = buildReplayTimeline([first, second]);
+assert.equal(single.cues.every((cue) => cue.turnIndex === 0), true, "export uses one turn only");
+assert.ok(both.totalMs > single.totalMs, "a second question must not leak into this lecture file");
+assert.ok(
+  first.segments[0] && first.segments[0].narration === "",
+  "the persisted epoch CLEAR stays on the turn",
+);
+assert.ok(single.cues[0] && single.cues[0].durationMs === 50, "CLEAR occupies the timeline as 50ms of silence");
+
+assert.equal(latestCompletedTurn([first, second])?.id, "turn-1", "header download is the latest question");
+assert.equal(canExportLectureTurn(first), true, "a turn with blob audio is exportable");
+assert.equal(
+  turnHasExportableAudio(storedTurn(2, "silent", [storedSegment(0, "hello", 800, null)])),
+  false,
+  "speaking segments without audio cannot export",
+);
+assert.equal(speakingLectureSegments(first).length, 1, "CLEAR is not a speaking segment");
+
+assert.equal(canEncodeLectureMp4({}), false, "Node has no WebCodecs encoder");
+assert.equal(
+  canEncodeLectureMp4({
+    VideoEncoder: function VideoEncoder() {},
+    VideoFrame: function VideoFrame() {},
+  }),
+  true,
+  "Firefox encodes video without AudioEncoder",
+);
+assert.equal(
+  canEncodeLectureMp4({
+    VideoEncoder: function VideoEncoder() {},
+    AudioEncoder: function AudioEncoder() {},
+    VideoFrame: function VideoFrame() {},
+    AudioData: function AudioData() {},
+  }),
+  true,
+  "Chrome still encodes with the full WebCodecs set",
+);
+
+const firefoxProfile = pickLectureExportProfile({
+  videoCodecs: ["vp8"],
+  audioCodecs: ["pcm-s16"],
+});
+assert.equal(firefoxProfile?.container, "mp4", "Firefox VP8 + PCM still muxes as MP4");
+assert.equal(firefoxProfile?.videoCodec, "vp8");
+assert.equal(firefoxProfile?.audioCodec, "pcm-s16");
+assert.equal(
+  pickLectureExportProfile({ videoCodecs: ["avc"], audioCodecs: ["aac"] })?.videoCodec,
+  "avc",
+  "Chrome keeps AVC + AAC",
+);
+assert.equal(
+  pickLectureExportProfile({ videoCodecs: ["vp9"], audioCodecs: ["opus"] })?.container,
+  "mp4",
+  "VP9 + Opus still muxes as MP4 by default",
+);
+assert.equal(
+  pickLectureExportProfile({
+    videoCodecs: ["vp9"],
+    audioCodecs: ["opus"],
+    preferredContainer: "webm",
+  })?.container,
+  "webm",
+  "WebM is used when the student picks that file type",
+);
+assert.equal(
+  pickLectureExportProfile({
+    videoCodecs: ["avc"],
+    audioCodecs: ["aac"],
+    preferredContainer: "webm",
+  })?.container,
+  "mp4",
+  "AVC + AAC cannot mux as WebM, so the download stays MP4",
+);
+assert.equal(
+  pickLectureExportProfile({ videoCodecs: [], audioCodecs: ["opus"] }),
+  null,
+  "audio alone cannot export",
+);
+
+assert.equal(
+  shouldCancelLectureExport({ cancelled: false, phase: "idle", isReplaying: false }),
+  false,
+  "idle export may run",
+);
+assert.equal(
+  shouldCancelLectureExport({ cancelled: false, phase: "thinking", isReplaying: false }),
+  false,
+  "a lesson going live must not cancel a download: downloads work at any point",
+);
+assert.equal(
+  shouldCancelLectureExport({ cancelled: false, phase: "speaking", isReplaying: false }),
+  false,
+  "a live lesson must not cancel a download",
+);
+assert.equal(
+  shouldCancelLectureExport({ cancelled: false, phase: "idle", isReplaying: true }),
+  false,
+  "replay draws on the main board, so it must not cancel the export board's download",
+);
+assert.equal(
+  shouldCancelLectureExport({ cancelled: true, phase: "idle", isReplaying: false }),
+  true,
+  "an explicit cancel stops export",
+);
+
+assert.deepEqual(
+  planLectureEncodeSpans([true, false, false, true, false]),
+  [
+    { start: 0, count: 3 },
+    { start: 3, count: 2 },
+  ],
+  "still board time collapses to one encoded sample",
+);
+assert.deepEqual(
+  planLectureEncodeSpans([true, true, true]),
+  [
+    { start: 0, count: 1 },
+    { start: 1, count: 1 },
+    { start: 2, count: 1 },
+  ],
+  "moving ink keeps a sample per changed frame",
+);
+assert.equal(lectureFramesLookSame(null, new Uint8ClampedArray([1, 2, 3])), false);
+assert.equal(
+  lectureFramesLookSame(new Uint8ClampedArray([1, 2, 3]), new Uint8ClampedArray([1, 2, 3])),
+  true,
+);
+assert.equal(
+  lectureFramesLookSame(new Uint8ClampedArray([1, 2, 3]), new Uint8ClampedArray([1, 2, 9])),
+  false,
+);
+assert.equal(lectureExportProgressLabel({ currentMs: 0, totalMs: 273000, phase: "audio" }), "Preparing…");
+assert.equal(lectureExportProgressLabel({ currentMs: 54600, totalMs: 273000, phase: "video" }), "20%");
+assert.equal(lectureExportProgressLabel({ currentMs: 273000, totalMs: 273000, phase: "mux" }), "Finishing…");
+assert.equal(
+  lectureExportCacheKey({
+    id: "turn-1",
+    segments: [{ audioUrl: "blob:a" }, { audioUrl: null }],
+  }),
+  "turn-1:2:blob:a|",
+);
+assert.equal(LECTURE_EXPORT_PLAYBACK_RATE, 1, "downloaded lectures keep the recorded voice pitch at natural speed");
+assert.equal(lectureExportFileMs(1000), 1000, "a 1s lesson keeps a 1s file timeline");
+assert.equal(lectureExportMediaMs(1000), 1000, "picture time and recorded speech time stay aligned");
+{
+  const ones = new Float32Array(1000).fill(1);
+  const sped = speedPcmTrack({ channels: [ones], sampleRate: 1000 }, LECTURE_EXPORT_PLAYBACK_RATE);
+  assert.equal(sped.sampleRate, 1000, "sped audio stays at the export sample rate");
+  assert.equal(sped.channels[0]?.length, 1000, "natural-speed export does not shorten the recorded PCM");
+  const unchanged = speedPcmTrack({ channels: [ones], sampleRate: 1000 }, 1);
+  assert.equal(unchanged.channels[0]?.length, 1000, "1× export must not resample");
+}
+assert.equal(
+  lecturePageCacheKey([first]),
+  `${lectureExportCacheKey(first)}@${LECTURE_EXPORT_PLAYBACK_RATE}@${LECTURE_PAGE_CACHE_REVISION}`,
+  "cache key includes the export rate so a previously sped-up file is not reused",
+);
+assert.equal(
+  lecturePageCacheKey([first], "webm"),
+  `${lectureExportCacheKey(first)}@${LECTURE_EXPORT_PLAYBACK_RATE}@${LECTURE_PAGE_CACHE_REVISION}.webm`,
+  "a WebM download must not reuse the cached MP4",
+);
+{
+  const exportSource = readFileSync(
+    resolve(import.meta.dirname, "../../lib/lecture-export/exportLectureMp4.ts"),
+    "utf8",
+  );
+  assert.equal(
+    exportSource.includes("LECTURE_EXPORT_PLAYBACK_RATE"),
+    true,
+    "MP4 encode must use the shared file-time policy",
+  );
+  assert.equal(
+    exportSource.includes("speedPcmTrack"),
+    true,
+    "MP4 audio must follow the shared rate policy, which preserves pitch at natural speed",
+  );
+  assert.equal(
+    exportSource.includes("lectureExportMediaMs"),
+    true,
+    "each encoded frame must sample the board at its matching media time",
+  );
+  assert.equal(
+    exportSource.includes("preferredContainer"),
+    true,
+    "encode must honour the student's lecture file type",
+  );
+  assert.equal(
+    exportSource.includes('fastStart: false'),
+    true,
+    "MP4 must not rewrite the whole file in memory before the download starts",
+  );
+}
+
+assert.equal(lectureDownloadFilename("Find v for the lens"), "lecture-find-v-for-the-lens.mp4");
+assert.equal(lectureDownloadFilename("Find v for the lens", "webm"), "lecture-find-v-for-the-lens.webm");
+assert.equal(lectureDownloadFilename("   "), "lecture-question.mp4");
+
+const short = new Float32Array([0.1, 0.2, 0.3]);
+const padded = fitPcmToDuration([short], 1000, 10);
+assert.equal(padded[0]?.length, 10, "short audio pads with silence to the cue length");
+assert.ok(Math.abs((padded[0]?.[2] ?? 0) - short[2]!) < 1e-6, "padded audio keeps the original samples");
+assert.equal(padded[0]?.[9], 0);
+
+const long = new Float32Array(20).fill(1);
+const trimmed = fitPcmToDuration([long], 1000, 5);
+assert.equal(trimmed[0]?.length, 5, "long audio trims to the cue length");
+
+const silence = silencePcm(50, 1000, 1);
+assert.equal(silence[0]?.length, 50, "CLEAR silence is 50ms at the export sample rate");
+
+const joined = concatPcm([silence, padded], 1);
+assert.equal(joined[0]?.length, 60, "CLEAR silence and the spoken cue concatenate");
+
+const missing = mixCueAudio({
+  durationMs: 200,
+  sampleRate: 1000,
+  channelCount: 1,
+  decoded: null,
+});
+assert.equal(missing.usedStoredAudio, false, "missing audio becomes silence, not a throw");
+assert.equal(missing.channels[0]?.length, 200);
+
+const cue = {
+  id: "0-1-1",
+  turnIndex: 0,
+  segmentIndex: 1,
+  startMs: 50,
+  endMs: 250,
+  durationMs: 200,
+  narration: "hello",
+  commands: [],
+  trustedDiagramGeometry: false,
+  audioUrl: "blob:hello",
+  durationMsStored: 200,
+  timings: null,
+  segment: first.segments[1]!,
+} satisfies ReplayCue;
+assert.equal(resolveLectureAudioUrl(cue), "blob:hello");
+assert.equal(resolveLectureAudioUrl({ ...cue, audioUrl: null }), null);
+assert.equal(lectureAudioFetchUrl("blob:hello"), "blob:hello");
+assert.equal(lectureAudioFetchUrl("/api/local.mp3"), "/api/local.mp3");
+assert.equal(
+  lectureAudioFetchUrl("https://pub.example/lectures/a.mp3", "http://localhost:3000"),
+  "/api/lecture-audio?src=https%3A%2F%2Fpub.example%2Flectures%2Fa.mp3",
+);
+assert.equal(
+  lectureAudioFetchUrl("https://localhost:3000/kept.mp3", "https://localhost:3000"),
+  "https://localhost:3000/kept.mp3",
+);
+assert.equal(
+  isAllowedLectureAudioSource("https://pub.example/lectures/a.mp3", "https://pub.example"),
+  true,
+);
+assert.equal(
+  isAllowedLectureAudioSource("https://evil.example/lectures/a.mp3", "https://pub.example"),
+  false,
+);
+assert.equal(isAllowedLectureAudioSource("http://pub.example/a.mp3", "https://pub.example"), false);
+
+async function main(): Promise<void> {
+const built = await buildLectureAudioTrack({
+  cues: [
+    { ...cue, narration: "", audioUrl: null, durationMs: 50, startMs: 0, endMs: 50 },
+    { ...cue, audioUrl: "blob:hello", durationMs: 200 },
+    { ...cue, audioUrl: null, narration: "missing", durationMs: 100 },
+  ],
+  sampleRate: 1000,
+  fetchBytes: async (url) => (url === "blob:hello" ? new Uint8Array([1]) : null),
+  decodeBytes: async () => ({ channels: [new Float32Array([0.5, 0.5])], sampleRate: 1000 }),
+});
+assert.equal(built.channels[0]?.length, 350, "CLEAR + spoken + missing-audio silence");
+assert.equal(built.missingAudioCues, 1, "only speaking cues without audio count as missing");
+assert.equal(built.spokenCues, 2, "two cues speak");
+assert.equal(built.voicedCues, 1, "one spoken cue kept its voice");
+
+{
+  // A clip request that never answers must not pin the download on "Preparing".
+  const startedAt = Date.now();
+  const stalled = await buildLectureAudioTrack({
+    cues: [{ ...cue, audioUrl: "https://media.example/stalled.mp3", durationMs: 200 }],
+    sampleRate: 1000,
+    fetchBytes: () => new Promise<Uint8Array | null>(() => undefined),
+    decodeBytes: async () => ({ channels: [new Float32Array([0.5])], sampleRate: 1000 }),
+    fetchTimeoutMs: 40,
+  });
+  assert.ok(Date.now() - startedAt < 2_000, "a stalled clip fetch ends at its time limit");
+  assert.equal(stalled.missingAudioCues, 1, "a stalled clip becomes a missing cue");
+  assert.equal(stalled.channels[0]?.length, 200, "a stalled clip is silence for the cue's duration");
+
+  const hungDecode = await buildLectureAudioTrack({
+    cues: [{ ...cue, audioUrl: "blob:hello", durationMs: 100 }],
+    sampleRate: 1000,
+    fetchBytes: async () => new Uint8Array([1]),
+    decodeBytes: () => new Promise<PcmTrack | null>(() => undefined),
+    decodeTimeoutMs: 40,
+  });
+  assert.equal(hungDecode.missingAudioCues, 1, "a decode that never finishes becomes silence");
+  assert.equal(hungDecode.voicedCues, 0);
+
+  let decodedEmpty = false;
+  const empty = await buildLectureAudioTrack({
+    cues: [{ ...cue, audioUrl: "blob:hello", durationMs: 100 }],
+    sampleRate: 1000,
+    fetchBytes: async () => new Uint8Array(0),
+    decodeBytes: async () => {
+      decodedEmpty = true;
+      return null;
+    },
+  });
+  assert.equal(decodedEmpty, false, "zero length bytes are silence, never handed to the decoder");
+  assert.equal(empty.missingAudioCues, 1);
+
+  let fetched = 0;
+  const held = await buildLectureAudioTrack({
+    cues: [{ ...cue, audioUrl: null, durationMs: 100 }],
+    sampleRate: 1000,
+    fetchBytes: async () => {
+      fetched += 1;
+      return null;
+    },
+    decodeBytes: async (data) => ({
+      channels: [new Float32Array(data.byteLength).fill(0.25)],
+      sampleRate: 1000,
+    }),
+    cueBytes: () => new Uint8Array([9, 9, 9]),
+  });
+  assert.equal(fetched, 0, "a live clip held in memory is read without a fetch");
+  assert.equal(held.missingAudioCues, 0, "a live step with its clip in memory keeps its voice");
+  assert.ok(Math.abs((held.channels[0]?.[0] ?? 0) - 0.25) < 1e-6, "the held clip is the audio in the track");
+}
+
+let now = 0;
+const advances: Array<() => void> = [];
+const waitForAdvance = () =>
+  new Promise<void>((resolve) => {
+    advances.push(resolve);
+  });
+const pending = waitUntilExportClock(() => now, 100, waitForAdvance, () => false);
+now = 120;
+advances.splice(0).forEach((resolve) => resolve());
+await pending;
+}
+
+const recorded: RecordedSegmentPayload[] = [
+  {
+    orderIndex: 0,
+    narration: "so v equals sixty",
+    spokenText: "so v equals sixty",
+    command: serializeSegmentCommands([write("v = 60")], { trustedDiagramGeometry: false }),
+    audioBytes: new Uint8Array([1, 2, 3]),
+    durationMs: 1200,
+    timings: null,
+  },
+];
+const persisted = withBoardEpochSegment(recorded);
+assert.equal((persisted[0]!.command as DrawCommand).type, "CLEAR");
+assert.equal(persisted[0]!.durationMs, 50);
+
+assert.equal(shouldHideCursorForCapture("snapshot"), true, "PDF snapshots still hide the pen");
+assert.equal(shouldHideCursorForCapture("frame"), false, "lecture frames keep the pen");
+
+void main()
+  .then(() => {
+    console.log("verify-lecture-mp4: still-frame collapse, progress copy, Firefox profile, audio pad/trim");
+  })
+  .catch((error: unknown) => {
+    console.error(error);
+    process.exitCode = 1;
+  });

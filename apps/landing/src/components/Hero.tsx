@@ -1,0 +1,117 @@
+import { Play } from 'lucide-react'
+import Navbar from './Navbar'
+import PenPlotter from './pen/PenPlotter'
+import HeroPixelDecor from './pixel/HeroPixelDecor'
+import DitherWave from './dither/DitherWave'
+import Button from './ui/Button'
+import SketchWallpaper from './sketch/SketchWallpaper'
+import { TUTOR_LOGIN_HREF } from '../lib/tutorAppHref'
+
+export default function Hero() {
+  return (
+    <div className="fx-aurora relative flex min-h-[100svh] flex-col overflow-x-clip">
+      {/* Notebook margin: faint sketched formulas in the hero's bare corners
+          and margins — above the aurora, below the pen's ink and the pixel
+          decor, and well clear of the headline and the pen lane. */}
+      <SketchWallpaper variant="hero" mode="bold" className="z-[2]" />
+      {/* Ambient light, hung from the top of the page */}
+      <div
+        aria-hidden
+        className="animate-aurora pointer-events-none absolute left-1/2 top-[-22%] z-[1] h-[520px] w-[min(1100px,140vw)] -translate-x-1/2 rounded-full bg-[rgba(89,175,212,0.22)] blur-[120px]"
+      />
+      <div
+        aria-hidden
+        className="animate-aurora pointer-events-none absolute left-[-14%] top-[2%] z-[1] h-[420px] w-[520px] rounded-full bg-[rgba(95,164,249,0.18)] blur-[110px] [animation-delay:-7s]"
+      />
+      <div
+        aria-hidden
+        className="animate-aurora pointer-events-none absolute right-[-12%] top-[-8%] z-[1] h-[380px] w-[460px] rounded-full bg-[rgba(89,175,212,0.14)] blur-[100px] [animation-delay:-12s]"
+      />
+
+      <Navbar />
+
+      {/* A pen flies in from off-screen left, draws the axes, sketches
+          cos θ and sin θ across them and labels each, then leaves frame to
+          the right. The whole performance is one continuous stroke path. */}
+      <PenPlotter className="absolute inset-0 z-[5] pointer-events-none overflow-hidden" />
+
+      {/* A student's desk, scattered through the empty outer thirds. */}
+      <HeroPixelDecor className="absolute inset-0 z-[4]" />
+
+      <div className="min-h-4 flex-[0.35] shrink-0 sm:min-h-8" />
+
+      <div className="relative z-20 flex w-full min-w-0 flex-col items-center px-5 text-center sm:px-8 lg:px-10">
+        {/* Product Hunt's live badge (it carries the upvote count), so it
+            loads from their host; the CSP allows that one image origin. */}
+        <a
+          href="https://www.producthunt.com/products/accelute?embed=true&utm_source=badge-featured&utm_medium=badge&utm_campaign=badge-accelute"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="animate-fade-up mb-6 block rounded-[10px] sm:mb-7"
+        >
+          <img
+            alt="Find Accelute on Product Hunt"
+            width={250}
+            height={54}
+            src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1280807&theme=neutral&t=1792025244805"
+          />
+        </a>
+        <h1 className="type-h1 type-h1--hero w-full min-w-0 max-w-4xl text-frost">
+          <span className="block animate-fade-up">AI that teaches you</span>
+          <span className="block animate-fade-up [animation-delay:100ms]">
+            on a <span className="text-ice">whiteboard</span>.
+          </span>
+        </h1>
+        <p
+          className="animate-fade-up mx-auto mt-5 w-full min-w-0 max-w-xl text-base leading-relaxed text-[rgba(240,245,247,0.62)] sm:mt-6 sm:text-lg"
+          style={{ animationDelay: '160ms' }}
+        >
+          Ask a question. Watch it draw, write, and explain each step out loud.
+          An AI whiteboard tutor for how you actually study.
+        </p>
+
+        <div
+          className="animate-fade-up mt-7 flex w-full min-w-0 flex-col items-center gap-3 sm:mt-8 sm:flex-row sm:flex-wrap sm:justify-center"
+          style={{ animationDelay: '280ms' }}
+        >
+          <Button href={TUTOR_LOGIN_HREF} size="lg">
+            <Play className="h-4 w-4" />
+            Try it free
+          </Button>
+          <Button href="#lesson" variant="ghost" size="lg">
+            See how it works
+          </Button>
+        </div>
+      </div>
+
+      {/* PenPlotter measures this box and lays the whole scene out inside it.
+          It grows on tall viewports; the figure anchors to its bottom edge. */}
+      <div
+        data-pen-stage
+        className="w-full flex-1 shrink-0 basis-[150px] sm:basis-[170px] lg:basis-[190px]"
+      />
+
+      {/* The pixel sea. The top margin is clear water between the crests and
+          the lowest ink; the foot melts straight into the page navy, so the
+          next section starts on the same ground with no solid slab or seam
+          band in between. */}
+      <div className="relative mt-8 w-full shrink-0 basis-[270px] sm:mt-10 sm:basis-[300px] lg:basis-[340px]">
+        {/* Light the water-line: the dots rise out of a soft sky bloom. */}
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-x-0 -top-40 bottom-0 z-[1] bg-[radial-gradient(72%_58%_at_50%_62%,rgba(89,175,212,0.20)_0%,rgba(89,175,212,0.06)_48%,transparent_74%)]"
+        />
+        <DitherWave
+          className="pointer-events-none absolute inset-x-0 -top-6 bottom-0 z-[2]"
+          surface={112}
+          melt={0.36}
+          edgeLift={30}
+          edgeFalloff={260}
+          dim="#3E8FB4"
+          bright="#7FC4E2"
+          mid="#59AFD4"
+        />
+      </div>
+    </div>
+  )
+}

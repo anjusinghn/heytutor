@@ -1,0 +1,2748 @@
+"use client";
+
+import type { StoredTurn } from "@/lib/boards/boardsClient";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type ReactNode,
+  type CSSProperties,
+} from "react";
+import { useRouter } from "next/navigation";
+import { AppShell } from "@/features/app-shell/AppShell";
+import {
+  toShellProfile,
+  useAccountMe,
+} from "@/features/app-shell/useAccountMe";
+import {
+  lessonSettingsFromAccount,
+  readSettingsCache,
+  writeSettingsCache,
+} from "@/lib/account/userSettings";
+import type { LectureFileType } from "@/lib/account/lessonSettings";
+import { firstName, parseSubjects, profileSubtitle } from "@/lib/account/types";
+import { suggestionsForSubjects } from "@/lib/account/homeSuggestions";
+import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
+import {
+  SettingsDrawer,
+  DEFAULT_SETTINGS,
+  getMarkerColorHex,
+  type SettingsState,
+} from "@/features/tutor-session/components/SettingsDrawer";
+import {
+  DEFAULT_AUDIO_LANGUAGE,
+  toVoiceKey,
+  type SubjectFamiliarity,
+  type TutorVoicePreferences,
+} from "@heytutor/tutor-core";
+import {
+  CanvasLanding,
+  CanvasLandingDoodles,
+  type CanvasLandingSuggestion,
+} from "@/features/tutor-session/components/CanvasLanding";
+import { LandingPixelField } from "@/features/tutor-session/components/LandingPixelField";
+import { type ReplayCue } from "@/lib/replay/replayTimeline";
+import type { WhiteboardHandle, CursorState } from "@heytutor/whiteboard";
+import {
+  useIsCompactNav,
+  useIsMobile,
+  useMediaQuery,
+} from "@/lib/client/useMediaQuery";
+import { useVisualViewportInset } from "@/lib/client/useVisualViewportInset";
+import { useLockWindowScrollOnFocus } from "@/lib/client/useLockWindowScrollOnFocus";
+import { ThinkingOverlay } from "./components/ThinkingOverlay";
+import { BoardBootSpinner } from "./components/BoardBootSpinner";
+import { SessionInputChrome } from "./components/SessionInputChrome";
+import { SessionHeader } from "./components/SessionHeader";
+import {
+  BoardErrorBanner,
+  SaveFailureBanner,
+} from "./components/BoardErrorBanner";
+import { NotesChatSidebar } from "./components/NotesChatSidebar";
+import { SessionBoardCanvas } from "./components/SessionBoardCanvas";
+import { ResponseBubble } from "./components/ResponseBubble";
+import { sessionCaption } from "./lib/board/sessionCaption";
+import { UnsavedBoardNotice } from "./components/UnsavedBoardNotice";
+import {
+  taughtSegmentCount,
+  unsavedLessonBoard,
+} from "./lib/board/unsavedBoard";
+import { focusQuestionField } from "./lib/turn/lessonFollowUp";
+import type { DownloadState } from "./lib/download/downloadState";
+import { storedTurnIsPartial } from "@/lib/lecture-export/lectureExportSource";
+import { OutOfCreditsDialog } from "@/features/account/OutOfCreditsDialog";
+import type { BillingFailure } from "@/lib/billing/billingClient";
+import { rememberBillingFailure } from "@/lib/billing/billingClient";
+import {
+  isOutOfUsageLock,
+  studentBillingMessage,
+} from "@/lib/billing/studentCopy";
+import { Whiteboard } from "./components/WhiteboardLoader";
+import { CodeLessonPanel } from "./components/CodeLessonPanel";
+import { CodeLessonController } from "./lib/code-lesson/codeLessonController";
+import { LessonFigureSequence } from "./lib/scene/lessonFigureSequence";
+import { useReplay } from "./hooks/useReplay";
+import { useBoardThumbnail } from "./hooks/useBoardThumbnail";
+import { useLectureRewind } from "./hooks/useLectureRewind";
+import { useLecturePageHalt } from "./hooks/useLecturePageHalt";
+import { useLectureExport } from "./hooks/useLectureExport";
+import { useBoardMarking } from "./hooks/useBoardMarking";
+import {
+  useBoardFullscreen,
+  useSessionChromeHidden,
+  type BoardFullscreenApi,
+} from "./hooks/useBoardFullscreen";
+import { useCommandExecution } from "./hooks/useCommandExecution";
+import { useCancelControl } from "./hooks/useCancelControl";
+import { useTurnLifecycle } from "./hooks/useTurnLifecycle";
+import type { SpeechStartupStatus } from "./hooks/turn/types";
+import { speechRecoveryStatus } from "./lib/turn/speechRecoveryUi";
+import { useBoardLayout } from "./hooks/useBoardLayout";
+import { useBoardReading } from "./hooks/useBoardReading";
+import { useBoardSession } from "./hooks/useBoardSession";
+import { useAdaptiveDrawSpeed } from "./hooks/useAdaptiveDrawSpeed";
+import { useNotesChat } from "./hooks/useNotesChat";
+import { useLectureRating } from "./hooks/useLectureRating";
+import { LectureRating } from "./components/LectureRating";
+import { type TutorSegment, type VerifiedDiagram } from "@heytutor/drawing";
+import { type InkPace, type TTSClient } from "@heytutor/tutor-core";
+import { type TurnTelemetry } from "@/lib/obs/turnTelemetry";
+import { pageLoadTiming } from "@/lib/obs/pageLoadTiming";
+import { type RecordedSegmentPayload } from "@/lib/boards/boardsClient";
+import { liveNotesPayload } from "@/lib/boards/notesChatClient";
+import {
+  DEFAULT_REPLAY_SPEED,
+  syncControlledPlaybackRate,
+} from "@/lib/replay/replayAudio";
+import { canPlayFinishedLecture } from "@/lib/replay/lecturePlayer";
+import { useLecturePlayer } from "./hooks/useLecturePlayer";
+import { LecturePlayerBar } from "./components/LecturePlayerBar";
+import {
+  PAGE_GUTTER_X,
+  PAGE_GUTTER_Y,
+  NOTES_CHAT_RAIL_WIDTH,
+  BOARD_WIDTH,
+  BOARD_HEIGHT,
+} from "./constants";
+import type { LectureExportProgress } from "@/lib/lecture-export/exportLectureMp4";
+import type { TutorPhase, SegmentPlanStats } from "./types";
+import { createEmptySegmentPlanStats } from "./lib/turn/segmentPlanning";
+import { lessonFollowUpMode } from "./lib/turn/lessonFollowUp";
+import { buildLessonNotes } from "./lib/notes/lessonNotes";
+import {
+  sessionCapabilities,
+  type TutorSessionVariant,
+} from "./lib/sessionCapabilities";
+import {
+  buildMarkedDoubtPrompt,
+  markedEntityIds,
+  summarizeMarks,
+  type BoardMark,
+} from "./lib/board/boardMarking";
+import {
+  fullscreenKeyAction,
+  isTypingElement,
+} from "./lib/board/boardFullscreen";
+import {
+  isWaitingToTeach,
+  markerCursorState,
+} from "./lib/board/markerVisibility";
+import {
+  DOUBT_THINKING_FALLBACK,
+  doubtThinkingAnchor,
+} from "./lib/board/doubtAnchor";
+import { doubtTurnTitle, isDoubtPrompt } from "./lib/input/askDoubt";
+import type { BoardPageRecord, PageTurnKind } from "./lib/turn/doubtTurn";
+import { canStartStoredLectureReplay } from "./lib/replay/autoReplay";
+import { watchServerBuild } from "@/lib/client/staleBuild";
+
+const FAST_MODE_STORAGE_KEY = "htutor_fast_mode";
+const SUBTITLES_STORAGE_KEY = "htutor_subtitles";
+const SPEED_STORAGE_KEY = "htutor_speed";
+const MARKER_COLOR_STORAGE_KEY = "htutor_marker_color";
+/** Held its old name so a returning student keeps the level they chose. */
+const FAMILIARITY_STORAGE_KEY = "htutor_lesson_depth";
+const AUDIO_LANGUAGE_STORAGE_KEY = "htutor_audio_language";
+const ACCENT_STORAGE_KEY = "htutor_accent";
+const NARRATION_STORAGE_KEY = "htutor_narration";
+const LOW_LATENCY_STORAGE_KEY = "htutor_low_latency_voice";
+
+function writeStoredSetting(key: string, value: string): void {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    /* private mode / quota */
+  }
+}
+
+export type { TutorSessionVariant } from "./lib/sessionCapabilities";
+
+export type TutorSessionError = {
+  message: string;
+  question: string;
+  billing?: BillingFailure;
+};
+
+/** The student Download / Replay actions, published so admin Watch can offer them. */
+export type TutorSessionExportApi = {
+  canReplay: boolean;
+  canDownload: boolean;
+  canDownloadLecture: boolean;
+  /** What the Download control shows; the admin drawer renders the same pill. */
+  downloadState: DownloadState;
+  dismissDownload: () => void;
+  lectureFileType: LectureFileType;
+  isReplaying: boolean;
+  isDownloading: boolean;
+  isExportingLecture: boolean;
+  lectureExportProgress: LectureExportProgress | null;
+  lectureExportError: string | null;
+  replayLecture: () => boolean;
+  /** Saved board pages as images. Meaningful once `boardReady` is true. */
+  collectNotesSlides: () => Promise<string[]>;
+  /** Restore has finished, so `collectNotesSlides` reads the saved pages. */
+  boardReady: boolean;
+  /** The restored board has at least one saved turn. */
+  hasSavedTurns: boolean;
+  downloadNotesPdf: () => void;
+  downloadLectureMp4: () => void;
+  cancelLectureExport: () => void;
+};
+
+export type TutorSessionShellProps = {
+  sessionId: string;
+  /** Home board: a real board with no database row and no `/c/` URL until the first question. */
+  isDraft?: boolean;
+  /** Mint a fresh home board and route to it, optionally carrying a question to auto-submit. */
+  onStartDraftBoard?: (question?: string) => void;
+  /** The student opened a saved board. Drop any New board hold on the previous route. */
+  onChooseBoard?: (id: string) => void;
+  variant?: TutorSessionVariant;
+  /** Submitted once the board and whiteboard are ready. */
+  autoQuestion?: string;
+  /** Start stored-turn replay once the board is restored. Used by `/c/{id}?replay=1`. */
+  autoReplay?: boolean;
+  /** Read someone else's board instead of the owner's API (Community). Never written to. */
+  readBoard?: (boardId: string) => Promise<{ turns: StoredTurn[] } | null>;
+  /** Capture TTS bytes; do not play through speakers. Defaults on for `headless`. */
+  muteAudio?: boolean;
+  /** Controlled playback rate (admin Watch). Same model as student replay; default 1.25×. */
+  playbackRate?: number;
+  /** The playback bar's speed menu, when `playbackRate` is controlled. */
+  onPlaybackRateChange?: (rate: number) => void;
+  /**
+   * Offer the playback bar on a finished lecture. Admin Watch turns it off
+   * for a recording that did not complete.
+   */
+  lecturePlayback?: boolean;
+  onPhase?: (phase: TutorPhase) => void;
+  /** Fired after the turn is persisted (and saved when `onComplete` is set). */
+  onComplete?: () => void;
+  onError?: (error: TutorSessionError) => void;
+  /** Admin Watch (and other embeds) mount the same Replay / Notes PDF / MP4 actions. */
+  onExportApi?: (api: TutorSessionExportApi | null) => void;
+  /**
+   * Controlled Ask panel. A host that carries its own Notes control — admin
+   * Watch has one in the drawer header — drives the same panel the pull tab on
+   * the board's edge opens, rather than mounting a second, poorer one.
+   */
+  notesOpen?: boolean;
+  onNotesOpenChange?: (open: boolean) => void;
+  /**
+   * Host-owned full screen. Admin Watch's drawer brings the toggle and the
+   * native request; the panel still applies the immersive layout so the
+   * composer floats instead of rescaling the paper. Headless recording never
+   * receives this.
+   */
+  boardFullscreenApi?: BoardFullscreenApi;
+  /**
+   * Slot on the deck between the board and the transport bar, full width of the
+   * board column. Outside `.wb-frame`, so its contents render at natural scale
+   * rather than inside the board's transform — which is what a surface needs
+   * when the board is scaled down too far to read (the DSA code panel on
+   * mobile). Pass `null` to collapse the slot to nothing.
+   *
+   * Anything mounted here shares height with the board: `boardContainerRef` is
+   * on the parent, so a node that grows shrinks `boardViewport.scale`, which
+   * resizes the frame, which changes the space left for the node. Give it a
+   * height that does not derive from its own content.
+   */
+  belowBoardPanel?: ReactNode;
+};
+
+async function requestHomeSuggestions(
+  onSuggestions: (suggestions: CanvasLandingSuggestion[]) => void,
+  signal?: AbortSignal,
+  applyGenerated = false,
+) {
+  try {
+    const response = await fetch("/api/home-suggestions", {
+      signal,
+      cache: "no-store",
+    });
+    if (!response.ok) return;
+    const result = (await response.json()) as {
+      suggestions?: CanvasLandingSuggestion[];
+      source?: "ai" | "fallback";
+      needsRefresh?: boolean;
+    };
+    if (signal?.aborted) return;
+    if (result.suggestions?.length === 5) onSuggestions(result.suggestions);
+    if (!result.needsRefresh) return;
+    const refreshed = await fetch("/api/home-suggestions", {
+      method: "POST",
+      signal,
+      cache: "no-store",
+    });
+    if (!refreshed.ok || signal?.aborted) return;
+    const updated = (await refreshed.json()) as {
+      suggestions?: CanvasLandingSuggestion[];
+      generated?: boolean;
+    };
+    if (
+      signal?.aborted ||
+      !updated.generated ||
+      updated.suggestions?.length !== 5
+    )
+      return;
+    // Refresh replaces the pack; background generation only fills a fallback.
+    if (applyGenerated || result.source === "fallback") onSuggestions(updated.suggestions);
+  } catch {
+    // Curated cards remain usable if the network or model is unavailable.
+  }
+}
+
+export function TutorSessionShell({
+  sessionId,
+  isDraft = false,
+  onStartDraftBoard,
+  onChooseBoard,
+  variant = "full",
+  autoQuestion,
+  autoReplay = false,
+  readBoard,
+  muteAudio,
+  playbackRate,
+  onPlaybackRateChange,
+  lecturePlayback = true,
+  onPhase,
+  onComplete,
+  onError,
+  onExportApi,
+  notesOpen: notesOpenProp,
+  onNotesOpenChange,
+  boardFullscreenApi,
+  belowBoardPanel,
+}: TutorSessionShellProps) {
+  const router = useRouter();
+  const accountMe = useAccountMe();
+  const [homeSuggestions, setHomeSuggestions] = useState<CanvasLandingSuggestion[] | null>(null);
+  const isHeadless = variant === "headless";
+
+  const loadHomeSuggestions = useCallback(
+    (signal?: AbortSignal, applyGenerated = false) =>
+      requestHomeSuggestions(setHomeSuggestions, signal, applyGenerated),
+    [setHomeSuggestions],
+  );
+
+  useEffect(() => {
+    if (!isDraft || isHeadless) return;
+    const controller = new AbortController();
+    void loadHomeSuggestions(controller.signal);
+    return () => controller.abort();
+  }, [isDraft, isHeadless, loadHomeSuggestions]);
+  // A student tab learns when the server runs a newer deploy, so its next new
+  // lesson reloads into it instead of drawing the old bundle's figures.
+  useEffect(() => (variant === "full" ? watchServerBuild() : undefined), [variant]);
+  /**
+   * What this surface may do, and — separately — whether it draws the app
+   * frame. Admin Watch is a `panel`: the whole lesson, inside a drawer that
+   * brings its own header, so everything below keys off the capability rather
+   * than off "is this the main page".
+   */
+  const can = sessionCapabilities(variant);
+  /** No sidebar, no session header: the surface brings its own frame. */
+  const frameless = !can.appChrome && !isHeadless;
+  const mutePlayback = isHeadless ? (muteAudio ?? true) : (muteAudio ?? false);
+  /** Admin Watch drives the rate through props; only the student's own choice persists. */
+  const speedIsControlled = playbackRate !== undefined;
+
+  const whiteboardRef = useRef<WhiteboardHandle>(null);
+  const pendingQuestionRef = useRef<string | null>(null);
+  const autoSubmitDoneRef = useRef<string | null>(null);
+  const [phase, setPhase] = useState<TutorPhase>("idle");
+  const phaseRef = useRef<TutorPhase>("idle");
+  const [isPaused, setIsPaused] = useState(false);
+  const isPausedRef = useRef(false);
+  const [speechStartupStatus, setSpeechStartupStatus] = useState<SpeechStartupStatus | null>(null);
+  // A sentence taught without its voice forces its caption and a notice.
+  const [voiceDegraded, setVoiceDegraded] = useState(false);
+  const [narrationText, setNarrationText] = useState("");
+  const [currentSegmentText, setCurrentSegmentText] = useState("");
+  const [lastError, setLastError] = useState<TutorSessionError | null>(null);
+  const [creditsOpen, setCreditsOpen] = useState(false);
+  const [creditsError, setCreditsError] = useState(lastError);
+  if (creditsError !== lastError) {
+    setCreditsError(lastError);
+    if (lastError?.billing && isOutOfUsageLock(lastError.billing)) {
+      setCreditsOpen(true);
+    } else if (!lastError) {
+      setCreditsOpen(false);
+    }
+  }
+  const ttsClientRef = useRef<TTSClient | null>(null);
+  const replayAudioRef = useRef<HTMLAudioElement | null>(null);
+  const replayDrawClockRef = useRef<{ setPaused: (paused: boolean) => void } | null>(null);
+  const replayAudioPreloadRef = useRef<Map<string, HTMLAudioElement>>(new Map());
+  const cancelRef = useRef(false);
+  const turnActiveRef = useRef(false);
+  const turnGenerationRef = useRef(0);
+  const turnAbortRef = useRef<AbortController | null>(null);
+  const segmentChainRef = useRef(Promise.resolve());
+  const drawChainRef = useRef(Promise.resolve());
+  const collectedSegmentsRef = useRef<TutorSegment[]>([]);
+  const recordedSegmentsRef = useRef<RecordedSegmentPayload[]>([]);
+  const rawResponseRef = useRef("");
+  const currentTraceIdRef = useRef<string | null>(null);
+  const turnTelemetryRef = useRef<TurnTelemetry | null>(null);
+  const turnStatsRef = useRef({ drawMs: 0, ttsChars: 0 });
+  const [isDownloading, setIsDownloading] = useState(false);
+  const fbdPhaseMarkedRef = useRef(false);
+  const fbdPhaseStartedRef = useRef(false);
+  const activeVerifiedDiagramRef = useRef<VerifiedDiagram | null>(null);
+  const [activeVerifiedDiagram, setActiveVerifiedDiagram] = useState<VerifiedDiagram | null>(null);
+  const [diagramSessionId, setDiagramSessionId] = useState(sessionId);
+  if (diagramSessionId !== sessionId) {
+    setDiagramSessionId(sessionId);
+    setActiveVerifiedDiagram(null);
+  }
+  const segmentPlanStatsRef = useRef<SegmentPlanStats>(createEmptySegmentPlanStats());
+  const stopTurnRef = useRef<
+    ((options?: { keepVisibleBoard?: boolean; supersede?: boolean }) => void) | null
+  >(null);
+  const pendingSegmentCountRef = useRef(0);
+  const narrationDensityRef = useRef(0);
+  const inkPaceRef = useRef<InkPace>("follow");
+  const adaptiveFactorRef = useRef(1);
+  const [settings, setSettings] = useState<SettingsState>({
+    speedMultiplier: DEFAULT_REPLAY_SPEED,
+    ...DEFAULT_SETTINGS,
+  });
+  // Persist writes must wait until stored values are applied, otherwise the
+  // first paint writes defaults and clobbers language/speed/colour on reload.
+  // Headless boards have no stored settings to hydrate, so they start hydrated.
+  const [settingsHydrated, setSettingsHydrated] = useState(isHeadless);
+  /** The server offers Hinglish only when it holds a Sarvam key. */
+  const [hinglishAvailable, setHinglishAvailable] = useState(false);
+  /**
+   * The language is only written back once the server's own answer is in. A
+   * failed settings load leaves the sheet on English, and saving that would
+   * erase the student's Hinglish choice.
+   */
+  const serverSettingsLoadedRef = useRef(false);
+  const pendingVoicePreferencesRef = useRef<TutorVoicePreferences | null>(null);
+  const voicePreferencesRef = useRef<TutorVoicePreferences>({
+    voiceKey: toVoiceKey(DEFAULT_SETTINGS.audioLanguage, DEFAULT_SETTINGS.accent),
+    lowLatency: DEFAULT_SETTINGS.lowLatencyVoice,
+  });
+  const speedRef = useRef(DEFAULT_REPLAY_SPEED);
+  const fastModeRef = useRef(true);
+  const familiarityRef = useRef<SubjectFamiliarity>(DEFAULT_SETTINGS.familiarity);
+  const teachingPrefsRef = useRef({
+    teachingNote: "",
+    alwaysShowUnits: false,
+    alwaysStateLawFirst: false,
+  });
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarResizing, setSidebarResizing] = useState(false);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [liveQuestion, setLiveQuestion] = useState("");
+  const liveQuestionRef = useRef("");
+  const readPageQuestion = useCallback(() => liveQuestionRef.current, []);
+  /** The page on the board and the turn teaching on it; see `lib/turn/doubtTurn`. */
+  const boardPageRef = useRef<BoardPageRecord | null>(null);
+  /** A stopped replay left the board on one of its pages; see the turn types. */
+  const boardShowsStoppedReplayRef = useRef(false);
+  /** A doubt is thought about over its own page; a lesson over clean paper. */
+  const [liveTurnKind, setLiveTurnKind] = useState<PageTurnKind>("lesson");
+  /** The student's rings, kept on the page while the tutor thinks about them. */
+  const [heldDoubtMarks, setHeldDoubtMarks] = useState<BoardMark[]>([]);
+  /** Where the clicker sits while a doubt is thought about. Board units. */
+  const [doubtThinkingAt, setDoubtThinkingAt] = useState<{ x: number; y: number } | null>(null);
+  /** null = follow the automatic rule; true/false = the student decided. */
+  const [notesOpenOverride, setNotesOpenOverride] = useState<boolean | null>(null);
+  const isCompactNav = useIsCompactNav();
+  const isMobile = useIsMobile();
+  const shortScreen = useMediaQuery(
+    "(max-height: 450px) and (max-width: 1023px)",
+  );
+  const veryShortScreen = useMediaQuery(
+    "(max-height: 300px) and (max-width: 1023px)",
+  );
+  const [shortPanel, setShortPanel] = useState<
+    "header" | "composer" | "code" | null
+  >(null);
+  const coarsePointer = useMediaQuery("(pointer: coarse)");
+  const dockLecturePlayer = isMobile || coarsePointer;
+  const keyboardInset = useVisualViewportInset();
+  useLockWindowScrollOnFocus(!isHeadless);
+  /**
+   * The board taking the whole screen. Available on every device: where the
+   * browser has no Fullscreen API the app's own chrome comes off instead, and
+   * the paper still fills the viewport. Headless recorders and a panel whose
+   * host already owns full screen must not instantiate a second author of the
+   * document attribute.
+   */
+  const localFullscreen = useBoardFullscreen({
+    enabled: !isHeadless && !boardFullscreenApi,
+  });
+  const fullscreen = boardFullscreenApi ?? localFullscreen;
+  const boardFullscreen =
+    !isHeadless &&
+    (can.appChrome || Boolean(boardFullscreenApi)) &&
+    fullscreen.active;
+  // A regular short screen keeps one control row; the original chrome remains
+  // mounted in bounded overlays so drafts, save failures and actions survive.
+  const compactBoardChrome =
+    !isHeadless && can.appChrome && shortScreen && !boardFullscreen;
+  // Fit-to-sheet made 27px work about 8 CSS px on a portrait phone. Keep the
+  // canonical ink readable and let its bounded region own both pan axes.
+  const readableBoard = !isHeadless && (
+    isMobile || (coarsePointer && shortScreen) || (compactBoardChrome && veryShortScreen)
+  );
+  const shortPanelTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const [isReplaying, setIsReplaying] = useState(false);
+  const [replayProgressMs, setReplayProgressMs] = useState(0);
+  // Written by the session hooks; nothing reads it since the transport went.
+  const [, setReplayTotalMs] = useState(0);
+  const replayGenerationRef = useRef(0);
+  const replayCueRef = useRef<ReplayCue | null>(null);
+  /** True while the student has scrolled back into a lecture still in progress. */
+  const rewoundRef = useRef(false);
+
+  useEffect(() => {
+    phaseRef.current = phase;
+  }, [phase]);
+
+  useEffect(() => {
+    onPhase?.(phase);
+  }, [phase, onPhase]);
+
+  // A page record describes the page the live turns drew. Another board, or a
+  // replay redrawing this one from saved turns, is a different page: a doubt
+  // asked over it reads the saved turns instead.
+  useEffect(() => {
+    boardPageRef.current = null;
+    boardShowsStoppedReplayRef.current = false;
+    // Clear the previous lecture's figure before the async ink restore.
+    activeVerifiedDiagramRef.current = null;
+    void whiteboardRef.current?.clearBoard();
+  }, [sessionId]);
+  useEffect(() => {
+    if (!isReplaying) return;
+    boardPageRef.current = null;
+    // A replay that runs to the end leaves the last saved page up; only one
+    // stopped part way through sets this again (in `stopTurn`).
+    boardShowsStoppedReplayRef.current = false;
+  }, [isReplaying]);
+
+  useEffect(() => {
+    if (isHeadless || typeof window === "undefined") {
+      return;
+    }
+    const cache = readSettingsCache();
+    if (speedIsControlled) {
+      delete cache.speedMultiplier;
+    }
+    if (Object.keys(cache).length > 0) {
+      if (cache.familiarity) familiarityRef.current = cache.familiarity;
+      // Read after mount so SSR HTML stays the production default.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setSettings((current) => ({
+        ...current,
+        ...cache,
+        // Product defaults: never apply a cached off/Hindi/low-latency override.
+        fastMode: true,
+        audioLanguage: DEFAULT_AUDIO_LANGUAGE,
+        narrationEnabled: true,
+        lowLatencyVoice: false,
+      }));
+    }
+    fastModeRef.current = true;
+    const accent = cache.accent ?? DEFAULT_SETTINGS.accent;
+    voicePreferencesRef.current = {
+      voiceKey: toVoiceKey(DEFAULT_AUDIO_LANGUAGE, accent),
+      lowLatency: false,
+    };
+
+    let cancelled = false;
+    void fetch("/api/account/settings")
+      .then(async (response) => {
+        if (!response.ok) return null;
+        return (await response.json()) as {
+          settings?: Parameters<typeof lessonSettingsFromAccount>[0];
+          hinglishAvailable?: boolean;
+        };
+      })
+      .then((data) => {
+        if (cancelled || !data?.settings) return;
+        const next = lessonSettingsFromAccount(data.settings);
+        const hinglish = data.hinglishAvailable === true;
+        setHinglishAvailable(hinglish);
+        serverSettingsLoadedRef.current = true;
+        next.fastMode = true;
+        // Hinglish comes only from the server's answer, never the local cache.
+        next.audioLanguage =
+          hinglish && data.settings.audioLanguage === "hinglish"
+            ? "hinglish"
+            : DEFAULT_AUDIO_LANGUAGE;
+        next.narrationEnabled = true;
+        next.lowLatencyVoice = false;
+        teachingPrefsRef.current = {
+          teachingNote: data.settings.teachingNote,
+          alwaysShowUnits: data.settings.alwaysShowUnits,
+          alwaysStateLawFirst: data.settings.alwaysStateLawFirst,
+        };
+        if (speedIsControlled) {
+          next.speedMultiplier = speedRef.current;
+        }
+        setSettings(next);
+        writeSettingsCache(next);
+        fastModeRef.current = true;
+        familiarityRef.current = next.familiarity;
+      })
+      .catch(() => {
+        /* cache remains the lesson sheet until the server answers */
+      })
+      .finally(() => {
+        if (!cancelled) setSettingsHydrated(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isHeadless, speedIsControlled]);
+
+  useEffect(() => {
+    fastModeRef.current = true;
+    if (!settingsHydrated || isHeadless || typeof window === "undefined") {
+      return;
+    }
+    writeStoredSetting(FAST_MODE_STORAGE_KEY, "1");
+  }, [settings.fastMode, isHeadless, settingsHydrated]);
+
+  useEffect(() => {
+    if (!settingsHydrated || isHeadless || typeof window === "undefined") {
+      return;
+    }
+    writeStoredSetting(SUBTITLES_STORAGE_KEY, settings.subtitlesEnabled ? "1" : "0");
+  }, [settings.subtitlesEnabled, isHeadless, settingsHydrated]);
+
+  useEffect(() => {
+    if (
+      !settingsHydrated ||
+      isHeadless ||
+      speedIsControlled ||
+      typeof window === "undefined"
+    ) {
+      return;
+    }
+    writeStoredSetting(SPEED_STORAGE_KEY, String(settings.speedMultiplier));
+  }, [
+    settings.speedMultiplier,
+    isHeadless,
+    speedIsControlled,
+    settingsHydrated,
+  ]);
+
+  useEffect(() => {
+    if (!settingsHydrated || isHeadless || typeof window === "undefined") {
+      return;
+    }
+    writeStoredSetting(MARKER_COLOR_STORAGE_KEY, settings.markerColor);
+  }, [settings.markerColor, isHeadless, settingsHydrated]);
+
+  useEffect(() => {
+    familiarityRef.current = settings.familiarity;
+    if (!settingsHydrated || isHeadless || typeof window === "undefined") {
+      return;
+    }
+    writeStoredSetting(FAMILIARITY_STORAGE_KEY, settings.familiarity);
+  }, [settings.familiarity, isHeadless, settingsHydrated]);
+
+  // Language and accent reach the server as one voice key; the TTS client
+  // reconnects on the next segment so the new voice is used. Hinglish is the
+  // Sarvam voice; every English accent stays on Cartesia. The voice stays
+  // natural (not low-latency), which is no longer a student toggle.
+  useEffect(() => {
+    if (!settingsHydrated) {
+      return;
+    }
+    const voicePreferences: TutorVoicePreferences = {
+      voiceKey: toVoiceKey(settings.audioLanguage, settings.accent),
+      lowLatency: false,
+    };
+    const switchesLanguage =
+      (voicePreferences.voiceKey === "hi-IN") !==
+      (voicePreferencesRef.current.voiceKey === "hi-IN");
+    if (switchesLanguage && turnActiveRef.current) {
+      // This turn's words were written for the old voice; switch at the next question.
+      pendingVoicePreferencesRef.current = voicePreferences;
+    } else {
+      pendingVoicePreferencesRef.current = null;
+      voicePreferencesRef.current = voicePreferences;
+      ttsClientRef.current?.setVoicePreferences?.(voicePreferences);
+    }
+    if (isHeadless || typeof window === "undefined") {
+      return;
+    }
+    writeStoredSetting(AUDIO_LANGUAGE_STORAGE_KEY, settings.audioLanguage);
+    writeStoredSetting(ACCENT_STORAGE_KEY, settings.accent);
+    writeStoredSetting(LOW_LATENCY_STORAGE_KEY, "0");
+  }, [settings.audioLanguage, settings.accent, isHeadless, settingsHydrated]);
+
+  useEffect(() => {
+    if (!settingsHydrated || !can.persistSettings) return;
+    writeSettingsCache(settings);
+    const timer = window.setTimeout(() => {
+      const { audioLanguage, ...rest } = settings;
+      void fetch("/api/account/settings", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(serverSettingsLoadedRef.current ? { ...rest, audioLanguage } : rest),
+      }).catch(() => {
+        /* local cache still holds the last choice */
+      });
+    }, 400);
+    return () => window.clearTimeout(timer);
+  }, [settings, settingsHydrated, can.persistSettings]);
+
+  useEffect(() => {
+    if (!accountMe?.settings) return;
+    teachingPrefsRef.current = {
+      teachingNote: accountMe.settings.teachingNote,
+      alwaysShowUnits: accountMe.settings.alwaysShowUnits,
+      alwaysStateLawFirst: accountMe.settings.alwaysStateLawFirst,
+    };
+  }, [accountMe]);
+
+  const handleBillingFailure = useCallback((failure: BillingFailure) => {
+    rememberBillingFailure(failure);
+    setLastError({
+      message: studentBillingMessage(failure.code),
+      question: "",
+      billing: failure,
+    });
+  }, [setLastError]);
+  const goUsage = useCallback(() => {
+    router.push("/usage");
+  }, [router]);
+
+  useEffect(() => {
+    // A headless/muted embed stays silent regardless of the student's choice.
+    // Narration itself stays on — there is no student toggle anymore.
+    ttsClientRef.current?.setMuted?.(mutePlayback || !settings.narrationEnabled);
+    if (!settingsHydrated || isHeadless || typeof window === "undefined") {
+      return;
+    }
+    writeStoredSetting(NARRATION_STORAGE_KEY, "1");
+  }, [settings.narrationEnabled, mutePlayback, isHeadless, settingsHydrated]);
+
+  // Keep AudioContext eligible for audible playback after long planning awaits.
+  useEffect(() => {
+    const handler = () => {
+      ttsClientRef.current?.unlockAudio?.();
+    };
+    const events: Array<keyof WindowEventMap> = [
+      "pointerdown",
+      "keydown",
+      "touchstart",
+    ];
+    for (const event of events) {
+      window.addEventListener(event, handler, { passive: true });
+    }
+    return () => {
+      for (const event of events) {
+        window.removeEventListener(event, handler);
+      }
+    };
+  }, []);
+
+  // The lecture player plays over the finished board, so an auto replay still
+  // restores it: a doubt asked after the replay needs the page underneath.
+  const skipInkRestoreRef = useRef(false);
+
+  /*
+    One rule, one place: `markerVisibility.ts` owns the phase-to-cursor-state
+    map and `verify-marker-visibility` holds it to "while the tutor is speaking
+    or drawing, the marker is on the board". It used to be a ternary here, and
+    a ternary is where a branch gets added that hides the pen mid-lesson.
+  */
+  const waitingToTeach = isWaitingToTeach(phase);
+  const cursorState: CursorState = markerCursorState({ phase, isReplaying });
+  const pendingInk = getMarkerColorHex(settings.markerColor);
+
+  const { cancellableDelay, raceWithCancel, clearCancelTimers } = useCancelControl(cancelRef);
+  const boardScrollRef = useRef<HTMLDivElement>(null);
+  const [minimumVisibleFontSize, setMinimumVisibleFontSize] = useState<number | null>(null);
+
+  const {
+    boardContainerRef,
+    boardViewport,
+    boardLayoutRef,
+    notesEpochsRef,
+    narrationSinceEpochRef,
+    forceSequentialWorkLayoutRef,
+    resetBoardLayout,
+    beginBoardEpoch,
+    captureNotesEpoch,
+    forgetErasedTextRects,
+    resolveTextPlacement,
+    reserveTextCommandPlacements,
+  } = useBoardLayout({
+    whiteboardRef,
+    cancelRef,
+    fbdPhaseStartedRef,
+    liveQuestionRef,
+    viewportMode: isHeadless
+      ? "fixed"
+      : readableBoard
+        ? "readable-scroll"
+        : "fit",
+    minimumVisibleFontSize,
+  });
+  const scrollBoard = readableBoard && boardViewport.scrollable !== false;
+  useEffect(() => {
+    // A Sheet owns focus while open; the header returns it on close.
+    if (!compactBoardChrome || mobileNavOpen || settingsOpen) return;
+    const trigger = shortPanelTriggerRef.current;
+    if (!shortPanel) {
+      trigger?.focus();
+      return;
+    }
+    const selector = shortPanel === "header" ? "[data-short-header]" : shortPanel === "composer" ? "[data-short-composer]" : "[data-short-code-panel]";
+    // New/switch can replace the original toggle; the board container stays.
+    const root = boardContainerRef.current?.closest("[data-short-board-chrome]") ?? trigger?.closest("[data-short-board-chrome]");
+    const frame = requestAnimationFrame(() => {
+      const panel = root?.querySelector(selector);
+      (panel?.querySelector(shortPanel === "composer" ? "textarea" : "button:not([disabled]), [contenteditable=true], [tabindex='0']") as HTMLElement | null)?.focus();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [compactBoardChrome, shortPanel, mobileNavOpen, settingsOpen, boardContainerRef]);
+
+  // Adaptive drawing speed: polls audio lag + queue depth + narration density
+  // and pushes a dynamic animation-speed factor to the whiteboard. Pedagogical
+  // pace (follow vs scene) caps catch-up so formulas stay readable.
+  useAdaptiveDrawSpeed({
+    whiteboardRef,
+    ttsClientRef,
+    turnActiveRef,
+    speedRef,
+    pendingSegmentCountRef,
+    narrationDensityRef,
+    inkPaceRef,
+    adaptiveFactorRef,
+  });
+
+  // The code-lesson controller lives outside React state (like the whiteboard
+  // handle) so tutor typing never re-renders the shell per character.
+  const [codeLessonController] = useState(() => new CodeLessonController());
+  const codeLessonControllerRef = useRef<CodeLessonController | null>(codeLessonController);
+  // A lesson's later figures (DIAGRAM_LESSON_FIGURES), one sequence per page.
+  const [lessonFigureSequence] = useState(() => new LessonFigureSequence());
+  const lessonFiguresRef = useRef<LessonFigureSequence | null>(lessonFigureSequence);
+  const codeLessonActive = useSyncExternalStore(
+    listener => codeLessonController.subscribe(listener),
+    () => Boolean(codeLessonController.getActivePlan()),
+    () => false,
+  );
+
+  const { executeCommand, executeCommandWithCancel } = useCommandExecution({
+    whiteboardRef,
+    cancelRef,
+    speedRef,
+    boardLayoutRef,
+    forceSequentialWorkLayoutRef,
+    fbdPhaseMarkedRef,
+    fbdPhaseStartedRef,
+    activeVerifiedDiagramRef,
+    turnTelemetryRef,
+    notesEpochsRef,
+    narrationSinceEpochRef,
+    cancellableDelay,
+    forgetErasedTextRects,
+    resetBoardLayout,
+    resolveTextPlacement,
+    raceWithCancel,
+    inkPaceRef,
+    adaptiveFactorRef,
+    codeLessonControllerRef,
+    lessonFiguresRef,
+    setActiveVerifiedDiagram,
+  });
+
+  const handleRetraceEntity = useCallback((entityId: string) => {
+    void executeCommand(
+      {
+        type: "FOCUS",
+        params: [],
+        text: entityId,
+        charPosition: 0,
+        narrationBefore: "",
+      },
+      { applyLayout: false, inkPace: "follow" },
+    );
+  }, [executeCommand]);
+
+  const {
+    boards,
+    setBoards,
+    boardLoaded,
+    storedTurnsRef,
+    storedTurnsCount,
+    setStoredTurnsCount,
+    conversationHistoryRef,
+    inputInteracted,
+    setInputInteracted,
+    createNewBoard,
+    startNextQuestion,
+    switchBoard,
+    deleteBoard,
+    togglePinBoard,
+    toggleArchiveBoard,
+    toggleVisibilityBoard,
+    renameBoard,
+    commitDraftBoard,
+    ensureTTSClient,
+    registerReplayBlobUrl,
+    revokeUnreferencedReplayBlobUrls,
+    persistTurnForReplay,
+    settleBoardRestore,
+    refreshBoardFromTurns,
+    saveStatus,
+    retrySave,
+    getLiveTurn,
+    hasLiveTurn,
+  } = useBoardSession({
+    sessionId,
+    isDraft,
+    startDraftBoard: onStartDraftBoard,
+    onChooseBoard,
+    router,
+    phase,
+    speedMultiplier: settings.speedMultiplier,
+    muted: mutePlayback || !settings.narrationEnabled,
+    whiteboardRef,
+    cancelRef,
+    notesEpochsRef,
+    narrationSinceEpochRef,
+    liveQuestionRef,
+    captureNotesEpoch,
+    ttsClientRef,
+    voicePreferencesRef,
+    speedRef,
+    stopTurnRef,
+    replayAudioRef,
+    replayAudioPreloadRef,
+    setNarrationText,
+    setCurrentSegmentText,
+    resetBoardLayout,
+    executeCommand,
+    skipInkRestoreRef,
+    codeLessonControllerRef,
+    lessonFiguresRef,
+    activeVerifiedDiagramRef,
+    setActiveVerifiedDiagram,
+    fbdPhaseStartedRef,
+    readBoard,
+    boardLayoutRef,
+  });
+
+  // Page load clock only: the first loaded board of this document. Declared
+  // before the turn hooks so a question queued during load sees it.
+  useEffect(() => {
+    if (boardLoaded) pageLoadTiming.markBoardReady();
+  }, [boardLoaded]);
+
+  const {
+    finishLectureUi,
+    stopTurn,
+    pauseTurn,
+    resumeTurn,
+    handleQuestion,
+    handleAskDoubt,
+    flushPausedLesson,
+    pausedLessonOffer,
+    pausedLessonReason,
+    earlyLessonRestartOffer,
+    earlyLessonRestartReason,
+    restartEarlyLesson,
+    restorePausedLesson,
+  } = useTurnLifecycle({
+    sessionId,
+    isDraft,
+    commitDraftBoard,
+    autoQuestion,
+    replaceAutoQuestionUrl: variant === "full",
+    enableKeyboardControls: variant === "full",
+    onComplete,
+    onError,
+    onSpeechStartupStatus: setSpeechStartupStatus,
+    onVoiceDegraded: setVoiceDegraded,
+    phase,
+    isReplaying,
+    boardLoaded,
+    narrationText,
+    boards,
+    refreshBoardFromTurns,
+    whiteboardRef,
+    pendingQuestionRef,
+    autoSubmitDoneRef,
+    phaseRef,
+    isPausedRef,
+    rewoundRef,
+    conversationHistoryRef,
+    liveQuestionRef,
+    boardPageRef,
+    boardShowsStoppedReplayRef,
+    setLiveTurnKind,
+    ttsClientRef,
+    replayAudioRef,
+    replayDrawClockRef,
+    replayAudioPreloadRef,
+    cancelRef,
+    turnActiveRef,
+    turnGenerationRef,
+    turnAbortRef,
+    segmentChainRef,
+    drawChainRef,
+    collectedSegmentsRef,
+    recordedSegmentsRef,
+    storedTurnsRef,
+    rawResponseRef,
+    currentTraceIdRef,
+    turnTelemetryRef,
+    turnStatsRef,
+    narrationSinceEpochRef,
+    boardLayoutRef,
+    fbdPhaseMarkedRef,
+    fbdPhaseStartedRef,
+    activeVerifiedDiagramRef,
+    setActiveVerifiedDiagram,
+    codeLessonControllerRef,
+    lessonFiguresRef,
+    segmentPlanStatsRef,
+    stopTurnRef,
+    speedRef,
+    fastModeRef,
+    familiarityRef,
+    voicePreferencesRef,
+    pendingVoicePreferencesRef,
+    teachingPrefsRef,
+    pendingSegmentCountRef,
+    narrationDensityRef,
+    replayGenerationRef,
+    replayCueRef,
+    setPhase,
+    setIsPaused,
+    setNarrationText,
+    setCurrentSegmentText,
+    setLastError,
+    setInputInteracted,
+    setLiveQuestion,
+    setIsReplaying,
+    setReplayProgressMs,
+    setReplayTotalMs,
+    setStoredTurnsCount,
+    setBoards,
+    ensureTTSClient,
+    executeCommandWithCancel,
+    cancellableDelay,
+    raceWithCancel,
+    clearCancelTimers,
+    resetBoardLayout,
+    beginBoardEpoch,
+    captureNotesEpoch,
+    reserveTextCommandPlacements,
+    persistTurnForReplay,
+    registerReplayBlobUrl,
+    revokeUnreferencedReplayBlobUrls,
+  });
+
+  // A stopped lesson survives a reload: once the board is restored it is
+  // offered, never continued on its own. Not guarded by isDraft: a fresh board
+  // must be marked restored while empty, or a later Stop's live snapshot would
+  // be replaced by the derived one.
+  useEffect(() => {
+    // Nothing to continue on a board this viewer cannot teach on (Community),
+    // and its refresh reads the owner's API.
+    if (!boardLoaded || !can.askQuestions) return;
+    restorePausedLesson(storedTurnsRef.current);
+  }, [
+    can.askQuestions,
+    boardLoaded,
+    phase,
+    isReplaying,
+    storedTurnsCount,
+    restorePausedLesson,
+    storedTurnsRef,
+  ]);
+
+  // Teach it again on an old board that kept only its title prefills the
+  // composer rather than sending.
+  const [composerPrefill, setComposerPrefill] = useState<{ text: string; nonce: number } | null>(null);
+  const prefillComposer = useCallback(
+    (text: string) => {
+      setInputInteracted(true);
+      setComposerPrefill((previous) => ({
+        text,
+        nonce: (previous?.nonce ?? 0) + 1,
+      }));
+    },
+    [setInputInteracted],
+  );
+  // What the unsaved board notice reads: each stored turn's question and the
+  // steps it taught. The turns ref is read on the count that mirrors it.
+  /* eslint-disable react-hooks/refs, react-hooks/exhaustive-deps -- storedTurnsCount mirrors the ref */
+  const unsavedTurns = useMemo(
+    () =>
+      storedTurnsRef.current.map((turn) => ({
+        question: turn.question,
+        segmentCount: taughtSegmentCount(turn.segments),
+      })),
+    [storedTurnsCount, boardLoaded, sessionId],
+  );
+  // A reopened board whose last lesson was stopped downloads "up to now",
+  // the same rule the export source uses to name the file.
+  const lastTurnUnfinished = useMemo(
+    () => storedTurnIsPartial(storedTurnsRef.current[storedTurnsRef.current.length - 1]),
+    [storedTurnsCount, boardLoaded, sessionId],
+  );
+  /* eslint-enable react-hooks/refs, react-hooks/exhaustive-deps */
+  // The unsaved board notice stands aside once the student picks a way on.
+  const [unsavedNoticeDismissedFor, setUnsavedNoticeDismissedFor] = useState<string | null>(null);
+  const [saveBannerDismissed, setSaveBannerDismissed] = useState(false);
+  if (saveBannerDismissed && saveStatus.kind !== "failed") setSaveBannerDismissed(false);
+
+  const notesEnabled = can.notes;
+  const lectureInProgress = phase !== "idle" && !isReplaying;
+  const lectureRating = useLectureRating({
+    enabled: can.rateLectures,
+    sessionId,
+    owner: cancelRef,
+    lecturing: lectureInProgress,
+    paused: isPaused,
+  });
+  const ratingPrompt = lectureRating.prompt;
+  const ratingElement = (variant: "toast" | "card") =>
+    ratingPrompt ? (
+      <LectureRating
+        key={`${ratingPrompt.turnId}:${ratingPrompt.moment}`}
+        prompt={ratingPrompt}
+        variant={variant}
+        onRate={lectureRating.rate}
+        onHold={lectureRating.hold}
+        onClose={lectureRating.close}
+      />
+    ) : null;
+  const duringRatingToast = ratingPrompt?.moment === "during" ? ratingElement("toast") : null;
+  const afterRatingCard = ratingPrompt?.moment === "after" ? ratingElement("card") : null;
+  /*
+   * These four refs are the live turn buffers: `useTurnControl` pushes a
+   * segment into them for every spoken beat, on the audio-synced path. They
+   * are refs precisely so that a segment arriving does not re-render the
+   * shell — making them state would put a render between the voice and the
+   * ink, which is the sync this board is built to protect.
+   *
+   * Reading them here is therefore deliberate, and safe: the dependency list
+   * below carries a state mirror of each buffer's observable size
+   * (`storedTurnsCount`, `narrationText`, `currentSegmentText`), so the notes
+   * are rebuilt exactly when their contents have changed.
+   */
+  /* eslint-disable react-hooks/refs, react-hooks/exhaustive-deps -- see the note above */
+  const lessonNotes = useMemo(
+    () =>
+      buildLessonNotes({
+        persistedTurns: storedTurnsRef.current,
+        lectureInProgress,
+        live: lectureInProgress
+          ? {
+              question:
+                liveQuestion || storedTurnsRef.current.at(-1)?.question || "",
+              collectedSegments: collectedSegmentsRef.current,
+              recordedSegments: recordedSegmentsRef.current,
+              currentSegmentText,
+              rawResponse: rawResponseRef.current,
+              sceneArtifacts:
+                storedTurnsRef.current.at(-1)?.question === liveQuestion
+                  ? storedTurnsRef.current.at(-1)?.sceneArtifacts
+                  : undefined,
+            }
+          : null,
+      }),
+    [
+      currentSegmentText,
+      lectureInProgress,
+      liveQuestion,
+      narrationText,
+      sessionId,
+      storedTurnsCount,
+    ],
+  );
+  /* eslint-enable react-hooks/refs, react-hooks/exhaustive-deps */
+  const {
+    messages: notesMessages,
+    sending: notesSending,
+    error: notesError,
+    send: sendNotesChat,
+    stop: stopNotesChat,
+  } = useNotesChat(sessionId, notesEnabled);
+
+  // Switching boards is a fresh start: drop the draft question and hand the
+  // notes rail back to the automatic rule. Adjusting state while rendering on
+  // a changed input is the supported pattern; an effect here would render the
+  // previous session's state first and then correct it.
+  const [notesSessionId, setNotesSessionId] = useState(sessionId);
+  if (notesSessionId !== sessionId) {
+    setNotesSessionId(sessionId);
+    setNotesOpenOverride(null);
+    setLiveQuestion("");
+    setLiveTurnKind("lesson");
+    setHeldDoubtMarks([]);
+    setDoubtThinkingAt(null);
+  }
+
+  /*
+    The Ask panel stays tucked until it is asked for. It used to open itself as
+    soon as a lesson started, which took a third of the screen away from the
+    board at exactly the moment the board mattered most, and did it as a slide
+    from the right that the student had not triggered. The pull tab on the
+    right edge is now the only way in on desktop.
+  */
+  const notesOpen = notesOpenProp ?? notesOpenOverride ?? false;
+  const setNotesOpen = (open: boolean): void => {
+    onNotesOpenChange?.(open);
+    if (notesOpenProp === undefined) {
+      setNotesOpenOverride(open);
+    }
+  };
+
+  const toggleNotes = () => {
+    setNotesOpen(!notesOpen);
+  };
+
+  const notesRailOpen = notesEnabled && notesOpen && !isMobile;
+
+  const handleNotesChatSend = useCallback(
+    (message: string) => {
+      const liveTurn = lessonNotes.turns[lessonNotes.turns.length - 1] ?? null;
+      void sendNotesChat(message, liveNotesPayload(liveTurn), lectureInProgress, null);
+    },
+    [lectureInProgress, lessonNotes, sendNotesChat],
+  );
+
+  const {
+    replayLecture,
+    collectNotesSlides,
+    handleReplaySpeedChange: applyReplaySpeed,
+  } = useReplay({
+    whiteboardRef,
+    boardLayoutRef,
+    cancelRef,
+    speedRef,
+    isPausedRef,
+    replayAudioRef,
+    replayDrawClockRef,
+    replayAudioPreloadRef,
+    storedTurnsRef,
+    codeLessonControllerRef,
+    lessonFiguresRef,
+    activeVerifiedDiagramRef,
+    setActiveVerifiedDiagram,
+    fbdPhaseStartedRef,
+    replayGenerationRef,
+    replayCueRef,
+    ttsClientRef,
+    notesEpochsRef,
+    narrationSinceEpochRef,
+    liveQuestionRef,
+    phaseRef,
+    isReplaying,
+    isPaused,
+    isDownloading,
+    replayProgressMs,
+    boards,
+    sessionId,
+    setPhase,
+    setCurrentSegmentText,
+    setNarrationText,
+    setIsPaused,
+    setIsReplaying,
+    setReplayProgressMs,
+    setReplayTotalMs,
+    setSettings,
+    setIsDownloading,
+    cancellableDelay,
+    raceWithCancel,
+    executeCommandWithCancel,
+    executeCommand,
+    resetBoardLayout,
+    finishLectureUi,
+    pauseTurn,
+    resumeTurn,
+    settleBoardRestore,
+  });
+
+  const pauseForRewind = useCallback(() => pauseTurn("rewind"), [pauseTurn]);
+  const {
+    rewindBoardRef,
+    rewindActive,
+    rewindPlaying,
+    rewindSegmentText,
+    rewindCursorState,
+    goLive,
+    haltRewind,
+  } = useLectureRewind({
+    sessionId,
+    boards,
+    phase,
+    phaseRef,
+    isReplaying,
+    storedTurnsRef,
+    recordedSegmentsRef,
+    liveQuestionRef,
+    boardPageRef,
+    speedRef,
+    livePausedRef: isPausedRef,
+    rewoundRef,
+    setSettings,
+    pauseTurn: pauseForRewind,
+    resumeTurn,
+    enableKeyboardControls: variant === "full",
+    enabled: !isHeadless,
+  });
+
+  const {
+    exportBoardRef,
+    exportBoardMounted,
+    isExportingLecture,
+    lectureExportProgress,
+    lectureExportError,
+    canDownloadLecture,
+    lectureFileType,
+    downloadLectureMp4,
+    cancelLectureExport,
+    downloadState,
+    downloadVideo,
+    downloadNotesPdf,
+    cancelDownload,
+    dismissDownload,
+    canDownloadNotes,
+  } = useLectureExport({
+    storedTurnsRef,
+    storedTurnsCount,
+    phase,
+    isReplaying,
+    sessionId,
+    enabled: !isHeadless,
+    lectureFileType: settings.lectureFileType,
+    // Downloads cover the lesson from its start to now, the live or stopped
+    // turn included.
+    getLiveTurn,
+    hasLiveTurn,
+    collectNotesSlides,
+    title: boards.find((board) => board.id === sessionId)?.title ?? "",
+  });
+
+  /*
+    The playback bar is for a lecture that is over and fully recorded: nothing
+    teaching, no rewind, no in-place replay, and a voice file for every spoken
+    step. The turns ref is read on the count that mirrors it.
+  */
+  /* eslint-disable react-hooks/refs, react-hooks/exhaustive-deps -- storedTurnsCount mirrors the ref */
+  const lecturePlayerAvailable = useMemo(
+    () =>
+      lecturePlayback &&
+      boardLoaded &&
+      canPlayFinishedLecture({
+        isHeadless,
+        phase,
+        lectureActive: isReplaying || rewindActive,
+        storedTurns: storedTurnsRef.current,
+      }),
+    [
+      boardLoaded,
+      isHeadless,
+      isReplaying,
+      lecturePlayback,
+      phase,
+      rewindActive,
+      sessionId,
+      storedTurnsCount,
+    ],
+  );
+  /* eslint-enable react-hooks/refs, react-hooks/exhaustive-deps */
+  const lecturePlayerRate = playbackRate ?? settings.speedMultiplier;
+  const handleLecturePlayerRate = useCallback(
+    (rate: number) => {
+      if (speedIsControlled) {
+        onPlaybackRateChange?.(rate);
+        return;
+      }
+      applyReplaySpeed(rate);
+    },
+    [applyReplaySpeed, onPlaybackRateChange, speedIsControlled],
+  );
+  const lecturePlayer = useLecturePlayer({
+    sessionId,
+    storedTurnsRef,
+    storedTurnsCount,
+    available: lecturePlayerAvailable,
+    rate: lecturePlayerRate,
+    onRateChange: handleLecturePlayerRate,
+    enableKeyboard: !isHeadless,
+  });
+  const lecturePlayerActive = lecturePlayer.active;
+  const readingPlayer = lecturePlayer.active && lecturePlayer.revealed;
+  useBoardReading({
+    enabled: readableBoard,
+    follow: scrollBoard && (lecturePlayer.active
+      ? readingPlayer && lecturePlayer.playing
+      : rewindActive ? rewindPlaying : !isPaused && (phase === "drawing" || phase === "speaking")),
+    boardRef: readingPlayer ? lecturePlayer.playerBoardRef : rewindActive ? rewindBoardRef : whiteboardRef,
+    paneRef: boardScrollRef,
+    scale: boardViewport.scale,
+    scope: `${sessionId}:${liveQuestion}`,
+    diagram: activeVerifiedDiagram,
+    onMinimumFontSize: setMinimumVisibleFontSize,
+  });
+  const dockCaption = isMobile || shortScreen || compactBoardChrome;
+  const caption = sessionCaption({
+    enabled: settings.subtitlesEnabled || codeLessonActive,
+    phase,
+    currentSegmentText,
+    rewindActive,
+    rewindSegmentText,
+    playerView: lecturePlayer.view,
+    voiceDegraded,
+  });
+  const captionShowing = caption.visible && caption.text.length > 0;
+  // Once a sentence has been taught silently, keep the docked caption space
+  // for the rest of this board: the voice coming back, going idle and the
+  // next turn must not refit the board, so a failure costs one refit at most.
+  // The shell is not remounted for a new board, so the reservation is keyed by
+  // board id and a new board starts unreserved.
+  const [silentCaptionBoard, setSilentCaptionBoard] = useState<string | null>(null);
+  if (caption.notice && silentCaptionBoard !== sessionId) setSilentCaptionBoard(sessionId);
+  const silentCaptionShown = silentCaptionBoard === sessionId;
+  // A new sentence opens at its first word, whatever the last one was scrolled to.
+  const captionRegionRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const region = captionRegionRef.current;
+    if (region) region.scrollTop = 0;
+  }, [caption.text]);
+  const showDockedPlayer =
+    (dockLecturePlayer ||
+      compactBoardChrome ||
+      lecturePlayer.reviewingStoredPage) &&
+    (lecturePlayerAvailable || lecturePlayerActive);
+  const closeLecturePlayer = lecturePlayer.close;
+  const playLectureFromStart = lecturePlayer.playFromStart;
+  /** Replay prefers the player; a lecture missing some audio replays in place. */
+  const startLectureReplay = useCallback((): boolean => {
+    if (lecturePlayerAvailable && playLectureFromStart()) return true;
+    return replayLecture();
+  }, [lecturePlayerAvailable, playLectureFromStart, replayLecture]);
+
+  /**
+   * The lesson chrome's pause button while rewound means "take me back to the
+   * lecture" — the live turn cannot resume under a board showing the past.
+   */
+  const handleLessonPauseToggle = useCallback((source: "control" | "doubt-composer" = "control") => {
+    if (rewindActive) {
+      goLive();
+      return;
+    }
+    if (isPaused) {
+      resumeTurn();
+    } else {
+      pauseTurn(source);
+    }
+  }, [rewindActive, goLive, isPaused, resumeTurn, pauseTurn]);
+
+  /**
+   * Mark & Ask.
+   *
+   * A student who did not follow a step points at it. The marker is offered
+   * once there is something on the board to point at, and picking it up quiets
+   * the tutor — a doubt is composed in silence, not over the voice.
+   *
+   * The marks resolve to exact board lines and figure entities, so the doubt
+   * turn is asked about content the board really holds. See `lib/board/boardMarking`.
+   */
+  const boardHasContent =
+    // "planning" and "thinking" are a blank or clearing board: offering the
+    // marker there lets a student ring empty paper and get a region back.
+    phase === "drawing" ||
+    phase === "speaking" ||
+    storedTurnsCount > 0 ||
+    narrationText.trim().length > 0;
+  const canMark = can.marking && boardLoaded && !rewindActive && boardHasContent;
+
+  const quietTutorForMarking = useCallback(() => {
+    // Marks resolve against the finished page, so the past comes down first.
+    closeLecturePlayer();
+    if (!rewindActive && !isPausedRef.current && phaseRef.current !== "idle") {
+      pauseTurn("marking");
+    }
+  }, [closeLecturePlayer, pauseTurn, rewindActive]);
+
+  const marking = useBoardMarking({
+    boardLayoutRef,
+    verifiedDiagram: activeVerifiedDiagram,
+    enabled: canMark,
+    onArm: quietTutorForMarking,
+  });
+
+  /**
+   * A marked doubt is already a complete, board-grounded question, so it is
+   * handed to the turn whole rather than being wrapped a second time. With no
+   * marks this is the plain doubt path, unchanged.
+   */
+  /** The doubt last asked: a retry asks it again, under its title, from its place. */
+  const lastDoubtRef = useRef<{ typed: string; title: string; at: { x: number; y: number } } | null>(
+    null,
+  );
+  const submitDoubt = useCallback(
+    (doubt: string) => {
+      const marks = marking.marks;
+      // The page stays up while the tutor thinks, so the wait is shown on it:
+      // the student's rings stay where they drew them and a small clicker sits
+      // beside them, or at the row the answer starts on when nothing was marked.
+      const at = doubtThinkingAnchor(marks, boardLayoutRef.current, fbdPhaseStartedRef.current);
+      const title = doubtTurnTitle(doubt, summarizeMarks(marks));
+      lastDoubtRef.current = { typed: doubt, title, at };
+      setHeldDoubtMarks(marks);
+      setDoubtThinkingAt(at);
+      if (marks.length === 0) {
+        marking.disarm();
+        handleAskDoubt(doubt, { title });
+        return;
+      }
+      const prompt = buildMarkedDoubtPrompt(marks, doubt, liveQuestionRef.current);
+      marking.disarm();
+      handleAskDoubt(doubt, { prompt, title, markedFigureIds: markedEntityIds(marks) });
+    },
+    [boardLayoutRef, handleAskDoubt, marking],
+  );
+
+  // The rings are what the tutor is thinking about. They go when the answer
+  // starts, the tutor's own ink taking over from them, or when the doubt ends
+  // without one.
+  const doubtWaitSeenRef = useRef(false);
+  useEffect(() => {
+    if (heldDoubtMarks.length === 0 && doubtThinkingAt === null) return;
+    if (phase === "planning" || phase === "thinking") {
+      doubtWaitSeenRef.current = true;
+      return;
+    }
+    const answerStarted = phase === "speaking" || phase === "drawing";
+    const doubtEnded = phase === "idle" && (doubtWaitSeenRef.current || lastError !== null);
+    if (answerStarted || doubtEnded) {
+      doubtWaitSeenRef.current = false;
+      setHeldDoubtMarks([]);
+      setDoubtThinkingAt(null);
+    }
+  }, [doubtThinkingAt, heldDoubtMarks.length, lastError, phase]);
+
+  /** While the tutor thinks, the board keeps showing the rings the doubt was asked with. */
+  const boardMarking = useMemo(
+    () =>
+      marking.armed || heldDoubtMarks.length === 0
+        ? marking
+        : { ...marking, marks: heldDoubtMarks },
+    [heldDoubtMarks, marking],
+  );
+
+  /** A new question replaces the board the marks were about. */
+  const submitQuestionAndDropMarks = useCallback(
+    (question: string) => {
+      ensureTTSClient().unlockAudio?.();
+      marking.disarm();
+      if (storedTurnsCount > 0) {
+        startNextQuestion(question);
+        return;
+      }
+      return new Promise<boolean>((resolve) => {
+        void handleQuestion(question, { onAdmission: resolve }).catch(() => resolve(false));
+      });
+    },
+    [
+      ensureTTSClient,
+      handleQuestion,
+      marking,
+      startNextQuestion,
+      storedTurnsCount,
+    ],
+  );
+
+  useEffect(() => {
+    syncControlledPlaybackRate(playbackRate, speedRef.current, applyReplaySpeed);
+  }, [playbackRate, applyReplaySpeed]);
+
+  const autoReplayStartedRef = useRef(false);
+  useEffect(() => {
+    autoReplayStartedRef.current = false;
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (!autoReplay) {
+      autoReplayStartedRef.current = false;
+    }
+  }, [autoReplay]);
+
+  useEffect(() => {
+    if (
+      !canStartStoredLectureReplay({
+        autoReplay,
+        isHeadless,
+        boardLoaded,
+        storedTurnsCount,
+        isReplaying,
+        alreadyStarted: autoReplayStartedRef.current,
+        viewportMeasured: boardViewport.measured,
+      })
+    ) {
+      return;
+    }
+    if (!startLectureReplay()) {
+      return;
+    }
+    autoReplayStartedRef.current = true;
+  }, [
+    autoReplay,
+    isHeadless,
+    boardLoaded,
+    storedTurnsCount,
+    isReplaying,
+    startLectureReplay,
+    storedTurnsRef,
+    boardViewport.measured,
+    boardViewport.scale,
+  ]);
+
+  const stopTurnOnUnmountRef = useRef(stopTurn);
+  useEffect(() => {
+    stopTurnOnUnmountRef.current = stopTurn;
+  }, [stopTurn]);
+  useEffect(() => {
+    return () => {
+      stopTurnOnUnmountRef.current();
+    };
+  }, []);
+
+  const haltLecturePlayer = lecturePlayer.halt;
+  useLecturePageHalt(() => {
+    stopTurnOnUnmountRef.current();
+    ttsClientRef.current?.stop();
+    haltRewind();
+    haltLecturePlayer();
+  });
+
+  /**
+   * The chrome over a full screen board.
+   *
+   * It withdraws only while something is actually running and the student has
+   * been still, the way a player's controls do. Anything the student is part
+   * way through pins it: a paused lecture, an armed marker, an error to answer,
+   * an open panel. An idle board never hides it at all, because an idle board
+   * is one waiting to be asked the next question and the composer is the
+   * answer to that.
+   */
+  const chromeInteractionPinned =
+    isPaused ||
+    rewindActive ||
+    marking.armed ||
+    marking.marks.length > 0 ||
+    pausedLessonOffer ||
+    earlyLessonRestartOffer ||
+    Boolean(lastError) ||
+    downloadState.kind !== "idle" ||
+    settingsOpen ||
+    creditsOpen ||
+    mobileNavOpen ||
+    notesOpen;
+  const chromePinned = chromeInteractionPinned || saveStatus.kind === "failed";
+  const chromeHidden = useSessionChromeHidden({
+    fullscreen: boardFullscreen,
+    live: phase !== "idle" || isReplaying || lecturePlayer.playing,
+    pinned: chromePinned,
+  });
+  // The docked transport is the chrome for a finished phone lecture in full
+  // screen. Keep the composer mounted, but clear it and the header from the
+  // paper and transport; the transport's own exit restores both.
+  const fullscreenFinishedTransport = boardFullscreen && showDockedPlayer && phase === "idle" && !isReplaying;
+  const fullscreenTransportOnly = fullscreenFinishedTransport && !chromePinned;
+  // A save warning needs the header's retry action, but does not need the
+  // composer over the transport. Other interactions keep their existing chrome.
+  const fullscreenComposerHidden = fullscreenFinishedTransport && !chromeInteractionPinned;
+
+  // `f` takes the board full screen and gives it back, the way a player binds
+  // it. Escape is left to whoever already owns it here, which is the lesson.
+  useEffect(() => {
+    if (isHeadless || boardFullscreenApi || !can.appChrome) return undefined;
+    const onKeyDown = (event: KeyboardEvent) => {
+      const action = fullscreenKeyAction({
+        key: event.key,
+        withModifier: event.ctrlKey || event.metaKey || event.altKey,
+        typing: isTypingElement(document.activeElement),
+        fullscreen: fullscreen.active,
+        mode: fullscreen.mode,
+        dialogOpen: Boolean(document.querySelector('[role="dialog"][data-state="open"]')),
+        lessonOwnsEscape: phaseRef.current !== "idle" || isReplaying || rewindActive,
+      });
+      if (!action) return;
+      event.preventDefault();
+      if (action === "exit") {
+        fullscreen.exit();
+        return;
+      }
+      fullscreen.toggle();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [
+    boardFullscreenApi,
+    can.appChrome,
+    fullscreen,
+    isHeadless,
+    isReplaying,
+    rewindActive,
+  ]);
+
+  const canReplay =
+    phase === "idle" &&
+    storedTurnsCount > 0 &&
+    !isReplaying &&
+    !isExportingLecture;
+  useEffect(() => {
+    if (!onExportApi) {
+      return;
+    }
+    onExportApi({
+      canReplay,
+      canDownload: canDownloadNotes,
+      canDownloadLecture,
+      downloadState,
+      dismissDownload,
+      lectureFileType,
+      isReplaying: isReplaying || lecturePlayerActive,
+      isDownloading,
+      isExportingLecture,
+      lectureExportProgress,
+      lectureExportError,
+      replayLecture: startLectureReplay,
+      collectNotesSlides,
+      boardReady: boardLoaded,
+      hasSavedTurns: storedTurnsCount > 0,
+      downloadNotesPdf,
+      downloadLectureMp4,
+      cancelLectureExport,
+    });
+  }, [
+    onExportApi,
+    canReplay,
+    canDownloadNotes,
+    canDownloadLecture,
+    downloadState,
+    dismissDownload,
+    lectureFileType,
+    isReplaying,
+    lecturePlayerActive,
+    isDownloading,
+    isExportingLecture,
+    lectureExportProgress,
+    lectureExportError,
+    startLectureReplay,
+    collectNotesSlides,
+    boardLoaded,
+    storedTurnsCount,
+    downloadNotesPdf,
+    downloadLectureMp4,
+    cancelLectureExport,
+  ]);
+  useEffect(() => {
+    return () => onExportApi?.(null);
+  }, [onExportApi]);
+
+  const audioRecovery = speechRecoveryStatus(speechStartupStatus, {
+    phase,
+    // Phase/status state drive renders; this identity check only rejects a stale callback.
+    // eslint-disable-next-line react-hooks/refs
+    turnGeneration: turnGenerationRef.current,
+    muted: mutePlayback || !settings.narrationEnabled,
+    rewindActive,
+    isReplaying,
+  });
+  const showPendingOrRecovery = !rewindActive && (waitingToTeach || audioRecovery !== null);
+  // A phone board scrolls inside its pane. A held beat's recovery card must
+  // stay in the visible pane, not at the corner of the scrolled board.
+  const recoveryOutsideBoard = scrollBoard && showPendingOrRecovery && (audioRecovery !== null || isPaused);
+
+  const thumbnailPublishable = useCallback(
+    () => storedTurnsRef.current.every((turn) => (turn.persistedStatus ?? turn.status ?? "complete") !== "live"),
+    [storedTurnsRef],
+  );
+  useBoardThumbnail({
+    enabled:
+      variant === "full" &&
+      !isDraft &&
+      boardLoaded &&
+      phase === "idle" &&
+      !isReplaying &&
+      !rewindActive &&
+      boards.find((board) => board.id === sessionId)?.visibility === "public",
+    boardId: sessionId,
+    turnCount: storedTurnsCount,
+    whiteboardRef,
+    publishable: thumbnailPublishable,
+  });
+
+  if (isHeadless) {
+    return (
+      <div
+        ref={boardContainerRef}
+        data-tutor-session="headless"
+        style={{
+          position: "relative",
+          width: BOARD_WIDTH,
+          height: BOARD_HEIGHT,
+          flexShrink: 0,
+        }}
+      >
+        <Whiteboard
+          ref={whiteboardRef}
+          width={BOARD_WIDTH}
+          height={BOARD_HEIGHT}
+          cursorState={cursorState}
+          inkColor={getMarkerColorHex(settings.markerColor)}
+          pencilColor={getMarkerColorHex(settings.pencilColor)}
+          markerThickness={settings.markerThickness}
+          pencilThickness={settings.pencilThickness}
+          markerStunts={settings.markerStunts}
+        />
+        {showPendingOrRecovery && (
+          <ThinkingOverlay
+            ink={pendingInk}
+            paused={isPaused}
+            onResume={resumeTurn}
+            onEnableAudio={!isPaused ? audioRecovery?.enableAudio : null}
+            preserveBoard={!waitingToTeach}
+            muted={mutePlayback || !settings.narrationEnabled}
+            onBoardAt={
+              liveTurnKind === "lesson"
+                ? null
+                : (doubtThinkingAt ?? DOUBT_THINKING_FALLBACK)
+            }
+          />
+        )}
+      </div>
+    );
+  }
+
+  const activeBoard = boards.find((b) => b.id === sessionId);
+  const activeBoardTitle = activeBoard?.title ?? "";
+  const isInputOverlay = can.appChrome && phase === "idle" && boardLoaded && !inputInteracted;
+  const inputSubmitMode = pausedLessonOffer
+    ? "follow-up"
+    : lessonFollowUpMode(storedTurnsCount > 0);
+
+  const billingNotice = lastError?.billing ?? null;
+
+  const inputChrome = (
+    <SessionInputChrome
+      isInputOverlay={isInputOverlay}
+      phase={phase}
+      isPaused={isPaused}
+      inputSubmitMode={inputSubmitMode}
+      pageQuestion={readPageQuestion}
+      onSubmit={submitQuestionAndDropMarks}
+      onAskDoubt={submitDoubt}
+      onPauseToggle={handleLessonPauseToggle}
+      onCancel={stopTurn}
+      onUserInteractionChange={setInputInteracted}
+      onOpenSettings={() => setSettingsOpen(true)}
+      compact={isMobile}
+      familiarity={settings.familiarity}
+      onFamiliarityChange={(familiarity) => setSettings((c) => ({ ...c, familiarity }))}
+      canMark={canMark}
+      markingArmed={marking.armed}
+      marks={marking.marks}
+      atMarkLimit={marking.atMarkLimit}
+      onToggleMarking={marking.toggle}
+      onRemoveMark={marking.remove}
+      onClearMarks={marking.clear}
+      onDisarmMarking={marking.disarm}
+      pausedLessonOffer={pausedLessonOffer}
+      pausedLessonReason={pausedLessonReason}
+      earlyLessonRestartOffer={earlyLessonRestartOffer}
+      earlyLessonRestartReason={earlyLessonRestartReason}
+      onRestartEarlyLesson={restartEarlyLesson}
+      prefill={composerPrefill}
+      onContinueLecture={flushPausedLesson}
+      lectureRating={afterRatingCard}
+      billingNotice={billingNotice}
+      onUpgrade={goUsage}
+      onBillingFailure={handleBillingFailure}
+    />
+  );
+
+  // A board whose lesson never saved says so, with its question, instead of
+  // posing as the home page. Not tied to the input overlay: a lesson that died
+  // before its first step restores as a stored turn, which turns that off.
+  const unsavedBoard =
+    can.appChrome &&
+    phase === "idle" &&
+    !isReplaying &&
+    unsavedNoticeDismissedFor !== sessionId
+      ? unsavedLessonBoard({
+          isDraft,
+          boardLoaded,
+          title: activeBoardTitle,
+          preview: activeBoard?.preview ?? "",
+          turns: unsavedTurns,
+        })
+      : null;
+  const showEmptyLanding = isInputOverlay && storedTurnsCount === 0 && !unsavedBoard;
+  const fullBleedLanding = showEmptyLanding;
+  const boardCovered = fullBleedLanding || Boolean(unsavedBoard);
+
+  /*
+    What sits on the deck between the board and the transport.
+
+    Below `md` the board scales under ~0.6 and code inside the frame stops
+    being readable, so a DSA lesson moves its panel out of the board and onto
+    the deck, where it renders at natural scale. Desktop resolves to null and
+    the slot collapses, so it costs nothing there.
+
+    An explicit `belowBoardPanel` wins: the prop is the caller's override, and
+    this is only the default for the one surface that cannot be passed in from
+    outside because `codeLessonController` lives in here.
+  */
+  const deckPanel =
+    belowBoardPanel ??
+    ((isMobile || compactBoardChrome) &&
+    codeLessonActive ? (
+      <CodeLessonPanel controller={codeLessonController} variant="below" />
+    ) : null);
+
+  const shortChromeControls = compactBoardChrome ? (
+    <>
+      <button
+        type="button"
+        aria-label="Board controls"
+        aria-expanded={shortPanel === "header"}
+        onClick={event => { shortPanelTriggerRef.current = event.currentTarget; setShortPanel(shortPanel === "header" ? null : "header"); }}
+        className="btn-plain h-11 w-11 shrink-0 rounded-lg"
+        title="Board controls"
+      >
+        ☰
+      </button>
+      {can.askQuestions && !isInputOverlay ? (
+        <button
+          type="button"
+          aria-label="Question composer"
+          aria-expanded={shortPanel === "composer"}
+          onClick={event => { shortPanelTriggerRef.current = event.currentTarget; setShortPanel(shortPanel === "composer" ? null : "composer"); }}
+          className="btn-plain h-11 w-11 shrink-0 rounded-lg"
+          title="Question composer"
+        >
+          ?
+        </button>
+      ) : null}
+      {deckPanel ? (
+        <button
+          type="button"
+          aria-label="Code panel"
+          aria-expanded={shortPanel === "code"}
+          onClick={event => { shortPanelTriggerRef.current = event.currentTarget; setShortPanel(shortPanel === "code" ? null : "code"); }}
+          className="btn-plain h-11 w-11 shrink-0 rounded-lg"
+          title="Code panel"
+        >
+          {"{}"}
+        </button>
+      ) : null}
+    </>
+  ) : null;
+  const retryBoardError = (question: string) => {
+    setLastError(null);
+    if (isDoubtPrompt(question)) {
+      const last = lastDoubtRef.current;
+      if (last) setDoubtThinkingAt(last.at);
+      handleAskDoubt(last?.typed ?? "", {
+        prompt: question,
+        title: last?.title,
+      });
+      return;
+    }
+    void handleQuestion(question);
+  };
+
+  const sessionBody = (
+    <>
+      {notesRailOpen ? (
+        <div
+          className="flex"
+          style={{
+            position: "fixed",
+            right: 0,
+            top: 0,
+            // Above a host overlay when there is one: admin Watch is a fixed
+            // drawer of its own, and a rail below it would open behind it.
+            zIndex: frameless ? 70 : 40,
+            width: NOTES_CHAT_RAIL_WIDTH,
+            height: "100dvh",
+            borderLeft: "1px solid rgba(255, 255, 255, 0.08)",
+          }}
+        >
+          <NotesChatSidebar
+            notes={lessonNotes}
+            messages={notesMessages}
+            sending={notesSending}
+            error={notesError}
+            onClose={toggleNotes}
+            onSend={handleNotesChatSend}
+            onStop={stopNotesChat}
+          />
+        </div>
+      ) : null}
+
+      {/* The Ask panel's edge tab is page chrome. Over a full screen board the
+          header's own Ask button is the way in, so the tab stays off the
+          paper's right edge. */}
+      {notesEnabled && !isMobile && !notesRailOpen && !boardFullscreen ? (
+        <button
+          type="button"
+          onClick={toggleNotes}
+          className="wb-notes-pull"
+          style={frameless ? { zIndex: 69 } : undefined}
+          aria-label="Open the Ask panel"
+          aria-expanded={false}
+          title="Ask me anything about this lesson"
+        >
+          <span className="wb-notes-pull__grip" aria-hidden />
+        </button>
+      ) : null}
+
+      {notesEnabled ? (
+        <Sheet open={isMobile && notesOpen} onOpenChange={(open) => {
+          setNotesOpen(open);
+        }}>
+          <SheetContent
+            side="right"
+            className="w-[min(100%,380px)] border-l border-stroke p-0 sm:max-w-[380px]"
+          >
+            <SheetTitle className="sr-only">Ask me anything</SheetTitle>
+            <NotesChatSidebar
+              notes={lessonNotes}
+              messages={notesMessages}
+              sending={notesSending}
+              error={notesError}
+              onSend={handleNotesChatSend}
+              onStop={stopNotesChat}
+            />
+          </SheetContent>
+        </Sheet>
+      ) : null}
+
+      <div
+        className={`relative z-10 flex min-h-0 min-w-0 flex-1 flex-col ${
+          boardFullscreen ? "wb-board-immersive " : ""
+        }${
+          frameless
+            ? "h-full md:mr-[var(--tutor-notes-width)]"
+            : "md:mr-[var(--tutor-notes-width)]"
+        }`}
+        data-chrome-hidden={boardFullscreen && chromeHidden ? "true" : undefined}
+        data-short-board-chrome={compactBoardChrome ? "true" : undefined}
+        onKeyDown={(event) => {
+          if (compactBoardChrome && event.key === "Escape" && shortPanel) {
+            event.stopPropagation();
+            setShortPanel(null);
+          }
+        }}
+        style={{
+          ["--tutor-notes-width" as string]: notesRailOpen
+            ? `${NOTES_CHAT_RAIL_WIDTH}px`
+            : "0px",
+          // Full screen gives the page gutters back to the paper. The safe
+          // areas stay: a phone held sideways puts the notch on one of them.
+          paddingLeft: boardFullscreen
+            ? "env(safe-area-inset-left)"
+            : `max(${isMobile ? 6 : PAGE_GUTTER_X}px, env(safe-area-inset-left))`,
+          paddingRight: boardFullscreen
+            ? "env(safe-area-inset-right)"
+            : `max(${isMobile ? 6 : PAGE_GUTTER_X}px, env(safe-area-inset-right))`,
+          paddingTop: boardFullscreen
+            ? "env(safe-area-inset-top)"
+            : `max(${isMobile || compactBoardChrome ? 6 : 12}px, env(safe-area-inset-top))`,
+          paddingBottom: keyboardInset > 0
+            ? `${keyboardInset}px`
+            : boardFullscreen
+              ? "env(safe-area-inset-bottom)"
+              : `max(${isMobile ? 8 : 12}px, env(safe-area-inset-bottom))`,
+          transition: sidebarResizing
+            ? "none"
+            : "margin-left 0.25s cubic-bezier(0.16, 1, 0.3, 1), margin-right 0.25s cubic-bezier(0.16, 1, 0.3, 1)",
+        }}
+      >
+        {can.appChrome ? (
+          <div
+            data-short-header
+            inert={(compactBoardChrome && (shortPanel !== "header" || mobileNavOpen)) || undefined}
+            aria-hidden={
+              (compactBoardChrome && (shortPanel !== "header" || mobileNavOpen)) || undefined
+            }
+            style={
+              compactBoardChrome
+                ? {
+                    position: "absolute",
+                    top: 6,
+                    left: 6,
+                    right: 6,
+                    zIndex: 60,
+                    maxHeight: "calc(100% - 56px)",
+                    overflowY: "auto",
+                    display: shortPanel === "header" && !mobileNavOpen ? "block" : "none",
+                  }
+                : { display: "contents" }
+            }
+          >
+            <SessionHeader
+            // Full screen is a board, not a page: the boards rail is gone and
+            // the way back to it is the way out of full screen.
+            showNavButton={!boardFullscreen}
+            navButtonClassName={sidebarCollapsed || compactBoardChrome ? undefined : "md:hidden"}
+            onExpandSidebar={() => {
+              if (isMobile || compactBoardChrome) {
+                setMobileNavOpen(true);
+                return;
+              }
+              setSidebarCollapsed(false);
+            }}
+            boardTitle={activeBoardTitle}
+            boardStatus={unsavedBoard ? "unsaved" : undefined}
+            saveStatus={saveStatus}
+            onRetrySave={retrySave}
+            canReplay={canReplay}
+            downloadState={downloadState}
+            canDownloadPdf={canDownloadNotes}
+            canDownloadVideo={canDownloadLecture}
+            downloadPartial={phase !== "idle" || hasLiveTurn || lastTurnUnfinished}
+            onDownloadPdf={downloadNotesPdf}
+            onDownloadVideo={downloadVideo}
+            onCancelDownload={cancelDownload}
+            onDismissDownload={dismissDownload}
+            lectureFileType={lectureFileType}
+            isReplaying={isReplaying}
+            phase={phase}
+            compactActions={isCompactNav}
+            notesOpen={notesOpen}
+            showNotesToggle={notesEnabled}
+            onToggleNotes={toggleNotes}
+            overlay={boardFullscreen}
+            chromeHidden={chromeHidden || fullscreenTransportOnly}
+            chromeInert={fullscreenTransportOnly}
+            isFullscreen={boardFullscreen}
+            onToggleFullscreen={fullscreen.toggle}
+            onReplay={startLectureReplay}
+            onStop={stopTurn}
+          />
+          </div>
+        ) : null}
+
+        <main className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+          <div
+            ref={boardContainerRef}
+            className="relative flex min-h-0 min-w-0 flex-1 items-center justify-center overflow-hidden [isolation:isolate]"
+            style={{
+              marginTop:
+                boardFullscreen || compactBoardChrome ? 0 : PAGE_GUTTER_Y,
+            }}
+          >
+            {fullBleedLanding && (
+              <div
+                role={compactBoardChrome ? "region" : undefined}
+                aria-label={compactBoardChrome ? "New lesson" : undefined}
+                tabIndex={compactBoardChrome ? 0 : undefined}
+                className={`glass-deep absolute inset-0 z-20 flex flex-col rounded-2xl ${compactBoardChrome ? "overflow-x-hidden overflow-y-auto" : "overflow-hidden"}`}
+              >
+                <LandingPixelField />
+                <div className="relative z-10 flex min-h-full w-full flex-col [justify-content:safe_center] px-3 py-3 sm:px-8 sm:py-5">
+                  <CanvasLanding
+                    suggestions={
+                      accountMe?.settings.showHomeSuggestions === false
+                        ? []
+                        : (homeSuggestions ??
+                          suggestionsForSubjects(parseSubjects(accountMe?.profile?.subjects)))
+                    }
+                    onRefreshSuggestions={
+                      accountMe?.settings.showHomeSuggestions === false
+                        ? undefined
+                        : () => loadHomeSuggestions(undefined, true)
+                    }
+                    onSubmit={submitQuestionAndDropMarks}
+                    onOpenSettings={() => setSettingsOpen(true)}
+                    familiarity={settings.familiarity}
+                    onFamiliarityChange={(familiarity) =>
+                      setSettings((c) => ({ ...c, familiarity }))
+                    }
+                    greeting={
+                      accountMe?.profile
+                        ? `What are you stuck on, ${firstName(accountMe.profile.name, accountMe.profile.email)}?`
+                        : undefined
+                    }
+                    goalLabel={
+                      accountMe?.profile
+                        ? profileSubtitle(accountMe.profile)
+                        : null
+                    }
+                    billingNotice={billingNotice}
+                    onUpgrade={goUsage}
+                    onBillingFailure={handleBillingFailure}
+                  />
+                </div>
+                <CanvasLandingDoodles />
+              </div>
+            )}
+
+            {unsavedBoard && (
+              <div className="glass-deep absolute inset-0 z-20 flex flex-col items-center justify-center overflow-hidden rounded-2xl">
+                <UnsavedBoardNotice
+                  question={unsavedBoard.question}
+                  title={unsavedBoard.title}
+                  onTeachAgain={(text, { exact }) => {
+                    setUnsavedNoticeDismissedFor(sessionId);
+                    if (exact) {
+                      void handleQuestion(text);
+                      return;
+                    }
+                    prefillComposer(text);
+                  }}
+                  onAskSomethingElse={() => {
+                    setUnsavedNoticeDismissedFor(sessionId);
+                    setInputInteracted(true);
+                    requestAnimationFrame(() => focusQuestionField());
+                  }}
+                />
+              </div>
+            )}
+
+            <div
+              className={`wb-stage flex min-h-0 flex-col items-center ${scrollBoard ? "w-full min-w-0" : showDockedPlayer ? "w-full" : ""} ${
+                boardCovered ? "pointer-events-none invisible absolute" : recoveryOutsideBoard ? "relative" : ""
+              }`}
+              aria-hidden={boardCovered || undefined}
+              style={{
+                ["--board-w" as string]: `${BOARD_WIDTH * boardViewport.scale}px`,
+                ["--board-h" as string]: `${BOARD_HEIGHT * boardViewport.scale}px`,
+                ...(scrollBoard ? { height: "100%" } : {}),
+              }}
+            >
+              <div
+                ref={boardScrollRef}
+                data-board-scroll={scrollBoard ? "true" : undefined}
+                role={scrollBoard ? "region" : undefined}
+                aria-label={
+                  scrollBoard
+                    ? "Whiteboard. Scroll to read all saved work."
+                    : undefined
+                }
+                tabIndex={scrollBoard ? 0 : undefined}
+                onKeyDown={
+                  scrollBoard
+                    ? (event) => {
+                        if (event.target !== event.currentTarget) return;
+                        const pane = event.currentTarget;
+                        const page = Math.max(40, pane.clientHeight - 32);
+                        const movement = {
+                          ArrowDown: [0, 40],
+                          ArrowUp: [0, -40],
+                          ArrowLeft: [-40, 0],
+                          ArrowRight: [40, 0],
+                          PageDown: [0, page],
+                          PageUp: [0, -page],
+                        }[event.key];
+                        if (
+                          !movement &&
+                          event.key !== "Home" &&
+                          event.key !== "End"
+                        )
+                          return;
+                        event.preventDefault();
+                        event.stopPropagation();
+                        if (movement)
+                          pane.scrollBy({
+                            left: movement[0],
+                            top: movement[1],
+                          });
+                        else
+                          pane.scrollTo({
+                            left: event.key === "Home" ? 0 : pane.scrollWidth,
+                            top: event.key === "Home" ? 0 : pane.scrollHeight,
+                          });
+                      }
+                    : undefined
+                }
+                style={
+                  scrollBoard
+                    ? {
+                        width: "100%",
+                        minHeight: 0,
+                        flex: "1 1 0",
+                        overflowX: "auto",
+                        overflowY: "auto",
+                        overscrollBehavior: "contain",
+                        display: "flex",
+                        flexDirection: "column",
+                        alignItems: "flex-start",
+                      }
+                    : { display: "contents" }
+                }
+              >
+                <div
+                  className="wb-frame relative"
+                  style={scrollBoard ? { flexShrink: 0 } : undefined}
+                >
+                  <div className="wb-surface absolute overflow-hidden">
+                    {isInputOverlay && !boardCovered && (
+              <div className="wb-scrim-strong pointer-events-none absolute inset-0 z-10" />
+            )}
+
+                    {/* The board's off-state: while the Konva chunk loads, the paper
+                must not show. The face is the bezel's own matte grey,
+                unmarked, with the boot arc on it: the same 252° sweep the
+                on-canvas ThinkingSpinner draws, so boot → thinking reads as
+                one pending family. It stays mounted and fades out when the
+                board reports ready: no hard cut, no white flash. */}
+                    <div
+              className="wb-boot-face fx-grain absolute inset-0 z-30 flex items-center justify-center"
+              data-hidden={boardLoaded || undefined}
+              aria-hidden={boardLoaded || undefined}
+            >
+                      <div className="relative flex flex-col items-center gap-3">
+                        <BoardBootSpinner label="Loading the board" />
+                        <p className="type-accent-xs wb-boot-label animate-wb-breathe">
+                          loading the board
+                        </p>
+                      </div>
+                    </div>
+
+                    {!can.appChrome &&
+                    boardLoaded &&
+                    storedTurnsCount === 0 &&
+                    !can.askQuestions ? (
+                      <div className="absolute inset-0 z-20 flex items-center justify-center">
+                        <p className="wb-scrim-ink-soft text-sm font-medium">
+                          No saved lecture on this board.
+                        </p>
+                      </div>
+                    ) : null}
+
+                    {isInputOverlay &&
+                      storedTurnsCount > 0 &&
+                      !unsavedBoard && (
+                        <div
+                className="absolute inset-0 z-20 flex flex-col items-center justify-center px-3 sm:px-4"
+                style={{ pointerEvents: "none" }}
+              >
+                          <div className="w-full max-w-[720px]" style={{ pointerEvents: "auto" }}>
+                            {inputChrome}
+                          </div>
+                        </div>
+                      )}
+
+                    {/* A rewound lecture is the past: don't cover the board they
+                are actually watching with the pending clicker. */}
+                    {showPendingOrRecovery && !recoveryOutsideBoard && (
+                      <ThinkingOverlay
+                        ink={pendingInk}
+                        paused={isPaused}
+                        onResume={resumeTurn}
+                        onEnableAudio={!isPaused ? audioRecovery?.enableAudio : null}
+                        preserveBoard={!waitingToTeach}
+                        muted={mutePlayback || !settings.narrationEnabled}
+                        onBoardAt={
+                          liveTurnKind === "lesson"
+                            ? null
+                            : (doubtThinkingAt ?? DOUBT_THINKING_FALLBACK)
+                        }
+                        scale={boardViewport.scale}
+                      />
+                    )}
+
+                    <SessionBoardCanvas
+                      boardViewport={boardViewport}
+                      whiteboardRef={whiteboardRef}
+                      cursorState={cursorState}
+                      settings={settings}
+                      phase={phase}
+                      currentSegmentText={currentSegmentText}
+                      voiceDegraded={voiceDegraded}
+                      lastError={scrollBoard ? null : lastError}
+                      saveFailure={
+                        can.appChrome &&
+                        !scrollBoard &&
+                        saveStatus.kind === "failed" &&
+                        !saveBannerDismissed
+                          ? {
+                              message: saveStatus.message,
+                              onRetrySave: retrySave,
+                              onDismiss: () => setSaveBannerDismissed(true),
+                            }
+                          : null
+                      }
+                      isReplaying={isReplaying}
+                      exportBoardRef={exportBoardRef}
+                      exportBoardMounted={exportBoardMounted}
+                      rewindBoardRef={rewindBoardRef}
+                      rewindActive={rewindActive}
+                      rewindCursorState={rewindCursorState}
+                      rewindSegmentText={rewindSegmentText}
+                      playerStore={
+                        lecturePlayerAvailable || lecturePlayerActive
+                          ? lecturePlayer.store
+                          : null
+                      }
+                      playerControls={lecturePlayer.controls}
+                      playerView={lecturePlayer.view}
+                      playerBoardRef={lecturePlayer.playerBoardRef}
+                      playerCodePanelRef={lecturePlayer.codePanelCanvasRef}
+                      playerFreezeRef={lecturePlayer.freezeCanvasRef}
+                      playerFullscreen={
+                        can.appChrome || boardFullscreenApi
+                          ? {
+                              active: boardFullscreen,
+                              toggle: fullscreen.toggle,
+                            }
+                          : null
+                      }
+                      playerActivityRef={boardContainerRef}
+                      showPlayerBar={!showDockedPlayer}
+                      showCaption={!dockCaption}
+                      verifiedDiagram={activeVerifiedDiagram}
+                      codeLessonPanel={
+                        compactBoardChrome ? null : (
+                          <CodeLessonPanel controller={codeLessonController} />
+                        )
+                      }
+                      codeLessonController={codeLessonController}
+                      marking={boardMarking}
+                      onRetraceEntity={handleRetraceEntity}
+                      onRetryError={retryBoardError}
+                      onDismissError={() => setLastError(null)}
+                    />
+                  </div>
+                  {duringRatingToast && !scrollBoard ? (
+                    <div
+                      className="pointer-events-none absolute z-40"
+                      style={{ top: "calc(var(--bezel) + 10px)", right: "calc(var(--bezel) + 10px)" }}
+                    >
+                      {duringRatingToast}
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+
+              {recoveryOutsideBoard && (
+                <ThinkingOverlay
+                  ink={pendingInk}
+                  paused={isPaused}
+                  onResume={resumeTurn}
+                  onEnableAudio={!isPaused ? audioRecovery?.enableAudio : null}
+                  preserveBoard={!waitingToTeach}
+                  muted={mutePlayback || !settings.narrationEnabled}
+                  onBoardAt={null}
+                  scale={boardViewport.scale}
+                />
+              )}
+
+              <div
+                className="wb-deck relative shrink-0"
+                data-board-deck
+                style={scrollBoard || showDockedPlayer ? { width: "100%" } : undefined}
+              >
+                {/* Keep enabled captions' space throughout the session so
+                    silent cues, Stop and End do not refit the paper. */}
+                {dockCaption && (settings.subtitlesEnabled || codeLessonActive || silentCaptionShown || caption.notice) ? (
+                  <div
+                    ref={captionRegionRef}
+                    role="region"
+                    aria-label="Current narration"
+                    aria-hidden={!captionShowing || undefined}
+                    inert={!captionShowing || undefined}
+                    tabIndex={captionShowing ? 0 : undefined}
+                    onKeyDown={event => {
+                      if (!captionShowing) return;
+                      // Keep native caption scrolling from seeking or pausing
+                      // the lecture through its global media shortcuts.
+                      if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) {
+                        event.stopPropagation();
+                      }
+                    }}
+                    className="h-20 w-full overflow-y-auto overscroll-contain"
+                  >
+                    <ResponseBubble text={caption.text} visible={caption.visible} placement="below" notice={caption.notice} />
+                  </div>
+                ) : null}
+                {showDockedPlayer ? (
+                  <LecturePlayerBar
+                    store={lecturePlayer.store}
+                    controls={lecturePlayer.controls}
+                    placement="below"
+                    compact={compactBoardChrome}
+                    auxiliaryControls={shortChromeControls}
+                    fullscreen={
+                      can.appChrome || boardFullscreenApi
+                        ? { active: boardFullscreen, toggle: fullscreen.toggle }
+                        : null
+                    }
+                    activityTargetRef={boardContainerRef}
+                  />
+                ) : null}
+                {compactBoardChrome && !showDockedPlayer && !boardCovered ? (
+                  <div
+                    className="flex h-11 items-center justify-end"
+                    aria-label="Board controls row"
+                  >
+                    {shortChromeControls}
+                  </div>
+                ) : null}
+                <div
+                  data-short-code-panel={
+                    compactBoardChrome ? "true" : undefined
+                  }
+                  inert={
+                    (compactBoardChrome && shortPanel !== "code") || undefined
+                  }
+                  aria-hidden={
+                    (compactBoardChrome && shortPanel !== "code") || undefined
+                  }
+                  style={
+                    compactBoardChrome
+                      ? ({
+                          position: "fixed",
+                          top: 6,
+                          left: 6,
+                          right: 6,
+                          zIndex: 60,
+                          maxHeight: "calc(100dvh - 64px)",
+                          overflowY: "auto",
+                          display: shortPanel === "code" ? "block" : "none",
+                          "--board-panel-height": "calc(100dvh - 80px)",
+                          "--board-panel-max-height": "calc(100dvh - 80px)",
+                          "--board-panel-display": "flex",
+                        } as CSSProperties)
+                      : { display: "contents" }
+                  }
+                >
+                  {deckPanel}
+                </div>
+              </div>
+              {scrollBoard ? (
+                <div className="pointer-events-none absolute bottom-14 left-4 right-4 z-40 flex flex-col items-center gap-2">
+                  {duringRatingToast}
+                  {saveStatus.kind === "failed" && !saveBannerDismissed ? (
+                    <SaveFailureBanner
+                      message={saveStatus.message}
+                      onRetrySave={retrySave}
+                      onDismiss={() => setSaveBannerDismissed(true)}
+                      className="relative bottom-auto left-auto max-w-full translate-x-0"
+                    />
+                  ) : null}
+                  {phase === "idle" &&
+                  lastError &&
+                  !(
+                    lastError.billing && isOutOfUsageLock(lastError.billing)
+                  ) ? (
+                    <BoardErrorBanner
+                      message={lastError.message}
+                      onRetry={() => retryBoardError(lastError.question)}
+                      onDismiss={() => setLastError(null)}
+                      className="relative bottom-auto left-auto max-w-full translate-x-0"
+                    />
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+
+            {/* An iPhone has no orientation lock to grant, so the board asks
+                for the turn by hand. Everywhere the lock worked the phone is
+                already sideways and this never appears. */}
+            {boardFullscreen && fullscreen.rotateHint ? (
+              <div className="wb-rotate-hint glass text-frost" role="status">
+                <svg
+                  width="15"
+                  height="15"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden
+                >
+                  <rect x="7" y="2" width="10" height="20" rx="2.5" />
+                  <path d="M11 18.6h2" />
+                </svg>
+                <span>Turn your phone for a bigger board</span>
+              </div>
+            ) : null}
+          </div>
+        </main>
+
+        {compactBoardChrome && boardCovered ? (
+          <div
+            className="relative z-40 flex h-11 shrink-0 items-center justify-end"
+            aria-label="Board controls row"
+          >
+            {shortChromeControls}
+          </div>
+        ) : null}
+
+        {can.askQuestions && !isInputOverlay && (
+          <footer
+            data-short-composer={compactBoardChrome ? "true" : undefined}
+            // Full screen floats the composer over the paper's bottom margin
+            // instead of taking layout from it. It is the same element either
+            // way, so entering full screen mid-sentence keeps what was typed.
+            className={
+              boardFullscreen
+                ? "wb-session-chrome wb-session-chrome--bottom absolute"
+                : compactBoardChrome
+                  ? "absolute z-[60] rounded-lg bg-surface"
+                  : "relative shrink-0"
+            }
+            data-hidden={
+              boardFullscreen && (chromeHidden || fullscreenComposerHidden)
+                ? "true"
+                : undefined
+            }
+            inert={
+              fullscreenComposerHidden ||
+              (compactBoardChrome && shortPanel !== "composer") ||
+              undefined
+            }
+            aria-hidden={
+              fullscreenComposerHidden ||
+              (compactBoardChrome && shortPanel !== "composer") ||
+              undefined
+            }
+            style={
+              boardFullscreen
+                ? {
+                    left: "max(6px, env(safe-area-inset-left))",
+                    right: "max(6px, env(safe-area-inset-right))",
+                    // The keyboard raises the composer; the board stays put.
+                    // An absolute box sits against the padding box, so the
+                    // column's keyboard padding has to be added back by hand.
+                    bottom:
+                      keyboardInset > 0
+                        ? keyboardInset + 6
+                        : "max(8px, env(safe-area-inset-bottom))",
+                    zIndex: 45,
+                  }
+                : compactBoardChrome
+                  ? {
+                      left: 6,
+                      right: 6,
+                      // Absolute overlays use the padding box; add the same
+                      // visual-viewport inset that already raises the dock.
+                      bottom: keyboardInset + 52,
+                      maxHeight: `calc(100% - ${keyboardInset + 56}px)`,
+                      overflowY: "auto",
+                      display: shortPanel === "composer" ? "block" : "none",
+                    }
+                  : { paddingTop: isMobile ? 4 : PAGE_GUTTER_Y }
+            }
+          >
+            {inputChrome}
+          </footer>
+        )}
+
+        {can.settings ? (
+          <SettingsDrawer
+            open={settingsOpen}
+            onOpenChange={setSettingsOpen}
+            onCloseAutoFocus={compactBoardChrome ? (event) => {
+              const root = boardContainerRef.current?.closest("[data-short-board-chrome]");
+              const target = root?.querySelector<HTMLElement>(shortPanel === "header" ? '[data-short-header] button[aria-label="Open navigation"]' : 'button[aria-label="Board controls"]');
+              if (!target || !target.isConnected || !target.getClientRects().length || target.closest("[inert]")) return;
+              event.preventDefault();
+              target.focus();
+            } : undefined}
+            settings={settings}
+            onSettingsChange={setSettings}
+            hinglishAvailable={hinglishAvailable}
+          />
+        ) : null}
+        <OutOfCreditsDialog
+          open={creditsOpen}
+          onOpenChange={setCreditsOpen}
+          ageBand={accountMe?.profile?.ageBand}
+        />
+      </div>
+    </>
+  );
+
+  if (frameless) {
+    return (
+      <div
+        className="relative flex h-full min-h-0 min-w-0 flex-col overflow-hidden"
+        data-tutor-session={variant}
+        style={{ background: "var(--wb-bg)" }}
+      >
+        {sessionBody}
+      </div>
+    );
+  }
+
+  return (
+    <AppShell
+      variant="session"
+      boards={boards}
+      activeBoardId={sessionId}
+      busyBoardId={
+        phase !== "idle" || isReplaying || lecturePlayer.playing
+          ? sessionId
+          : null
+      }
+      onSelect={switchBoard}
+      onNew={createNewBoard}
+      onDelete={deleteBoard}
+      onTogglePin={togglePinBoard}
+      onToggleArchive={toggleArchiveBoard}
+      onToggleVisibility={toggleVisibilityBoard}
+      onRename={renameBoard}
+      disabled={phase !== "idle"}
+      profile={toShellProfile(accountMe?.profile)}
+      onOpenLessonSettings={() => setSettingsOpen(true)}
+      // Full screen folds the boards rail away and gives its width to the
+      // paper. The student's own choice is kept underneath and comes back
+      // with the windowed board.
+      sidebarCollapsed={
+        boardFullscreen || compactBoardChrome || sidebarCollapsed
+      }
+      onSidebarCollapsedChange={setSidebarCollapsed}
+      mobileNavOpen={mobileNavOpen}
+      onMobileNavOpenChange={setMobileNavOpen}
+      onSidebarResizingChange={setSidebarResizing}
+    >
+      {sessionBody}
+    </AppShell>
+  );
+}

@@ -1,0 +1,332 @@
+import {
+  normalizeBoardText,
+  normalizeNarration,
+  parseDrawingTag,
+  parseDrawCommandFromTag,
+  parseDrawingCommands,
+  parsedResponseToSegments,
+  repairCoordinateLessWriteTags,
+  repairHeaderOnlyTextTags,
+  scanDrawingTags,
+  getSegmentCommands,
+  type DrawCommand,
+  type DrawCommandType,
+  type TutorSegment,
+} from '../protocol/drawingProtocol';
+import { BOARD_CANVAS, WORK_ZONE } from './boardZones';
+import { fitBoardText, WORK_CONTINUATION_INDENT } from './boardTypography';
+
+const STEP_BLOCK_PATTERN = /\[STEP\]\s*([\s\S]*?)\s*\[\/STEP\]/gi;
+
+const RUNTIME_MANAGED_COMMAND_TYPES = new Set<DrawCommandType>(['CLEAR', 'ERASE']);
+const WORK_TEXT_BOTTOM_Y = WORK_ZONE.topY + WORK_ZONE.lineHeight * 9;
+/**
+ * Width this layer fits against: the whole board, less both margins.
+ *
+ * It used to be the narrow column beside a figure (282px) even for turns with
+ * no figure at all, which is how an ordinary sentence ended up shrunk to 17px
+ * on an empty board. This layer runs before anything knows whether a figure
+ * exists, so it only breaks lines that no column could hold; the app re-fits
+ * every row against the column it actually lands in.
+ */
+const WORK_TEXT_MAX_WIDTH = WORK_ZONE.fullWidthTextWidth;
+
+interface StructuredBoardAction {
+  command: DrawCommand;
+  tagStart: number;
+  tagEnd: number;
+  syncAnchor: string;
+}
+
+function extractActionsFromBlock(block: string, blockStartIndex: number): StructuredBoardAction[] {
+  const actions: StructuredBoardAction[] = [];
+  let narrationCursor = 0;
+
+  for (const match of scanDrawingTags(block)) {
+    const { fullTag } = match;
+    const parsedTag = parseDrawingTag(fullTag);
+    if (!parsedTag) {
+      continue;
+    }
+
+    const tagIndex = match.index;
+    const syncAnchor = normalizeNarration(stripDrawingTags(block.slice(narrationCursor, tagIndex)));
+    const command = parseDrawCommandFromTag(
+      parsedTag.type,
+      parsedTag.rawParams,
+      blockStartIndex + tagIndex,
+      syncAnchor,
+    );
+
+    actions.push({
+      command,
+      tagStart: tagIndex,
+      tagEnd: tagIndex + fullTag.length,
+      syncAnchor,
+    });
+    narrationCursor = tagIndex + fullTag.length;
+  }
+
+  return actions;
+}
+
+function stripDrawingTags(text: string): string {
+  let stripped = '';
+  let cursor = 0;
+
+  for (const { index, fullTag } of scanDrawingTags(text)) {
+    if (!parseDrawingTag(fullTag)) {
+      continue;
+    }
+    stripped += text.slice(cursor, index);
+    cursor = index + fullTag.length;
+  }
+
+  return `${stripped}${text.slice(cursor)}`.trim();
+}
+
+function withSyncMetadata(narration: string, command: DrawCommand | null): DrawCommand | null {
+  if (!command) {
+    return null;
+  }
+
+  if (
+    command.type !== 'WRITE' &&
+    command.type !== 'TYPE' &&
+    command.type !== 'LABEL' &&
+    command.type !== 'DIMENSION'
+  ) {
+    return command;
+  }
+
+  const hasAnchor = narration.trim().length > 0 || command.narrationBefore.trim().length > 0;
+  return {
+    ...command,
+    syncable: hasAnchor,
+    syncReason: hasAnchor ? 'cue-anchor-present' : 'missing-spoken-cue',
+  };
+}
+
+function createSegment(narration: string, command: DrawCommand | null): TutorSegment | null {
+  const cleanedNarration = normalizeNarration(narration);
+  const syncedCommand = withSyncMetadata(cleanedNarration, command);
+
+  if (!cleanedNarration && !syncedCommand) {
+    return null;
+  }
+
+  return {
+    narration: cleanedNarration,
+    command: syncedCommand,
+    commands: syncedCommand ? [syncedCommand] : undefined,
+  };
+}
+
+/**
+ * Parse [STEP]...[/STEP] blocks as universal teaching micro-steps.
+ * Every command keeps the narration immediately before it as its sync anchor.
+ */
+export function parseStructuredLessonSteps(rawResponseText: string): TutorSegment[] {
+  // The same row repairs as the live parser, so notes and history read the
+  // rows the board wrote and never a WRITE tag as narration.
+  const responseText = repairCoordinateLessWriteTags(repairHeaderOnlyTextTags(rawResponseText));
+  const segments: TutorSegment[] = [];
+  const blocks = [...responseText.matchAll(STEP_BLOCK_PATTERN)];
+
+  if (blocks.length === 0) {
+    return [];
+  }
+
+  for (const match of blocks) {
+    const block = match[1];
+    const blockStart = match.index ?? 0;
+    const actions = extractActionsFromBlock(block, blockStart);
+
+    if (actions.length === 0) {
+      const segment = createSegment(stripDrawingTags(block), null);
+      if (segment) {
+        segments.push(segment);
+      }
+      continue;
+    }
+
+    let cursor = 0;
+    let lastCommandSegment: TutorSegment | null = null;
+
+    for (const action of actions) {
+      const narration = stripDrawingTags(block.slice(cursor, action.tagStart));
+      const hasNarration = narration.trim().length > 0;
+
+      if (!hasNarration && lastCommandSegment) {
+        const merged = [...getSegmentCommands(lastCommandSegment), action.command];
+        lastCommandSegment.commands = merged;
+        lastCommandSegment.command = merged[0] ?? lastCommandSegment.command;
+      } else {
+        const segment = createSegment(narration, action.command);
+        if (segment) {
+          segments.push(segment);
+          lastCommandSegment = segment.command ? segment : lastCommandSegment;
+        }
+      }
+
+      cursor = action.tagEnd;
+    }
+
+    const trailingNarration = stripDrawingTags(block.slice(cursor));
+    const trailingSegment = createSegment(trailingNarration, null);
+    if (trailingSegment) {
+      segments.push(trailingSegment);
+    }
+  }
+
+  return segments;
+}
+
+function clampCommandParams(command: DrawCommand): DrawCommand {
+  const clamp = (value: number, max: number) => Math.min(Math.max(value, 0), max);
+
+  if (command.type === "DRAW_LINE" && command.params.length >= 4) {
+    const [x1, y1, x2, y2] = command.params;
+    return {
+      ...command,
+      params: [
+        clamp(x1, BOARD_CANVAS.width),
+        clamp(y1, BOARD_CANVAS.height),
+        clamp(x2, BOARD_CANVAS.width),
+        clamp(y2, BOARD_CANVAS.height),
+      ],
+    };
+  }
+
+  if (command.params.length >= 2) {
+    const next = [...command.params];
+    next[0] = clamp(next[0], BOARD_CANVAS.width);
+    next[1] = clamp(next[1], BOARD_CANVAS.height);
+    return { ...command, params: next };
+  }
+
+  return command;
+}
+
+/**
+ * Fit one work-column line to the board's writing style.
+ *
+ * One size for the whole command, wrapped rather than shrunk, with each
+ * continuation set in from the margin so it reads as the line above carrying
+ * on instead of as a new step. The teaching model's requested size is ignored:
+ * it may say what to write, never how large — a model that emitted
+ * `[WRITE:...,90,205,18]` used to be able to shrink the board.
+ */
+export function fitWorkTextCommand(command: DrawCommand): DrawCommand[] {
+  if (command.type !== 'WRITE' || command.params.length < 2) {
+    return [command];
+  }
+
+  const [, y] = command.params;
+  const { fontSize, lines } = fitBoardText(command.text ?? '', {
+    role: 'work',
+    maxWidth: WORK_TEXT_MAX_WIDTH,
+  });
+  if (lines.length === 0) return [];
+  const startY = Math.min(Math.max(y, WORK_ZONE.topY), WORK_TEXT_BOTTOM_Y);
+
+  return lines.map((line, index) => ({
+    ...command,
+    text: line,
+    params: [
+      WORK_ZONE.marginX + (index === 0 ? 0 : WORK_CONTINUATION_INDENT),
+      Math.min(startY + index * WORK_ZONE.lineHeight, WORK_TEXT_BOTTOM_Y),
+      fontSize,
+    ],
+  }));
+}
+
+function sanitizeCommand(command: DrawCommand | null): DrawCommand | DrawCommand[] | null {
+  if (!command) {
+    return null;
+  }
+
+  if (RUNTIME_MANAGED_COMMAND_TYPES.has(command.type)) {
+    return null;
+  }
+
+  const clamped = clampCommandParams(command);
+
+  if (clamped.type === 'WRITE' || clamped.type === 'LABEL') {
+    // Normalise first: the fit wraps on measured width, and "x squared" is
+    // wider than the "x^2" the pen actually draws.
+    return fitWorkTextCommand({ ...clamped, text: normalizeBoardText(clamped.text ?? "") });
+  }
+
+  if (clamped.type === "DIMENSION") {
+    return {
+      ...clamped,
+      text: normalizeBoardText(clamped.text ?? ""),
+    };
+  }
+
+  if (clamped.type === "DRAW_LINE") {
+    const [x1, y1, x2, y2] = clamped.params;
+    if (Math.hypot(x2 - x1, y2 - y1) < 2) {
+      return null;
+    }
+  }
+
+  return clamped;
+}
+
+function sanitizeLessonSegments(segments: TutorSegment[]): TutorSegment[] {
+  const result: TutorSegment[] = [];
+
+  for (const segment of segments) {
+    const narration = segment.narration.trim();
+    const sanitizedCommands = getSegmentCommands(segment)
+      .flatMap((command) => {
+        const result = sanitizeCommand(command);
+        if (result === null) return [];
+        return Array.isArray(result) ? result : [result];
+      });
+
+    if (sanitizedCommands.some((command) => command.type === "CLEAR") && result.length === 0) {
+      continue;
+    }
+
+    if (!narration && sanitizedCommands.length === 0) {
+      continue;
+    }
+
+    const syncedCommands = sanitizedCommands
+      .map((command, index) => (index === 0 ? withSyncMetadata(narration, command) : command))
+      .filter((command): command is DrawCommand => command !== null);
+
+    result.push({
+      narration,
+      command: syncedCommands[0] ?? null,
+      commands: syncedCommands.length > 0 ? syncedCommands : undefined,
+    });
+  }
+
+  return result;
+}
+
+/**
+ * Build executable lesson segments from an LLM response.
+ * Prefers structured [STEP] blocks; falls back to inline tag parsing.
+ */
+export function buildLessonSegments(responseText: string): TutorSegment[] {
+  const structured = parseStructuredLessonSteps(responseText);
+  if (structured.length > 0) {
+    return sanitizeLessonSegments(structured);
+  }
+
+  const parsed = parseDrawingCommands(responseText);
+  return sanitizeLessonSegments(parsedResponseToSegments(parsed));
+}
+
+/** Spoken narration only — strips [STEP] markers and drawing tags. */
+export function lessonNarrationText(responseText: string): string {
+  return buildLessonSegments(responseText)
+    .map((segment) => segment.narration)
+    .filter(Boolean)
+    .join(' ');
+}

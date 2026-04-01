@@ -1,0 +1,124 @@
+import type { FigureSource } from "@heytutor/scene-engine";
+import type { DiagramSubject } from "@heytutor/tutor-core";
+
+export type DiagramStrategy = "current" | "strict";
+
+export interface DiagramStrategyContext {
+  chemistryLane: boolean;
+  codeLesson: boolean;
+  dsa: boolean;
+  doubt: boolean;
+  subject?: DiagramSubject;
+  strictSubjects?: readonly DiagramSubject[];
+  /**
+   * Server switch `OPTICS_ARCHETYPE_IN_STRICT=on` (default off), sent with
+   * begin-turn. Only true lets strict draw the owning optics archetype;
+   * false or undefined (an older server) means off.
+   */
+  opticsArchetypeInStrict?: boolean;
+}
+
+export interface DiagramStrategyDecision extends DiagramStrategyContext {
+  assignedStrategy: DiagramStrategy;
+  /** The strategy actually used after subject/turn exemptions. */
+  strategy: DiagramStrategy;
+  selectionOrder: "current" | "planner_first";
+  usePickedExamples: boolean;
+}
+
+/**
+ * The single live/lab policy boundary for the strict diagram experiment.
+ * Cohort assignment is deliberately separate: this function applies the
+ * subject and turn exemptions and describes every downstream choice.
+ */
+export function decideDiagramStrategy(
+  input: DiagramStrategyContext & { assignedStrategy: DiagramStrategy },
+): DiagramStrategyDecision {
+  const eligible =
+    (input.assignedStrategy === "strict" ||
+      (input.subject !== undefined && input.subject !== "other" && input.strictSubjects?.includes(input.subject))) &&
+    !input.chemistryLane &&
+    !input.codeLesson &&
+    !input.dsa &&
+    !input.doubt;
+  const strategy: DiagramStrategy = eligible ? "strict" : "current";
+  return {
+    ...input,
+    strategy,
+    selectionOrder: strategy === "strict" ? "planner_first" : "current",
+    usePickedExamples: strategy === "strict",
+  };
+}
+
+export function liveDiagramStrategyDecision(
+  input: DiagramStrategyContext & { assignedStrategy: DiagramStrategy },
+): DiagramStrategyDecision {
+  return decideDiagramStrategy(input);
+}
+
+export function evaluationDiagramStrategyDecision(
+  arm: "current" | "planner_first" | "planner_examples" | "planner_examples_strict",
+  context: DiagramStrategyContext,
+): DiagramStrategyDecision {
+  if (arm === "planner_examples_strict") {
+    return decideDiagramStrategy({ assignedStrategy: "strict", ...context });
+  }
+  const current = decideDiagramStrategy({ assignedStrategy: "current", ...context });
+  return {
+    ...current,
+    selectionOrder: arm === "current" ? "current" : "planner_first",
+    usePickedExamples: arm === "planner_examples",
+  };
+}
+
+/**
+ * A lesson the plan does not place in maths, physics or the chemistry lane
+ * (electronics, biology, CS, medicine) has no deterministic figure tools of
+ * its own. Physics families, archetypes and the last resort drew for such
+ * lessons from shared words: two batteries for an emitter follower, a P-V
+ * rectangle for a Carnot explanation, two charges for a cubical Gaussian
+ * surface. Only figures the planner proves may draw for it, as in strict.
+ */
+export function plannerProvenFiguresOnly(decision: DiagramStrategyDecision): boolean {
+  // Only when the planner was asked for a subject (the hook's classifySubject
+  // test); with classification off every turn reads "other", and main's
+  // sources stay exactly as they are.
+  return (decision.strictSubjects?.length ?? 0) > 0 &&
+    !decision.chemistryLane && !decision.codeLesson && !decision.dsa && !decision.doubt &&
+    (decision.subject === "other" || decision.subject === "chemistry");
+}
+
+/**
+ * A molecule the scene planner draws is model-authored ink, which the
+ * chemistry lane forbids (docs/agent/chemistry-lessons.md). A turn the plan
+ * places in chemistry, inside the lane or not, never takes a planner figure,
+ * fresh or recovered from an earlier turn; it draws an engine figure or none.
+ * The planner request itself is unchanged. `subject` is the plan subject,
+ * including the rejected-plan consensus that the strategy does not use.
+ */
+export function chemistryRefusesPlannerFigure(subject: DiagramSubject | undefined, source: FigureSource): boolean {
+  return subject === "chemistry" && (source === "planner" || source === "verified_recovery");
+}
+
+/**
+ * Whether strict may draw the engine's own lens or mirror figure after it
+ * dropped a planner figure for a stem that figure owns (the narrow rule is
+ * `strictOpticsArchetypeAdmission`). Strict only; the current lane already
+ * draws archetypes.
+ */
+export function strictAdmitsOwningOpticsArchetype(decision: DiagramStrategyDecision): boolean {
+  return decision.strategy === "strict" && decision.opticsArchetypeInStrict === true;
+}
+
+/** Independently compiled complete linear source programs and verified recovery remain available in strict. */
+export function diagramStrategyAllowsFigureSource(
+  decision: DiagramStrategyDecision,
+  source: FigureSource,
+): boolean {
+  if (chemistryRefusesPlannerFigure(decision.subject, source)) return false;
+  return (decision.strategy === "current" && !plannerProvenFiguresOnly(decision)) ||
+    source === "planner" ||
+    source === "verified_recovery" ||
+    source === "linear_source" ||
+    source === "text_only";
+}

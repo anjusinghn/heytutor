@@ -1,0 +1,1867 @@
+@import "tailwindcss";
+
+/* ═══════════════════════════════════════════════════════════════════════
+   ACCELUTE — "Graphite"
+
+   The tutor's own theme. It used to be "Night Blueprint", the navy palette
+   shared line-for-line with `apps/landing/src/index.css`; the tutor has now
+   been pulled off that shared palette onto a warm near-black one, so the two
+   apps no longer mirror each other. The landing is unchanged and stays on
+   Night Blueprint. Anything edited here is tutor-only.
+
+   The ground is a warm neutral, never a pure grey: red and green are equal
+   and blue sits a point or two under them. That one-point warmth is what
+   keeps a near-black field from reading as cold plastic, and it is the whole
+   trick of the palette — every surface below carries it.
+
+     ink-950  #131312   the canvas, the page itself
+     ink-850  #171716   panels, sidebars, headers
+     ink-750  #1D1D1B   the composer
+     ink-600  #252524   a control hovered, a row selected
+     sky-500  #4A9EFF   the accent, and the only saturated colour in the UI
+     frost    #EDEDEB   primary text
+     ink-200  #A7A7A7   secondary text
+     ink-400  #767676   tertiary text
+
+   Surfaces separate by one or two points of lightness and a hairline at 7%
+   white. There is no gradient, no glass, no glow and no grain: depth comes
+   from the step alone, which is why the steps are so tight and why nothing
+   in section 6 has a background-image.
+
+   The one exception is the empty board's first screen, which carries a
+   dithered pixel field (`LandingPixelField`) behind the greeting. It is a
+   canvas, not a surface, and it is the page with the least on it, so the
+   texture is the content there rather than noise over content. Warm neutral
+   blooms with sky-accent glints, which is this palette and not the navy one
+   the field came from.
+
+   ── LAYERS ────────────────────────────────────────────────────────────
+     1. Primitives      raw palette
+     2. Semantics       what a colour is *for* (surface, text, border, …)
+     3. @theme          the same set handed to Tailwind as utilities
+     4. Base            html / body / scrollbars / selection
+     5. Type scale      .type-*
+     6. Surfaces        .glass, .card-*, .rim-sky, .rule-glow
+     7. Buttons         .btn / .btn-plain
+     8. Atmosphere      .fx-*, .text-ice, .metal-frame
+     9. Whiteboard      .wb-* — the board's own hardware
+    10. Motion          keyframes + reveal
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* ── 1. PRIMITIVES ─────────────────────────────────────────────────── */
+
+:root {
+  /* Ink. 950–500 are surfaces, one or two points apart; 400–200 are the
+     text greys. The gap between 500 and 400 is deliberate — nothing is
+     ever both a surface and a label. */
+  --ink-950: #131312; /* the canvas */
+  --ink-900: #151514;
+  --ink-850: #171716; /* panels, sidebars, headers */
+  --ink-800: #1a1a19;
+  --ink-750: #1d1d1b; /* the composer */
+  --ink-700: #212120; /* a control on a panel */
+  --ink-600: #252524; /* that control hovered, or a selected row */
+  --ink-500: #2e2e2c; /* the highest step: chips, thumbs, scrollbars */
+  --ink-400: #767676; /* tertiary text */
+  --ink-300: #8a8a88;
+  --ink-200: #a7a7a7; /* secondary text */
+
+  /* Sky — the accent. The one saturated colour, so it is spent only on
+     what is live, selected, or the single next action. */
+  --sky-700: #1c4f9c;
+  --sky-600: #2f6fd0;
+  --sky-500: #4a9eff;
+  --sky-400: #74b4ff;
+  --sky-300: #9ccbff;
+  --sky-200: #c6e0ff;
+  --sky-100: #e6f1ff;
+
+  --steel: #5c5c59; /* mid grey — scrollbar thumb, quiet rules */
+  --mist: #d4d4d1; /* light neutral */
+  --frost: #ededeb; /* primary text */
+  --blue: #4a9eff;
+  --blue-deep: #2f6fd0;
+
+  /* Hairlines and text alphas. The alphas are picked against the canvas:
+     soft lands on #A7A7A7 and faint on #767676, the two greys measured off
+     the reference. */
+  --stroke: rgba(255, 255, 255, 0.07);
+  --stroke-strong: rgba(255, 255, 255, 0.14);
+  --glass-1: rgba(255, 255, 255, 0.03);
+  --glass-2: rgba(255, 255, 255, 0.05);
+  --text-soft: rgba(237, 237, 235, 0.68);
+  --text-faint: rgba(237, 237, 235, 0.45);
+
+  /* Status — the only hues allowed off the blue axis */
+  --danger: #e06858;
+  --warning: #e8913a;
+  --success: #4caf7d;
+}
+
+/* ── 2. SEMANTICS ──────────────────────────────────────────────────────
+   What a colour is *for*. Components reference these, never a raw hex, so
+   a palette change is a change to this block alone.
+
+   The `--wb-*` names predate the palette and are kept as the whiteboard
+   app's vocabulary; they resolve to Graphite, so any component still
+   reading one is already on-theme.
+   ───────────────────────────────────────────────────────────────────── */
+
+:root {
+  --background: var(--ink-950);
+  --foreground: var(--frost);
+
+  /* Surfaces, darkest to lightest */
+  --wb-bg: var(--ink-950); /* the page itself */
+  --wb-surface: var(--ink-850); /* panels, headers, cards */
+  --wb-raised: var(--ink-700); /* controls sitting on a panel */
+  --wb-hover: var(--ink-600); /* a raised control under the cursor */
+
+  /* Lines */
+  --wb-border: var(--stroke);
+  --wb-border-strong: var(--stroke-strong);
+
+  /* Text, brightest to faintest */
+  --wb-text-primary: var(--frost);
+  --wb-text-secondary: var(--text-soft);
+  --wb-text-tertiary: var(--text-faint);
+
+  /* Accent */
+  --wb-accent: var(--sky-500);
+  --wb-accent-light: var(--sky-400);
+  --wb-accent-soft: rgba(74, 158, 255, 0.12);
+  --wb-cta: var(--sky-500);
+  --wb-cursor-blue: var(--sky-500);
+
+  /* Status */
+  --wb-success: var(--success);
+  --wb-danger: var(--danger);
+
+  /* Night-light paper: still a light writing surface, but the blue is
+     pulled down the way a phone night light warms the screen, so the
+     board does not glare against the dark chrome. Marker ink keeps its
+     contrast. */
+  --wb-paper: #f6e4c4;
+  --wb-paper-muted: #edd6aa;
+  --wb-paper-ink: var(--ink-950);
+  --wb-paper-border: var(--stroke);
+  /* The pen's own ink. Chosen against paper, so it is also what any chrome
+     laid over the board has to be drawn in. */
+  --board-ink: #1b2a4a;
+  --board-ink-soft: rgba(27, 42, 74, 0.62);
+
+  /* Legacy aliases kept for a few components still naming the old accent. */
+  --wb-accent-amber: var(--wb-accent);
+  --wb-accent-amber-light: var(--wb-accent-light);
+}
+
+/* ── 3. @theme — the palette as Tailwind utilities ─────────────────── */
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-surface: var(--wb-surface);
+  --color-raised: var(--wb-raised);
+  --color-accent: var(--wb-accent);
+  --color-border: var(--wb-border);
+
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-display: var(--font-fraunces), ui-serif, Georgia, "Times New Roman", serif;
+  --font-heading: "Stack Sans Notch", ui-sans-serif, system-ui, sans-serif;
+  --font-hand: var(--font-caveat), "Apple Chancery", "Segoe Script", cursive;
+
+  --color-ink-950: var(--ink-950);
+  --color-ink-900: var(--ink-900);
+  --color-ink-850: var(--ink-850);
+  --color-ink-800: var(--ink-800);
+  --color-ink-750: var(--ink-750);
+  --color-ink-700: var(--ink-700);
+  --color-ink-600: var(--ink-600);
+  --color-ink-500: var(--ink-500);
+  --color-ink-400: var(--ink-400);
+  --color-ink-300: var(--ink-300);
+  --color-ink-200: var(--ink-200);
+
+  --color-sky-700: var(--sky-700);
+  --color-sky-600: var(--sky-600);
+  --color-sky-500: var(--sky-500);
+  --color-sky-400: var(--sky-400);
+  --color-sky-300: var(--sky-300);
+  --color-sky-200: var(--sky-200);
+  --color-sky-100: var(--sky-100);
+
+  --color-steel: var(--steel);
+  --color-mist: var(--mist);
+  --color-frost: var(--frost);
+  --color-brand: var(--blue);
+
+  --color-stroke: var(--stroke);
+  --color-stroke-strong: var(--stroke-strong);
+  --color-soft: var(--text-soft);
+  --color-faint: var(--text-faint);
+
+  --color-danger: var(--danger);
+  --color-warning: var(--warning);
+  --color-success: var(--success);
+
+  /* An accent ring, not a halo: the 50px bloom this used to hang behind an
+     element was a light source. */
+  --shadow-glow: 0 0 0 1px rgba(74, 158, 255, 0.45);
+  --shadow-lift: 0 28px 70px -34px rgba(0, 0, 0, 0.95);
+}
+
+/* ── Fonts ─────────────────────────────────────────────────────────────
+   Inter / Fraunces / Caveat arrive through next/font in app/layout.tsx.
+   Stack Sans Notch is local, and is the same file the landing serves.
+
+   DM Mono used to be loaded here in two weights for the label scale. The
+   labels are Inter now and nothing else in the tutor asked for a mono face,
+   so both woff2 files stopped being fetched with the rest of this change. */
+
+@font-face {
+  font-family: "Stack Sans Notch";
+  src: url("/fonts/stack-sans-notch.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* ── 4. BASE ───────────────────────────────────────────────────────────
+   Applied to the document rather than to an opt-in wrapper: the page
+   ground, the scrollbars and the selection colour are not a per-screen
+   decision. `.site-theme` is kept as a no-op marker for the surfaces that
+   already opt in (admin drawers and dialogs mounted in portals).
+   ───────────────────────────────────────────────────────────────────── */
+
+html {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  background: var(--ink-950);
+  color-scheme: dark;
+  /* Pull-to-refresh on a phone reloads the lecture. The session is a
+     full-viewport app, so overscroll has nothing to reveal. */
+  overscroll-behavior: none;
+  -webkit-tap-highlight-color: transparent;
+  overflow-x: hidden;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  overscroll-behavior: none;
+}
+
+/* The session/account shells own scrolling. Rubber-banding the document is
+   what arms pull-to-refresh mid-lecture. */
+[data-app-shell] {
+  overscroll-behavior: none;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  font-family: "Stack Sans Notch", ui-sans-serif, system-ui, sans-serif;
+}
+
+::selection {
+  background: rgba(74, 158, 255, 0.3);
+  color: #ffffff;
+}
+
+/* The bar is a thumb and nothing else: no track fill, so a scrollable panel
+   does not get a permanent light stripe down its edge. */
+* {
+  scrollbar-color: var(--ink-500) transparent;
+  scrollbar-width: thin;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--ink-500);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--steel);
+  background-clip: padding-box;
+}
+
+@layer components {
+  /* A portalled surface that needs the page ground restated (dialogs,
+     sheets and drawers render outside the app's own background). */
+  .site-theme {
+    background: var(--ink-950);
+    color: var(--frost);
+  }
+
+  /* ── 5. TYPE SCALE ─────────────────────────────────────────────────
+     Ported 1:1 from the landing. Headlines and the mono accent are the
+     brand's voice; body text is Inter at four steps.
+     ───────────────────────────────────────────────────────────────── */
+
+  .type-h1 {
+    font-family: "Stack Sans Notch", ui-sans-serif, system-ui, sans-serif;
+    letter-spacing: -0.015em;
+    font-size: 40px;
+    font-weight: 500;
+    line-height: 46px;
+  }
+  @media (min-width: 640px) {
+    .type-h1 {
+      font-size: 48px;
+      line-height: 56px;
+    }
+  }
+  @media (min-width: 1024px) {
+    .type-h1 {
+      font-size: 60px;
+      line-height: 68px;
+    }
+  }
+
+  .type-h2 {
+    font-family: "Stack Sans Notch", ui-sans-serif, system-ui, sans-serif;
+    letter-spacing: -0.015em;
+    font-size: 32px;
+    font-weight: 400;
+    line-height: 38px;
+  }
+  @media (min-width: 640px) {
+    .type-h2 {
+      font-size: 38px;
+      line-height: 46px;
+    }
+  }
+  @media (min-width: 1024px) {
+    .type-h2 {
+      font-size: 44px;
+      line-height: 52px;
+    }
+  }
+
+  .type-h3 {
+    font-family: "Stack Sans Notch", ui-sans-serif, system-ui, sans-serif;
+    letter-spacing: -0.015em;
+    font-size: 22px;
+    font-weight: 500;
+    line-height: 28px;
+  }
+
+  .type-body-l {
+    font-family: "Inter", ui-sans-serif, system-ui, sans-serif;
+    font-size: 18px;
+    font-weight: 400;
+    line-height: 26px;
+  }
+  @media (min-width: 1024px) {
+    .type-body-l {
+      font-size: 20px;
+      line-height: 28px;
+    }
+  }
+
+  .type-body-m {
+    font-family: "Inter", ui-sans-serif, system-ui, sans-serif;
+    letter-spacing: 0;
+    font-size: 16px;
+    font-weight: 400;
+    line-height: 24px;
+  }
+
+  .type-body-s {
+    font-family: "Inter", ui-sans-serif, system-ui, sans-serif;
+    letter-spacing: 0;
+    font-size: 12px;
+    font-weight: 500;
+    line-height: 14px;
+  }
+
+  /*
+     Labels used to be set in DM Mono. A mono eyebrow next to sans body copy is
+     a second design language on the same screen — it reads as a terminal
+     pasted into an app — and this theme is one sans throughout. They are Inter
+     now, separated from body copy by weight and colour rather than by face,
+     which is how the reference does it. The sizes are unchanged, so nothing
+     reflows; sans is narrower than mono, so every label got shorter.
+  */
+  .type-accent-m {
+    font-family: "Inter", ui-sans-serif, system-ui, sans-serif;
+    letter-spacing: -0.005em;
+    font-size: 15px;
+    font-weight: 450;
+    line-height: 20px;
+  }
+
+  .type-accent-s {
+    font-family: "Inter", ui-sans-serif, system-ui, sans-serif;
+    letter-spacing: -0.003em;
+    font-size: 12px;
+    font-weight: 500;
+    line-height: 15px;
+  }
+
+  .type-accent-xs {
+    font-family: "Inter", ui-sans-serif, system-ui, sans-serif;
+    letter-spacing: 0;
+    font-size: 11px;
+    font-weight: 500;
+    line-height: 13px;
+  }
+
+  .type-button {
+    font-family: "Inter", ui-sans-serif, system-ui, sans-serif;
+    letter-spacing: -0.006em;
+    font-size: 14px;
+    font-weight: 500;
+    line-height: 16px;
+  }
+
+  /* -- Brand lockup ----------------------------------------------------
+     Mark + wordmark, one ink, no container. Mirrored verbatim in
+     apps/landing/src/index.css -- change both together. Size rides on
+     --brand-size. */
+  .brand {
+    --brand-size: 20px;
+    --brand-word: 17px;
+
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5em;
+    min-width: 0;
+    text-decoration: none;
+    color: var(--frost);
+    user-select: none;
+  }
+
+  .brand--sm {
+    --brand-size: 16px;
+    --brand-word: 14px;
+  }
+
+  .brand--lg {
+    --brand-size: 30px;
+    --brand-word: 25px;
+  }
+
+  .brand__mark {
+    width: var(--brand-size);
+    height: var(--brand-size);
+    flex-shrink: 0;
+    color: inherit;
+  }
+
+  .brand__word {
+    font-family: "Stack Sans Notch", ui-sans-serif, system-ui, sans-serif;
+    font-size: var(--brand-word);
+    font-weight: 500;
+    letter-spacing: -0.02em;
+    line-height: 1;
+    white-space: nowrap;
+    color: inherit;
+  }
+
+  /* The whole lockup shifts as one; nothing moves. */
+  a.brand {
+    transition: color 0.3s ease;
+  }
+
+  a.brand:hover {
+    color: var(--sky-200);
+  }
+
+  /* ── 6. SURFACES ───────────────────────────────────────────────────
+     A panel is the canvas plus one or two points of lightness and a
+     hairline. That is the entire vocabulary — the class names are kept
+     because the whole app already calls them, but there is no glass left
+     in `.glass`: no gradient, no backdrop blur, no inset gloss, no wide
+     drop shadow. Those all read as a pane of something floating over a
+     scene, and this theme has no scene to float over.
+
+     A shadow survives only where an element genuinely leaves the page —
+     a menu, a popover, a dialog — and there it is flat black, never a
+     tinted one.
+     ───────────────────────────────────────────────────────────────── */
+
+  .glass {
+    --glass-border: var(--stroke);
+    background: var(--ink-850);
+    border: 1px solid var(--glass-border);
+  }
+
+  /* One step down: a panel that has to sit over the board and still read
+     as opaque. */
+  .glass-deep {
+    --glass-border: var(--stroke);
+    background: var(--ink-900);
+    border: 1px solid var(--glass-border);
+  }
+
+  /* The accent-lit variant. It is a border colour and nothing else — the
+     old version hung a 60px blue halo behind the card. */
+  .glass-sky {
+    --glass-border: rgba(74, 158, 255, 0.4);
+  }
+
+  /* A panel that lifts off the page: the only place a shadow is spent. */
+  .surface-float {
+    background: var(--ink-850);
+    border: 1px solid var(--stroke);
+    box-shadow: 0 16px 40px -16px rgba(0, 0, 0, 0.7);
+  }
+
+  /* Interactive response for cards. It steps the ground rather than
+     translating the card: a hover that moves furniture is the loudest
+     thing on a quiet page. */
+  .card-lift {
+    transition:
+      background-color 0.2s ease,
+      border-color 0.2s ease;
+  }
+  .card-lift:hover {
+    background: var(--ink-800);
+    --glass-border: var(--stroke-strong);
+    border-color: var(--stroke-strong);
+  }
+
+  /* A one-pixel accent rim along the top edge of a card. */
+  .rim-sky {
+    position: relative;
+  }
+  .rim-sky::before {
+    content: "";
+    position: absolute;
+    inset-inline: 12%;
+    top: -1px;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(74, 158, 255, 0.45), transparent);
+    pointer-events: none;
+  }
+
+  /* Section divider. A flat hairline — the gradient that used to brighten
+     toward the middle was a light source, and there are none here. */
+  .rule-glow {
+    height: 1px;
+    border: 0;
+    background: var(--stroke);
+  }
+
+  /* ── 7. BUTTON ─────────────────────────────────────────────────────
+     This was a pedestal: a lit cap resting on a taller base, dropping onto
+     it when pressed. That is a light source and a moving part, and this
+     theme has neither, so the button is now a flat filled rectangle that
+     answers by changing its fill.
+
+     The geometry is kept intact rather than rewritten. `--btn-lift` is the
+     strip of base that used to show under the cap; it is now 0, so
+     `height: calc(--btn-h + --btn-lift)` collapses to the plain height and
+     every existing size, padding and alignment lands where it did before.
+     The `::before` cap is gone — the fill sits on the element itself.
+
+     Type is Inter in sentence case. Uppercase mono is the landing's
+     signature, and a screen where every control shouts is the opposite of
+     what this palette is for; the labels are already authored in sentence
+     case, so dropping `text-transform` is all it takes.
+
+     Pair `.btn` with a variant and a size.
+     ───────────────────────────────────────────────────────────────── */
+
+  .btn {
+    --btn-h: 42px;
+    --btn-px: 18px;
+    --btn-r: 12px;
+    --btn-bw: 1px;
+    --btn-lift: 0px;
+    --btn-fs: 14px;
+
+    position: relative;
+    isolation: isolate;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5em;
+    box-sizing: border-box;
+    height: calc(var(--btn-h) + var(--btn-lift));
+    padding-left: var(--btn-px);
+    padding-right: var(--btn-px);
+    border: var(--btn-bw) solid var(--btn-line);
+    border-radius: var(--btn-r);
+    background: var(--btn-cap);
+    color: var(--btn-ink);
+
+    font-family: var(--font-sans);
+    font-size: var(--btn-fs);
+    font-weight: 500;
+    line-height: 1;
+    letter-spacing: -0.006em;
+    text-decoration: none;
+    white-space: nowrap;
+
+    cursor: pointer;
+    user-select: none;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+    transition:
+      background-color 160ms ease,
+      border-color 160ms ease,
+      color 160ms ease;
+  }
+
+  .btn:hover {
+    background: var(--btn-cap-hi);
+  }
+  /* The press is a tiny scale, the one motion left: it reads on a flat
+     face, where a colour change alone can be missed under the cursor. */
+  .btn:active {
+    transform: scale(0.985);
+    transition-duration: 60ms;
+  }
+  .btn:focus-visible {
+    outline: 2px solid var(--btn-ring);
+    outline-offset: 2px;
+  }
+  .btn:disabled,
+  .btn[aria-disabled="true"] {
+    opacity: 0.45;
+    pointer-events: none;
+  }
+
+  /* ── sizes ── */
+  .btn-xs {
+    --btn-h: 26px;
+    --btn-px: 10px;
+    --btn-r: 8px;
+    --btn-fs: 11px;
+  }
+  .btn-sm {
+    --btn-h: 34px;
+    --btn-px: 14px;
+    --btn-r: 10px;
+    --btn-fs: 13px;
+  }
+  .btn-md {
+    --btn-h: 42px;
+    --btn-px: 18px;
+    --btn-r: 12px;
+    --btn-fs: 14px;
+  }
+  .btn-lg {
+    --btn-h: 50px;
+    --btn-px: 24px;
+    --btn-r: 14px;
+    --btn-fs: 15px;
+  }
+  .btn-block {
+    display: flex;
+    width: 100%;
+  }
+
+  /* Same face, for dense inline and icon-only controls. Size it with
+     utilities. */
+  .btn-plain {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4em;
+    background: var(--btn-cap);
+    color: var(--btn-ink);
+    border: 1px solid var(--btn-line);
+    font-family: var(--font-sans);
+    font-weight: 500;
+    letter-spacing: -0.006em;
+    cursor: pointer;
+    transition:
+      background-color 160ms ease,
+      border-color 160ms ease,
+      color 160ms ease;
+  }
+  .btn-plain:hover {
+    background: var(--btn-cap-hi);
+  }
+  .btn-plain:active {
+    transform: scale(0.94);
+  }
+  .btn-plain:focus-visible {
+    outline: 2px solid var(--btn-ring);
+    outline-offset: 2px;
+  }
+  .btn-plain:disabled,
+  .btn-plain[aria-disabled="true"] {
+    opacity: 0.45;
+    pointer-events: none;
+  }
+
+  /* ── variants ── */
+
+  /* The white key. Highest contrast on the near-black, so it is the primary
+     action and there is only ever one on screen. */
+  .btn-ice {
+    --btn-cap: var(--frost);
+    --btn-cap-hi: #ffffff;
+    --btn-line: transparent;
+    --btn-ink: var(--ink-950);
+    --btn-ring: rgba(237, 237, 235, 0.55);
+  }
+
+  /* The accent. */
+  .btn-sky {
+    --btn-cap: var(--sky-500);
+    --btn-cap-hi: var(--sky-400);
+    --btn-line: transparent;
+    --btn-ink: #ffffff;
+    --btn-ring: rgba(74, 158, 255, 0.6);
+  }
+
+  /* A raised step of the ground itself. Secondary, and most tutor chrome. */
+  .btn-ghost {
+    --btn-cap: var(--ink-700);
+    --btn-cap-hi: var(--ink-600);
+    --btn-line: var(--stroke);
+    --btn-ink: var(--frost);
+    --btn-ring: rgba(255, 255, 255, 0.3);
+  }
+
+  /* Quiet face for destructive inline actions. */
+  .btn-danger {
+    --btn-cap: rgba(224, 104, 88, 0.14);
+    --btn-cap-hi: rgba(224, 104, 88, 0.24);
+    --btn-line: rgba(224, 104, 88, 0.32);
+    --btn-ink: var(--danger);
+    --btn-ring: rgba(224, 104, 88, 0.6);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .btn,
+    .btn-plain,
+    a.brand {
+      transition: none;
+    }
+    .btn:active,
+    .btn-plain:active {
+      transform: none;
+    }
+  }
+
+  /* ── 8. ATMOSPHERE ─────────────────────────────────────────────────
+     There is none. The navy had a wash of sky over it, a blueprint grid and
+     a layer of grain; a warm near-black wants the opposite — an even field
+     with nothing on it, so that the one bright thing on the screen is the
+     content.
+
+     The classes are kept and emptied rather than deleted, because the app
+     still names them on its shells and a missing class would silently fall
+     through to a transparent page. Each now resolves to the flat ground.
+     ───────────────────────────────────────────────────────────────── */
+
+  /* The page ground. Flat — the old radial sky glows are gone. */
+  .fx-aurora {
+    background: var(--ink-950);
+  }
+
+  .fx-aurora-soft {
+    background: var(--ink-950);
+  }
+
+  /* The blueprint grid and dot pitch, kept for the surfaces that opt in,
+     dropped to the faintest texture that still registers. */
+  .fx-grid-fine {
+    background-image:
+      linear-gradient(to right, rgba(255, 255, 255, 0.022) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(255, 255, 255, 0.022) 1px, transparent 1px);
+    background-size: 32px 32px;
+    -webkit-mask-image: linear-gradient(180deg, #000 0%, transparent 78%);
+    mask-image: linear-gradient(180deg, #000 0%, transparent 78%);
+  }
+
+  .fx-grid-dots {
+    background-image: radial-gradient(rgba(255, 255, 255, 0.07) 1px, transparent 1px);
+    background-size: 8px 8px;
+  }
+
+  /* Grain existed to kill banding in the big navy gradients. There are no
+     gradients left to band, and grain over a flat near-black just reads as
+     a dirty screen. Kept as a no-op so the shells can keep naming it. */
+  .fx-grain::after {
+    content: none;
+  }
+
+  /* Gradient text for the emphasised half of a headline. On this ground the
+     accent carries it alone — the old version ran frost → sky across four
+     stops, which on a flat field looks like a sticker. */
+  .text-ice {
+    background: linear-gradient(100deg, #ffffff 0%, var(--sky-300) 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  .text-sky-fade {
+    background: linear-gradient(180deg, #ffffff 0%, var(--ink-200) 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  /* Nav / tab links: an accent rule wipes in from the left. */
+  .nav-link {
+    position: relative;
+  }
+  .nav-link::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: -5px;
+    height: 1px;
+    background: linear-gradient(90deg, var(--sky-500), rgba(74, 158, 255, 0));
+    transform: scaleX(0);
+    transform-origin: left;
+    transition: transform 0.42s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .nav-link:hover::after,
+  .nav-link:focus-visible::after {
+    transform: scaleX(1);
+  }
+
+  /* A framed stage. Brushed metal became one flat step above the ground
+     with a hairline — the lit top edge was the last light source left. */
+  .metal-frame {
+    background: var(--ink-850);
+    box-shadow:
+      0 24px 60px -30px rgba(0, 0, 0, 0.7),
+      0 0 0 1px var(--stroke);
+  }
+  .metal-frame::before {
+    content: none;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .nav-link::after {
+      transition: none;
+    }
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   9. WHITEBOARD — the tutor's own hardware
+
+   The board is the one physical object in the product, and the only thing
+   on screen allowed to read as an object at all. It used to be machined:
+   a brushed navy face, a lit top arris, a specular sweep crossing it. All
+   of that is light modelling, and this theme has no light.
+
+   What is left is a matte frame — one flat step above the page, a hairline
+   ring, a soft drop so it sits on the deck rather than in it — with the
+   recess kept, because the paper genuinely is inset and the shadow along
+   its top edge is what says so.
+
+   `--bezel` is the only pad: the scale fit, the frame box
+   (`var(--board-w) + 2 * var(--bezel)`), and the paper inset all use it.
+   A second JS pad on another breakpoint used to push the paper into the
+   ring.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+.wb-frame {
+  --bezel: 16px;
+  --bezel-lip: 9px;
+  --bezel-radius: 14px;
+
+  width: calc(var(--board-w) + 2 * var(--bezel));
+  height: calc(var(--board-h) + 2 * var(--bezel));
+  border-radius: var(--bezel-radius);
+  /* Matte face, with the base ledge still cut in as a hard stop near the
+     foot — the one piece of modelling kept, because it is what gives the
+     frame a thickness rather than an outline. */
+  background: linear-gradient(
+    180deg,
+    #242422 0,
+    #212120 calc(100% - var(--bezel-lip)),
+    #171716 calc(100% - var(--bezel-lip)),
+    #171716 100%
+  );
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.06),
+    0 24px 56px -32px rgba(0, 0, 0, 0.7);
+}
+
+/* The recess the writing surface drops into. */
+.wb-frame::before {
+  content: "";
+  position: absolute;
+  inset: calc(var(--bezel) - 5px);
+  border-radius: 7px;
+  pointer-events: none;
+  z-index: 0;
+  box-shadow:
+    inset 0 2px 6px rgba(0, 0, 0, 0.45),
+    inset 0 0 0 1px rgba(0, 0, 0, 0.45);
+}
+
+/* The inner hairline. The specular sweep that used to cross the bezel here
+   is gone — it was a moving highlight on a matte frame. */
+.wb-frame::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  z-index: 1;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+}
+
+/* Writing surface stays light for marker contrast, warmed like night light.
+   overflow + isolation clip the CSS-scaled Konva canvas to this radius
+   without a transform, which would trap the off-screen export board. */
+.wb-surface {
+  top: var(--bezel);
+  left: var(--bezel);
+  right: var(--bezel);
+  bottom: var(--bezel);
+  border-radius: 5px;
+  overflow: hidden;
+  isolation: isolate;
+  background: linear-gradient(180deg, var(--wb-paper) 0%, var(--wb-paper-muted) 100%);
+  box-shadow:
+    inset 0 0 0 1px rgba(0, 0, 0, 0.08),
+    inset 0 2px 3px rgba(0, 0, 0, 0.08),
+    inset 0 -1px 0 rgba(255, 244, 220, 0.55);
+}
+
+.wb-surface .konvajs-content,
+.wb-surface canvas {
+  display: block;
+}
+
+/* The scaled board and the deck under it share --board-w / --bezel. */
+.wb-stage {
+  --bezel: 16px;
+  --bezel-lip: 9px;
+  --bezel-radius: 14px;
+}
+
+.wb-deck {
+  width: calc(var(--board-w) + 2 * var(--bezel));
+  max-width: 100%;
+}
+
+@media (max-width: 640px) {
+  .wb-frame,
+  .wb-stage {
+    --bezel: 10px;
+    --bezel-lip: 6px;
+    --bezel-radius: 11px;
+  }
+  .wb-frame {
+    background: linear-gradient(
+      180deg,
+      #242422 0,
+      #212120 calc(100% - var(--bezel-lip)),
+      #171716 calc(100% - var(--bezel-lip)),
+      #171716 100%
+    );
+    box-shadow:
+      0 0 0 1px rgba(255, 255, 255, 0.06),
+      0 16px 36px -22px rgba(0, 0, 0, 0.7);
+  }
+  .wb-frame::before {
+    inset: calc(var(--bezel) - 3px);
+    border-radius: 6px;
+  }
+}
+
+@media (max-width: 380px) {
+  .wb-frame,
+  .wb-stage {
+    --bezel-radius: 9px;
+  }
+}
+
+/* ── Full screen board ─────────────────────────────────────────────────
+   The board taking the whole screen, on every device.
+
+   Where the browser has the Fullscreen API the request is made on the
+   document, not on the board box: every drawer, sheet and dialog in the
+   session portals to `document.body`, and a full screen taken on an inner
+   element renders that element's subtree alone, so settings and the boards
+   drawer would open invisibly. An iPhone has no Fullscreen API outside
+   `<video>`, so it gets the same layout with the browser's own toolbar still
+   up. Both states carry `data-board-fullscreen` on the document, and the
+   layout below is the same for either.
+
+   The header and the composer float over the paper's own top and bottom
+   margins rather than taking layout from it. That is what stops the board
+   rescaling every time they withdraw: a Konva stage that re-fits on a timer
+   reads as a reload, and the margins are wide enough at full screen scale
+   that a floating bar sits in them without covering ink.
+   ───────────────────────────────────────────────────────────────────── */
+
+html[data-board-fullscreen] {
+  overflow: hidden;
+}
+
+html[data-board-fullscreen] body {
+  overflow: hidden;
+}
+
+/* The UA paints a fullscreen root black behind the page. The board's own
+   ground is the deck it already sits on, so an exit does not flash. */
+html:fullscreen,
+html:-webkit-full-screen {
+  width: 100%;
+  height: 100%;
+  background: var(--ink-950);
+}
+
+html:fullscreen::backdrop {
+  background: var(--ink-950);
+}
+
+/* The floating header and composer. `data-hidden` is the only state: opacity
+   and a short slide, never `display`, so nothing in them unmounts and the
+   composer keeps whatever was typed into it. */
+.wb-session-chrome {
+  transition:
+    opacity 200ms ease,
+    transform 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.wb-session-chrome[data-hidden="true"] {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.wb-session-chrome--top[data-hidden="true"] {
+  transform: translateY(-14px);
+}
+
+.wb-session-chrome--bottom[data-hidden="true"] {
+  transform: translateY(18px);
+}
+
+@media (max-height: 500px) and (orientation: landscape) {
+  .wb-session-chrome--top {
+    padding-top: 3px;
+    padding-bottom: 3px;
+  }
+
+  .wb-session-chrome--top .wb-session-header-layout {
+    flex-direction: row;
+    align-items: center;
+  }
+
+  .wb-session-chrome--top .wb-session-header-title {
+    line-height: 1.25;
+  }
+}
+
+/* With the controls gone the pointer is the last piece of chrome left on the
+   paper. It comes back on the movement that brings the controls back. */
+.wb-board-immersive[data-chrome-hidden="true"] {
+  cursor: none;
+}
+
+/* The nudge an iPhone gets instead of an orientation lock. */
+.wb-rotate-hint {
+  position: absolute;
+  left: 50%;
+  bottom: 14%;
+  z-index: 46;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 15px;
+  border-radius: 999px;
+  white-space: nowrap;
+  font-size: 12.5px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  pointer-events: none;
+  animation: wb-rotate-hint-in 260ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.wb-rotate-hint svg {
+  animation: wb-rotate-hint-turn 2200ms ease-in-out infinite;
+}
+
+@keyframes wb-rotate-hint-in {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+
+@keyframes wb-rotate-hint-turn {
+  0%,
+  45% {
+    transform: rotate(0deg);
+  }
+  70%,
+  100% {
+    transform: rotate(-90deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wb-session-chrome {
+    transition: opacity 120ms linear;
+  }
+  .wb-session-chrome--top[data-hidden="true"],
+  .wb-session-chrome--bottom[data-hidden="true"] {
+    transform: none;
+  }
+  .wb-rotate-hint {
+    animation: none;
+  }
+  .wb-rotate-hint svg {
+    animation: none;
+  }
+}
+
+/* The bezel sheen — a highlight travelling across the frame — is retired
+   with the rest of the light modelling. The class is kept as an inert box
+   because the board still mounts it. */
+.metal-sheen {
+  display: none;
+}
+
+/* ── Board scrims ──────────────────────────────────────────────────────
+   The board is a whiteboard. A curtain over it frosts the paper rather than
+   blacking it out: the surface stays legible as paper underneath, and the
+   chrome on top switches to the pen's own ink. This is the landing's light
+   band (`.band-light` carrying `.card-light`) at board scale — a pale ground
+   holding dark content — instead of the screen appearing to switch off.
+   ───────────────────────────────────────────────────────────────────── */
+
+.wb-scrim,
+.wb-scrim-strong {
+  /* Anything inside a scrim is over paper, so it inherits paper's ink. */
+  --progress-ink: rgba(28, 79, 156, 0.85);
+  color: var(--board-ink);
+}
+
+/* Thinking: the board is being planned on, so barely veil it. */
+.wb-scrim {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--wb-paper) 58%, transparent) 0%,
+    color-mix(in srgb, var(--wb-paper-muted) 74%, transparent) 100%
+  );
+  backdrop-filter: blur(3px) saturate(115%);
+  -webkit-backdrop-filter: blur(3px) saturate(115%);
+}
+
+/* Loading, or written work being pushed back far enough that dark chrome can
+   sit on top of it and still be the subject. */
+.wb-scrim-strong {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--wb-paper) 88%, transparent) 0%,
+    color-mix(in srgb, var(--wb-paper-muted) 93%, transparent) 100%
+  );
+  backdrop-filter: blur(8px) saturate(115%);
+  -webkit-backdrop-filter: blur(8px) saturate(115%);
+}
+
+.wb-scrim-ink {
+  color: var(--board-ink);
+}
+
+.wb-scrim-ink-soft {
+  color: var(--board-ink-soft);
+}
+
+/* ── Board boot face ───────────────────────────────────────────────────
+   While the Konva chunk loads, the paper must not show. The board reads as
+   switched off: an opaque face in the bezel's own matte grey, unmarked,
+   carrying only the accent arc that the on-canvas ThinkingSpinner keeps
+   drawing once the board is live — boot → thinking is one pending family.
+
+   The face is deliberately empty. A grid was drawn here once and it read as
+   graph paper switched on rather than a board switched off, loud enough to
+   be the first thing seen on every hop between saved boards. The sheen and
+   the wide accent halo that replaced it are gone too: both were light
+   modelling, and they needed `fx-grain` alongside them to stop the radial
+   banding into rings — a texture propping up a texture. A flat face is what
+   a switched-off screen actually looks like.
+
+   The face stays mounted and fades out when the board reports ready, so the
+   paper is revealed with no hard cut and no white flash.
+   ───────────────────────────────────────────────────────────────────── */
+
+.wb-boot-face {
+  background: var(--ink-800);
+  transition: opacity 260ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.wb-boot-face[data-hidden="true"] {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* The boot label sits in the mono accent voice, faint like the rest of the
+   chrome's tertiary text. */
+.wb-boot-label {
+  color: var(--text-faint);
+}
+
+/* The arc: a 252° sweep with round caps, and nothing else. It used to be the
+   accent with a drop-shadow halo behind it, which on a near-black field made
+   the loudest thing on screen a progress indicator. Only the inner svg
+   rotates, on its own compositor layer. */
+.wb-boot-arc {
+  display: inline-block;
+  flex-shrink: 0;
+  line-height: 0;
+  vertical-align: middle;
+}
+
+.wb-boot-arc svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  transform-origin: 50% 50%;
+  animation: wb-boot-spin 1.3s linear infinite;
+  will-change: transform;
+}
+
+@keyframes wb-boot-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wb-boot-face {
+    transition: none;
+  }
+  /* The arc stops and breathes instead of spinning — the pen spinner's own
+     degrade, so the static state still reads as alive. */
+  .wb-boot-arc svg {
+    animation: wb-boot-rest 2400ms ease-in-out infinite;
+  }
+}
+
+@keyframes wb-boot-rest {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* ── Paper input focus state ── */
+
+/*
+  The Ask panel's handle: a slim tab on the right edge, centred, with a grip so
+  it reads as something to pull rather than a stray sliver of chrome. It widens
+  on hover, which is the whole affordance — a tab that grows toward the cursor
+  says "drag me out" without any copy.
+*/
+.wb-notes-pull {
+  position: fixed;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 39;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 78px;
+  padding: 0;
+  border: 1px solid var(--stroke);
+  border-right: 0;
+  border-radius: 10px 0 0 10px;
+  background: var(--ink-800);
+  cursor: pointer;
+  transition:
+    width 180ms cubic-bezier(0.16, 1, 0.3, 1),
+    background 180ms ease,
+    border-color 180ms ease;
+}
+
+.wb-notes-pull__grip {
+  width: 2px;
+  height: 26px;
+  border-radius: 999px;
+  background: var(--text-faint);
+  transition: background 180ms ease, height 180ms ease;
+}
+
+.wb-notes-pull:hover {
+  width: 24px;
+  background: var(--ink-700);
+  border-color: var(--stroke-strong);
+}
+
+.wb-notes-pull:hover .wb-notes-pull__grip {
+  height: 34px;
+  background: var(--sky-300);
+}
+
+.wb-notes-pull:focus-visible {
+  outline: 2px solid rgba(74, 158, 255, 0.55);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wb-notes-pull,
+  .wb-notes-pull__grip {
+    transition: none;
+  }
+}
+
+.wb-input-wrap {
+  transition:
+    box-shadow 0.3s cubic-bezier(0.16, 1, 0.3, 1),
+    border-color 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/*
+  Focus brightens the hairline and nothing else. The composer autofocuses on
+  the empty board, so whatever is set here is not an occasional highlight — it
+  is the permanent state of the first screen. That is why it is not the accent:
+  a blue rim on every load makes the accent mean nothing anywhere else.
+*/
+.wb-input-wrap:focus-within {
+  border-color: var(--stroke-strong) !important;
+}
+
+/* ── Paper input placeholder ── */
+
+.wb-paper-input {
+  color: var(--wb-text-primary);
+}
+
+.wb-paper-input::placeholder {
+  color: var(--wb-text-tertiary);
+  font-style: italic;
+}
+
+.board-sidebar [data-delete-btn] {
+  pointer-events: auto;
+}
+
+@media (hover: none) {
+  .board-sidebar [data-delete-btn] {
+    opacity: 0.55 !important;
+  }
+}
+
+/* ── Pending lesson ────────────────────────────────────────────────────
+   The wait before the first mark. Frost the paper so the clicker sits on
+   a blurred board rather than a second opaque sheet — on a phone an 88px
+   pen on solid paper ate the whole surface. The clicker is the pending
+   mark; the line under it names the wait; the rail under that is progress.
+   The sweep at the top is the paper's own ink.
+   ──────────────────────────────────────────────────────────────────── */
+
+.wb-pending {
+  --progress-ink: color-mix(in srgb, var(--wb-paper-ink) 40%, transparent);
+  background: color-mix(in srgb, var(--wb-paper) 46%, transparent);
+  backdrop-filter: blur(14px) saturate(120%);
+  -webkit-backdrop-filter: blur(14px) saturate(120%);
+}
+
+/* A patch of graph paper under the group, fading out before the edges so it
+   reads as the page showing through rather than a panel. */
+.wb-pending__grid {
+  position: absolute;
+  inset: 0;
+  background-image: radial-gradient(
+    circle,
+    color-mix(in srgb, var(--wb-paper-ink) 14%, transparent) 1px,
+    transparent 1.4px
+  );
+  background-size: 18px 18px;
+  background-position: center;
+  -webkit-mask-image: radial-gradient(300px 210px at 50% 50%, #000 0%, transparent 100%);
+  mask-image: radial-gradient(300px 210px at 50% 50%, #000 0%, transparent 100%);
+  animation: wb-fade-in 900ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.wb-sketch {
+  display: block;
+  width: 168px;
+  height: 76px;
+  overflow: visible;
+  animation: wb-sketch-life var(--beat, 2800ms) ease-in-out both;
+}
+
+.wb-sketch__stroke {
+  stroke-dasharray: 1 2;
+  animation: wb-sketch-draw var(--dur, 380ms) cubic-bezier(0.55, 0.1, 0.35, 1) var(--at, 0ms) both;
+}
+
+.wb-sketch__note {
+  font-family: var(--font-hand);
+  font-weight: 500;
+  animation: wb-sketch-note 420ms cubic-bezier(0.16, 1, 0.3, 1) var(--at, 0ms) both;
+}
+
+.wb-pending__label {
+  margin: 0;
+  display: inline-flex;
+  align-items: baseline;
+  color: color-mix(in srgb, var(--board-ink) 82%, transparent);
+  letter-spacing: 0.014em;
+  animation: wb-pending-write 640ms cubic-bezier(0.33, 1, 0.68, 1) both;
+}
+
+.wb-pending__dots {
+  display: inline-flex;
+  gap: 2.5px;
+  margin-left: 3px;
+}
+
+.wb-pending__dots > span {
+  width: 2.5px;
+  height: 2.5px;
+  border-radius: 999px;
+  background: currentColor;
+  animation: wb-pending-dot 1.4s ease-in-out infinite;
+}
+
+.wb-pending__dots > span:nth-child(2) {
+  animation-delay: 0.18s;
+}
+
+.wb-pending__dots > span:nth-child(3) {
+  animation-delay: 0.36s;
+}
+
+/* The rail is a line being inked along a dotted pencil guide: the guide
+   repeats the grid's dots, the fill is the pen's ink, and the nib at its
+   head is where the pen is. */
+.wb-pending__rail {
+  position: relative;
+  width: 148px;
+  height: 8px;
+  margin-top: 2px;
+}
+
+.wb-pending__rail::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 2px;
+  transform: translateY(-50%);
+  background-image: radial-gradient(
+    circle,
+    color-mix(in srgb, var(--wb-paper-ink) 28%, transparent) 0.9px,
+    transparent 1.15px
+  );
+  background-size: 6px 2px;
+  background-repeat: repeat-x;
+  background-position: left center;
+}
+
+.wb-pending__rail-fill {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  height: 2px;
+  transform: translateY(-50%);
+  border-radius: 999px;
+  background:
+    linear-gradient(90deg, transparent, rgba(255, 244, 220, 0.65), transparent) -80% 0 / 36% 100%
+      no-repeat,
+    linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--board-ink) 16%, transparent),
+      color-mix(in srgb, var(--board-ink) 78%, transparent)
+    );
+  animation:
+    wb-pending-fill 24s cubic-bezier(0.22, 0.7, 0.3, 1) both,
+    wb-pending-sheen 2.4s ease-in-out 0.6s infinite;
+}
+
+.wb-pending__rail-fill::after {
+  content: "";
+  position: absolute;
+  right: -3px;
+  top: 50%;
+  width: 6px;
+  height: 6px;
+  margin-top: -3px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--board-ink) 85%, transparent);
+  animation: wb-pending-nib 1.6s ease-in-out infinite;
+}
+
+/* ── Thinking progress bar ── */
+
+.wb-progress-bar {
+  position: absolute;
+  top: 0;
+  left: -40%;
+  height: 100%;
+  width: 40%;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--progress-ink, rgba(74, 158, 255, 0.55)) 50%,
+    transparent 100%
+  );
+  animation: wb-progress-sweep 1.4s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+/* ── Finished-lecture player ── */
+
+/* The play/pause acknowledgement in the middle of the board. Reduced motion
+   keeps the fade and drops the growth, so `animationend` still clears it. */
+@keyframes wb-player-flash {
+  from {
+    opacity: 1;
+    transform: scale(0.9);
+  }
+  to {
+    opacity: 0;
+    transform: scale(1.4);
+  }
+}
+
+@keyframes wb-player-flash-fade {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+.wb-player-flash {
+  animation: wb-player-flash 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wb-player-flash {
+    animation-name: wb-player-flash-fade;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   10. MOTION
+
+   Two families, both easing on the same curves as the landing:
+   `wb-*` are the app's entrance and state animations; the rest are the
+   marketing page's reveal vocabulary, available here so a shared surface
+   animates identically in both apps.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* ── Entrance (ease-out-expo) ── */
+
+@keyframes wb-fade-in {
+  from {
+    opacity: 0;
+    transform: scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes wb-slide-down {
+  from {
+    opacity: 0;
+    transform: translateY(-1.25rem);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes wb-slide-up {
+  from {
+    opacity: 0;
+    transform: translateY(1.25rem);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes wb-bubble-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* ── State ── */
+
+@keyframes wb-breathe {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 0.6;
+  }
+}
+
+@keyframes wb-progress-sweep {
+  0% {
+    left: -40%;
+  }
+  100% {
+    left: 100%;
+  }
+}
+
+/* The label is written left to right, not faded in. */
+@keyframes wb-pending-write {
+  from {
+    opacity: 0.35;
+    clip-path: inset(-40% 100% -40% 0);
+  }
+  to {
+    opacity: 1;
+    clip-path: inset(-40% -12% -40% 0);
+  }
+}
+
+@keyframes wb-pending-dot {
+  0%,
+  70%,
+  100% {
+    opacity: 0.2;
+    transform: translateY(0);
+  }
+  35% {
+    opacity: 0.85;
+    transform: translateY(-1.5px);
+  }
+}
+
+/* The sketch holds while the beat is up and lifts just before the next. */
+@keyframes wb-sketch-life {
+  0% {
+    opacity: 0;
+  }
+  4%,
+  86% {
+    opacity: 0.72;
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+}
+
+/* The hidden dash would leave a round-cap dot at the start, so the stroke
+   stays invisible until it begins to draw. */
+@keyframes wb-sketch-draw {
+  from {
+    stroke-dashoffset: 1;
+    opacity: 0;
+  }
+  6% {
+    opacity: 1;
+  }
+  to {
+    stroke-dashoffset: 0;
+    opacity: 1;
+  }
+}
+
+@keyframes wb-sketch-note {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes wb-pending-fill {
+  from {
+    width: 12%;
+  }
+  to {
+    width: 92%;
+  }
+}
+
+@keyframes wb-pending-sheen {
+  from {
+    background-position:
+      -80% 0,
+      0 0;
+  }
+  to {
+    background-position:
+      200% 0,
+      0 0;
+  }
+}
+
+@keyframes wb-pending-nib {
+  0%,
+  100% {
+    transform: scale(0.8);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--board-ink) 12%, transparent);
+  }
+  50% {
+    transform: scale(1);
+    box-shadow: 0 0 0 5px color-mix(in srgb, var(--board-ink) 0%, transparent);
+  }
+}
+
+/* ── Shared with the landing ── */
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(24px);
+    filter: blur(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }
+}
+
+@keyframes fade-down {
+  from {
+    opacity: 0;
+    transform: translateY(-16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pulse-ring {
+  0% {
+    box-shadow: 0 0 0 0 rgba(74, 158, 255, 0.45);
+  }
+  100% {
+    box-shadow: 0 0 0 12px rgba(74, 158, 255, 0);
+  }
+}
+
+@keyframes aurora-drift {
+  0% {
+    transform: translate3d(-2%, 0, 0) scale(1);
+    opacity: 0.85;
+  }
+  50% {
+    transform: translate3d(2%, -2%, 0) scale(1.06);
+    opacity: 1;
+  }
+  100% {
+    transform: translate3d(-2%, 0, 0) scale(1);
+    opacity: 0.85;
+  }
+}
+
+@keyframes metal-sheen {
+  0% {
+    transform: translateX(-120%);
+  }
+  100% {
+    transform: translateX(220%);
+  }
+}
+
+/* ── Animation utilities ── */
+
+.animate-wb-fade-in {
+  animation: wb-fade-in 0.8s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.animate-wb-slide-down {
+  animation: wb-slide-down 0.6s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.animate-wb-slide-up {
+  animation: wb-slide-up 0.6s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.animate-wb-bubble-fade {
+  animation: wb-bubble-fade 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.animate-wb-breathe {
+  animation: wb-breathe 4s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+}
+.animate-fade-up {
+  animation: fade-up 0.9s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.animate-fade-down {
+  animation: fade-down 0.7s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.animate-pulse-ring {
+  animation: pulse-ring 2s ease-out infinite;
+}
+.animate-aurora {
+  animation: aurora-drift 18s ease-in-out infinite;
+}
+
+/* ── Reduced motion ── */
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-wb-fade-in,
+  .animate-wb-slide-down,
+  .animate-wb-slide-up,
+  .animate-wb-bubble-fade,
+  .animate-fade-up,
+  .animate-fade-down {
+    animation: none !important;
+    opacity: 1 !important;
+    transform: none !important;
+  }
+
+  .animate-wb-breathe,
+  .animate-pulse-ring,
+  .animate-aurora,
+  .wb-progress-bar,
+  .wb-pending__label,
+  .wb-pending__rail-fill,
+  .wb-pending__rail-fill::after,
+  .wb-pending__grid,
+  .wb-pending__dots > span,
+  .wb-sketch,
+  .wb-sketch__stroke,
+  .wb-sketch__note,
+  .metal-sheen::after {
+    animation: none !important;
+  }
+
+  .wb-pending__rail-fill {
+    width: 50%;
+  }
+
+  .wb-sketch {
+    opacity: 0.72;
+  }
+
+  .wb-pending__dots > span {
+    opacity: 0.45;
+  }
+}

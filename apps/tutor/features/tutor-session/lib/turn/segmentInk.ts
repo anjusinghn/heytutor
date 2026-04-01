@@ -1,0 +1,744 @@
+import {
+  resolveVerifiedDiagramFocusTargets,
+  type DrawCommand,
+  type VerifiedDiagram,
+} from "@heytutor/drawing";
+import {
+  capSceneBatchDurations,
+  catchUpWriteScheduleOffsets,
+  classifyTtsScheduleUse,
+  CODE_TYPE_MAX_BLOCK_MS,
+  CODE_TYPE_MS_PER_CHAR,
+  cuedInkCapMs,
+  cuedInkFloorMs,
+  cueWindowRemainingMs,
+  cueWindowReserveMs,
+  cueWindowSharers,
+  getBestWriteCharScheduleMs,
+  getCommandDrawDurationMs,
+  getCommandSpeechWindow,
+  getCueSpeechWindow,
+  getFocusTargetSchedule,
+  inkPaceContextForSegment,
+  isCuedSceneBatch,
+  leadWriteScheduleToSpeech,
+  nextDistinctCueToken,
+  selectInkPace,
+  validateAudioTimingsForNarration,
+  type AudioTimings,
+  type InkPace,
+} from "@heytutor/tutor-core";
+import { waitUntilDrawClock } from "@/lib/replay/replayAudio";
+import { resolveCommandInkBudgetMs } from "../../types";
+import type { ExecuteCommandOptions } from "../../hooks/turn/types";
+import { orderCommandsBySpokenAnchor } from "./segmentPlanning";
+import { advanceExplanationTarget, pointThroughExplanation, type CompletedExplanationTarget } from "./explanationPointing";
+
+/**
+ * How one sentence's ink is paced against its voice.
+ *
+ * The live lesson and a replay of it draw the same sentence the same way, so
+ * this is the one place that decides it: which command waits for which word,
+ * how long each gets, and in what order they run. Only the voice differs — the
+ * live runner hands in the streaming speech clock, replay the recorded clip —
+ * and that arrives through `SegmentInkClock`.
+ */
+
+export type SegmentInkPlan = {
+  commands: DrawCommand[];
+  paces: InkPace[];
+  pacedDurations: number[];
+  totalDrawWeight: number;
+  multiShapeSegment: boolean;
+  /** Every command names the word it is drawn under (a figure intro). */
+  cuedIntro: boolean;
+  sceneBatchDurations: number[] | null;
+  cuedFloors: number[] | null;
+  cuedCaps: number[] | null;
+};
+
+export function planSegmentInk(input: {
+  commands: DrawCommand[];
+  verifiedDiagramIntro: boolean;
+  hasNarration: boolean;
+  sceneText?: boolean;
+}): SegmentInkPlan {
+  const { commands, verifiedDiagramIntro } = input;
+  const paceContext = inkPaceContextForSegment({
+    verifiedDiagramIntro,
+    commandCount: commands.length,
+    hasNarration: input.hasNarration,
+    sceneText: input.sceneText === true,
+  });
+  const paces = commands.map((command) => selectInkPace(command, paceContext));
+  const pacedDurations = commands.map((command, commandIndex) =>
+    getCommandDrawDurationMs(command, paces[commandIndex]),
+  );
+  // A cued intro (every command names the word it is drawn under) is
+  // paced by the voice, one part per word. The batch cap is what
+  // squeezed a 10 s mirror intro into 1.3 s of ink and a 3.3 s parked
+  // pen; a DSA frame carries no cues and keeps it.
+  const cuedIntro = verifiedDiagramIntro && isCuedSceneBatch(commands);
+  const cuedFloors = cuedIntro ? commands.map((command) => cuedInkFloorMs(command)) : null;
+  return {
+    commands,
+    paces,
+    pacedDurations,
+    totalDrawWeight: pacedDurations.reduce((sum, ms) => sum + ms, 0),
+    multiShapeSegment:
+      commands.filter((command) =>
+        ["DRAW_CIRCLE", "DRAW_LINE", "DRAW_RECT", "DRAW_CUBE", "DRAW_CUBOID"].includes(command.type),
+      ).length > 1,
+    cuedIntro,
+    sceneBatchDurations: verifiedDiagramIntro && !cuedIntro ? capSceneBatchDurations(pacedDurations) : null,
+    cuedFloors,
+    cuedCaps: cuedFloors
+      ? commands.map((command, commandIndex) => cuedInkCapMs(command, cuedFloors[commandIndex]))
+      : null,
+  };
+}
+
+/** The voice a sentence's ink follows: live TTS or the recorded clip. */
+export type SegmentInkClock = {
+  narration: string;
+  /** The sentence's alignment once it exists. Read at every use: live alignment arrives while it plays. */
+  getTimings: () => AudioTimings | null;
+  /** A window source for pointing and shapes before `getTimings` has one. */
+  fallbackTimings?: AudioTimings | null;
+  /** The sentence's length in media ms when there is no alignment. */
+  totalSpeechMs: number;
+  /** The runner's estimate of the sentence, media ms, for the code panel. */
+  estimatedSpeechMs: number;
+  msPerChar?: number;
+  /** Media ms since this sentence's audio started. */
+  getAudioPositionMs: () => number;
+  /** This live segment still owns provider playback; absent for recorded or wall clocks. */
+  isAudioActive?: () => boolean;
+  /** Accepted owned voice, including browser recovery; explanation tails only. */
+  isSpeechActive?: () => boolean;
+  /** Media ms per wall ms. */
+  getPlaybackRate: () => number;
+  /** Holds a word wait without spending its deadline while the lesson is paused. */
+  isPaused?: () => boolean;
+  nowMs?: () => number;
+  /** Recorded players advance a virtual media clock rather than wall timers. */
+  waitForAdvance?: () => Promise<void>;
+  /** The voice has ended; a code block still typing finishes on the wall clock. */
+  isSpeechComplete?: () => boolean;
+  canAdvanceAfterSpeech?: () => boolean;
+  /**
+   * Waits until `getAudioPositionMs` reaches a media time. A recorded export
+   * clock only moves when its frames are pumped, so it waits on that pump
+   * rather than on wall-time polling. Absent, the wall-clock wait is used.
+   */
+  waitUntilMs?: (targetMs: number, getTargetMs?: () => number) => Promise<void>;
+};
+
+type TraceMetadata = Record<string, unknown>;
+
+export type SegmentInkTrace = {
+  reordered?: (order: string) => void;
+  writeScheduleReady?: (metadata: TraceMetadata) => void;
+  writeCharStart?: (metadata: TraceMetadata) => void;
+  focusScheduleReady?: (metadata: TraceMetadata) => void;
+  cueWindowReady?: (metadata: TraceMetadata) => void;
+};
+
+/** Wrapping preserves the authored tag identity; an absent/default identity is not evidence. */
+function continuesAuthoredWrite(previous: DrawCommand, command: DrawCommand): boolean {
+  return previous.type === "WRITE" && command.type === "WRITE" &&
+    Number.isSafeInteger(command.charPosition) && command.charPosition > 0 &&
+    typeof command.narrationBefore === "string" && command.narrationBefore.trim().length > 0 &&
+    previous.charPosition === command.charPosition &&
+    previous.narrationBefore === command.narrationBefore &&
+    command.params[1]! > previous.params[1]!;
+}
+
+/** Leave room for ordinary code typing, without waiting for final alignment. */
+function typeCommandStartMs(command: DrawCommand, clock: SegmentInkClock, textIndex: number): number {
+  const timings = clock.getTimings() ?? clock.fallbackTimings ?? null;
+  if (!timings) return 0;
+  const window = getCommandSpeechWindow(clock.narration, command, timings, textIndex, clock.msPerChar);
+  const totalMs = timings.totalDuration > 0 && Number.isFinite(timings.totalDuration)
+    ? Math.round(timings.totalDuration * 1000)
+    : clock.totalSpeechMs;
+  return Math.min(window.startMs, Math.max(totalMs - Math.min(
+    (command.text?.length ?? 0) * CODE_TYPE_MS_PER_CHAR,
+    CODE_TYPE_MAX_BLOCK_MS,
+  ), 0));
+}
+
+export async function drawSegmentInk(input: {
+  plan: SegmentInkPlan;
+  verifiedDiagramIntro: boolean;
+  clock: SegmentInkClock;
+  /** The committed figure FOCUS resolves against, read per command. */
+  getDiagram: () => VerifiedDiagram | null;
+  isCancelled: () => boolean;
+  waitWhilePaused: () => Promise<boolean>;
+  execute: (command: DrawCommand, options: ExecuteCommandOptions) => Promise<void>;
+  /** Ownership, layout and cancellation every command of this sentence carries. */
+  commandOptions: (command: DrawCommand) => ExecuteCommandOptions;
+  beforeCommand?: () => void;
+  /** Written rows before `plan.commands[0]` in this sentence (a replay resumed inside it). */
+  initialTextCommandIndex?: number;
+  /** Full authored sentence when the plan resumes after completed commands. */
+  sentenceCommands?: readonly DrawCommand[];
+  /** Completed prefix count in sentenceCommands, before this plan's remainder. */
+  completedSentenceCommandCount?: number;
+  /**
+   * False when `plan.commands` is the tail of a sentence: its first command is
+   * not the beat's opening stroke, and it keeps the stored order the resume
+   * point was counted in.
+   */
+  opensSentence?: boolean;
+  segmentIndex?: number;
+  spokenChars?: number;
+  /** Runner-only fields for the write schedule log. */
+  describeTiming?: () => TraceMetadata;
+  trace?: SegmentInkTrace;
+}): Promise<void> {
+  const { plan, clock, isCancelled } = input;
+  const {
+    commands: segmentCommands,
+    paces: commandPaces,
+    pacedDurations,
+    totalDrawWeight,
+    multiShapeSegment,
+    cuedIntro,
+    sceneBatchDurations,
+    cuedFloors,
+    cuedCaps,
+  } = plan;
+  // An authored gesture owns what this sentence explains. A fallback work
+  // tour must not pull the pen away from that target, even after its cue ends.
+  const canPointAtWork = !(input.sentenceCommands ?? segmentCommands).some(command => command.type === "FOCUS" || command.type === "POINT");
+  let completedTarget: CompletedExplanationTarget | null = null;
+  for (const command of input.sentenceCommands?.slice(0, input.completedSentenceCommandCount ?? 0) ?? []) {
+    completedTarget = advanceExplanationTarget(completedTarget, command, input.getDiagram());
+  }
+  const executeAuthored: typeof input.execute = async (command, options) => {
+    const diagram = input.getDiagram();
+    await input.execute(command, options);
+    completedTarget = advanceExplanationTarget(completedTarget, command, diagram === input.getDiagram() ? diagram : null);
+  };
+  const narration = clock.narration;
+  const hasNarration = narration.length > 0;
+  const speechMsPerChar = clock.msPerChar;
+  const totalSpeechMs = clock.totalSpeechMs;
+  const opensSentence = input.opensSentence !== false;
+  const index = input.segmentIndex;
+  // Runtime pointing carries the same seek/ownership options as the authored
+  // commands. In particular, instant reconstruction must never start a tour.
+  const executeExplanationPoint: typeof input.execute = async (command, options) => {
+    const ownerOptions = input.commandOptions(command);
+    await input.execute(command, {
+      ...ownerOptions,
+      ...options,
+      isPaused: options.isPaused ?? ownerOptions.isPaused,
+      isCancelled: () => isCancelled() || ownerOptions.isCancelled?.() === true || options.isCancelled?.() === true,
+    });
+  };
+
+  let textCommandIndex = input.initialTextCommandIndex ?? 0;
+  // Where the last cue word was found: matching walks forward through
+  // the sentence and a run of parts under one word shares it.
+  let cueCursor = 0;
+  // A sentence's commands run in the order their words are spoken. A
+  // cued intro is already in spoken order; anything else with more
+  // than one command (a row plus the pointing gestures inferred from
+  // the names the sentence speaks) is sorted by its first word.
+  const anchorDiagram = input.getDiagram();
+  const anchorTimings = clock.getTimings();
+  const spokenAnchorsMs: Array<number | null> =
+    input.verifiedDiagramIntro || !opensSentence || segmentCommands.length < 2 || !hasNarration
+      ? segmentCommands.map(() => null)
+      : segmentCommands.map((command, commandIndex) => {
+          const pace = commandPaces[commandIndex]!;
+          const isText = command.type === "WRITE" || command.type === "LABEL";
+          if (isText && pace !== "scene") {
+            const textIndex = segmentCommands
+              .slice(0, commandIndex)
+              .filter((earlier) => earlier.type === "WRITE" || earlier.type === "LABEL" || earlier.type === "TYPE")
+              .length;
+            const schedule = getBestWriteCharScheduleMs(
+              narration,
+              command,
+              anchorTimings,
+              anchorTimings?.totalDuration ? Math.round(anchorTimings.totalDuration * 1000) : totalSpeechMs,
+              textIndex,
+              speechMsPerChar,
+            );
+            return schedule?.offsetsMs[0] ?? null;
+          }
+          if (
+            command.type === "FOCUS" &&
+            anchorDiagram &&
+            anchorDiagram.layout !== "code_lesson"
+          ) {
+            const targets = resolveVerifiedDiagramFocusTargets(command, anchorDiagram);
+            if (targets.length === 0) return null;
+            const schedule = getFocusTargetSchedule({
+              narration,
+              command,
+              targets,
+              timings: anchorTimings,
+              msPerChar: speechMsPerChar,
+            });
+            return schedule.targets[0]?.startMs ?? null;
+          }
+          return null;
+        });
+  // Wrapping copies the source tag's position and narration onto every piece.
+  // Those pieces are one authored WRITE, not independently spoken rows: an
+  // unmatched tail can have an earlier fallback anchor than the matched head.
+  // Keep each continuation behind its predecessor without changing the anchors
+  // of independent commands or the verified FOCUS gestures between beats.
+  for (let commandIndex = 1; commandIndex < segmentCommands.length; commandIndex++) {
+    const previous = segmentCommands[commandIndex - 1]!;
+    const command = segmentCommands[commandIndex]!;
+    const previousAnchor = spokenAnchorsMs[commandIndex - 1];
+    const anchor = spokenAnchorsMs[commandIndex];
+    if (
+      continuesAuthoredWrite(previous, command) &&
+      typeof previousAnchor === "number" && typeof anchor === "number"
+    ) {
+      spokenAnchorsMs[commandIndex] = Math.max(previousAnchor, anchor);
+    }
+  }
+  const commandOrder = orderCommandsBySpokenAnchor(spokenAnchorsMs);
+  if (commandOrder.some((commandIndex, position) => commandIndex !== position)) {
+    input.trace?.reordered?.(
+      commandOrder.map((commandIndex) => `${segmentCommands[commandIndex]!.type}@${spokenAnchorsMs[commandIndex] ?? "-"}`).join(" "),
+    );
+  }
+  for (let commandPosition = 0; commandPosition < commandOrder.length; commandPosition++) {
+    const commandIndex = commandOrder[commandPosition]!;
+    const command = segmentCommands[commandIndex]!;
+    const pace = commandPaces[commandIndex]!;
+    if (isCancelled()) {
+      return;
+    }
+    if (!(await input.waitWhilePaused())) {
+      return;
+    }
+    const focusDiagram = input.getDiagram();
+    const focusTargets =
+      command.type === "FOCUS" && hasNarration && !input.verifiedDiagramIntro &&
+      focusDiagram && focusDiagram.layout !== "code_lesson"
+        ? resolveVerifiedDiagramFocusTargets(command, focusDiagram)
+        : [];
+    let focusSchedule = focusTargets.length > 0
+      ? getFocusTargetSchedule({
+          narration, command, targets: focusTargets,
+          timings: clock.getTimings(), msPerChar: speechMsPerChar,
+        })
+      : null;
+    let focusDeadlineMs: number | undefined;
+    let getFocusTiming: ExecuteCommandOptions["getFocusTiming"];
+    const nextWorkPosition = focusSchedule || command.type === "POINT"
+      ? commandOrder.findIndex((nextIndex, position) => {
+          if (position <= commandPosition) return false;
+          const next = segmentCommands[nextIndex]!;
+          if (command.type === "POINT" && next.type === "TYPE") return true;
+          return (next.type === "WRITE" || next.type === "LABEL") &&
+            commandPaces[nextIndex] !== "scene" &&
+            (command.type === "POINT" || typeof spokenAnchorsMs[nextIndex] === "number");
+        })
+      : -1;
+    const nextWorkTimings = nextWorkPosition >= 0 ? clock.getTimings() : null;
+    const readWorkCue = (timings: AudioTimings | null): number | null => {
+      if (nextWorkPosition < 0) return null;
+      const nextWork = segmentCommands[commandOrder[nextWorkPosition]!]!;
+      if (nextWork.type === "TYPE") return typeCommandStartMs(nextWork, clock, textCommandIndex);
+      return getBestWriteCharScheduleMs(
+          narration, nextWork, timings,
+          timings?.totalDuration ? Math.round(timings.totalDuration * 1000) : totalSpeechMs,
+          textCommandIndex + commandOrder.slice(commandPosition + 1, nextWorkPosition)
+            .filter((nextIndex) => ["WRITE", "LABEL", "TYPE"].includes(segmentCommands[nextIndex]!.type)).length,
+          speechMsPerChar,
+        )?.offsetsMs[0] ?? null;
+    };
+    const nextWorkCue = readWorkCue(nextWorkTimings);
+    if (focusSchedule && typeof nextWorkCue === "number") {
+      // One combined gesture can name a part after the next row's word.
+      // Yield the whole gesture to that row, preserving all verified targets
+      // and the original command count used by Stop/replay resume.
+      if (focusSchedule.targets.some((target) => target.startMs >= nextWorkCue)) {
+        commandOrder.splice(commandPosition, 1);
+        commandOrder.splice(nextWorkPosition, 0, commandIndex);
+        commandPosition--;
+        continue;
+      }
+      // A clause-length trace may not occupy the pen through a written word.
+      focusSchedule = {
+        ...focusSchedule,
+        targets: focusSchedule.targets.map((target) => ({
+          ...target, endMs: Math.min(target.endMs, nextWorkCue),
+        })),
+      };
+      focusDeadlineMs = nextWorkCue;
+      getFocusTiming = () => {
+        const timings = clock.getTimings();
+        return {
+          schedule: getFocusTargetSchedule({ narration, command, targets: focusTargets, timings, msPerChar: speechMsPerChar }),
+          deadlineMs: readWorkCue(timings) ?? nextWorkCue,
+        };
+      };
+    }
+    input.beforeCommand?.();
+
+    const isTextCommand =
+      command.type === "WRITE" ||
+      command.type === "LABEL" ||
+      // TYPE is text for pacing: it earns the same spoken window a
+      // written line would.
+      command.type === "TYPE";
+    // Handwriting aligns each character to the word being spoken. Code
+    // is not read aloud, so there is nothing to align to — a matched
+    // schedule would stretch past the segment and strand the tail. The
+    // code panel paces itself inside the window instead.
+    //
+    // Nor is figure text: a cell value or an index header is part of
+    // the sketch, and it has no spoken token to track. Scheduling them
+    // as handwriting cost half a second each, so a fourteen-label
+    // figure took ten seconds to appear under a four second sentence.
+    //
+    // Nor a cued figure label: "P" is lettered as "pole" is said, in
+    // the window of its cue word, and a one-letter text match against
+    // the sentence would only send it to the wrong place.
+    const spokenCue = cuedIntro ? command.spokenCue ?? null : null;
+    const needsCharSchedule =
+      isTextCommand && command.type !== "TYPE" && pace !== "scene" && !spokenCue;
+    const elapsedAtCommandStart = clock.getAudioPositionMs();
+
+    const scheduleTimings = clock.getTimings();
+    const timingValidation =
+      needsCharSchedule && hasNarration && scheduleTimings
+        ? validateAudioTimingsForNarration(narration, scheduleTimings)
+        : null;
+    const segmentDurationMs =
+      timingValidation?.totalDurationMs ??
+      (scheduleTimings?.totalDuration
+        ? Math.round(scheduleTimings.totalDuration * 1000)
+        : totalSpeechMs);
+    const writeSchedule =
+      needsCharSchedule && hasNarration
+        ? getBestWriteCharScheduleMs(
+            narration,
+            command,
+            scheduleTimings,
+            segmentDurationMs,
+            textCommandIndex,
+            speechMsPerChar,
+          )
+        : null;
+
+    if (writeSchedule && writeSchedule.offsetsMs.length > 0) {
+      const audioPosAtScheduleMs = Math.round(clock.getAudioPositionMs());
+      const firstOffsetMs = writeSchedule.offsetsMs[0] ?? 0;
+      const effectiveOffsets = catchUpWriteScheduleOffsets(
+        leadWriteScheduleToSpeech(
+          writeSchedule.offsetsMs,
+          audioPosAtScheduleMs,
+          writeSchedule.maxInitialWaitMs,
+        ),
+        audioPosAtScheduleMs,
+      );
+
+      if (input.trace?.writeScheduleReady) {
+        // Why this row is, or is not, on the exact clock.
+        // `schedule_source` alone hid the cause.
+        const timingChars = scheduleTimings?.charStartTimes.length ?? 0;
+        input.trace.writeScheduleReady({
+          segment_index: index,
+          text: command.text?.slice(0, 60),
+          schedule_source: writeSchedule.source,
+          tts_schedule: classifyTtsScheduleUse({
+            scheduleSource: writeSchedule.source,
+            scheduleReason: writeSchedule.reason ?? null,
+            timingChars,
+            timingValid: timingValidation?.valid ?? false,
+          }),
+          timing_chars: timingChars,
+          spoken_chars: input.spokenChars,
+          timing_total_ms: scheduleTimings
+            ? Math.round(scheduleTimings.totalDuration * 1000)
+            : 0,
+          timing_valid: timingValidation?.valid ?? false,
+          timing_reason: timingValidation?.reason ?? null,
+          ...input.describeTiming?.(),
+          first_offset_ms: firstOffsetMs,
+          audio_pos_ms: audioPosAtScheduleMs,
+          start_lag_ms: audioPosAtScheduleMs - firstOffsetMs,
+          matched: writeSchedule.matched,
+          matched_char_fraction: writeSchedule.matchedCharFraction,
+          syncable: writeSchedule.matched,
+          valid_timing: writeSchedule.validTiming,
+          reason:
+            writeSchedule.reason ??
+            timingValidation?.reason ??
+            null,
+        });
+      }
+
+      let loggedChars = 0;
+      await executeAuthored(command, {
+        segmentNarration: narration,
+        writeSchedule: {
+          charStartOffsetsMs: effectiveOffsets,
+          charDurationsMs: writeSchedule.charDurationsMs,
+          getAudioPositionMs: clock.getAudioPositionMs,
+          isAudioActive: clock.isAudioActive,
+          // The slots are media ms; the glyph tween runs in wall time.
+          getPlaybackRate: clock.getPlaybackRate,
+          onCharacterStart: input.trace?.writeCharStart
+            ? ({ char, index: charIndex, targetMs, audioPositionMs }) => {
+                if (loggedChars >= 8) {
+                  return;
+                }
+                loggedChars++;
+                input.trace?.writeCharStart?.({
+                  segment_index: index,
+                  char,
+                  char_index: charIndex,
+                  target_ms: Math.round(targetMs),
+                  audio_pos_ms: Math.round(audioPositionMs),
+                  lag_ms: Math.round(audioPositionMs - targetMs),
+                });
+              }
+            : undefined,
+        },
+        ...input.commandOptions(command),
+        inkPace: pace,
+        ...(command.type === "WRITE" && !input.verifiedDiagramIntro && canPointAtWork ? { explanationClock: clock } : {}),
+      });
+      if (isTextCommand) {
+        textCommandIndex++;
+      }
+      continue;
+    }
+
+    const commandWeight = pacedDurations[commandIndex] ?? getCommandDrawDurationMs(command, pace);
+    const naturalDrawMs = commandWeight;
+    const commandSpeechMs =
+      totalDrawWeight > 0
+        ? Math.max(Math.round(totalSpeechMs * (commandWeight / totalDrawWeight)), 50)
+        : Math.max(Math.round(totalSpeechMs / segmentCommands.length), 50);
+    // One trace per named part, each on its spoken word. The schedule
+    // is built here because only the runner holds the sentence's
+    // alignment; the FOCUS branch then waits per target itself. A
+    // combined tag used to fire once at the top of the sentence for a
+    // fixed 900 ms and the pen parked for the rest (136 s of it across
+    // six measured lessons).
+    if (focusSchedule) {
+      input.trace?.focusScheduleReady?.({
+        segment_index: index,
+        spec: command.text?.slice(0, 60),
+        source: focusSchedule.source,
+        matched: focusSchedule.matchedCount,
+        targets: focusSchedule.targets.map((target) => `${target.id}@${target.startMs}-${target.endMs}:${target.anchor}`).join(" "),
+      });
+    }
+    // A written row's index picks the n-th spoken occurrence of its
+    // text. A FOCUS after a row is not a second occurrence of anything,
+    // and passing the row count here made it look for one, miss, and
+    // fall to a window at the top of the sentence.
+    // A cued figure part waits for its word. The window runs from the
+    // word to the next part's word (or the end of the sentence), exact
+    // when the alignment is in hand and estimated at the session's rate
+    // otherwise. The beat's opening stroke starts with the sentence
+    // even when its word comes later: "The real, inverted image" draws
+    // the image from "The".
+    const cueWindow =
+      spokenCue && hasNarration
+        ? getCueSpeechWindow(
+            narration,
+            spokenCue,
+            clock.getTimings(),
+            speechMsPerChar,
+            cueCursor,
+            nextDistinctCueToken(segmentCommands, commandIndex),
+          )
+        : null;
+    if (cueWindow) {
+      cueCursor = cueWindow.cursor;
+    }
+    const cueStartMs = cueWindow ? (commandIndex === 0 && opensSentence ? 0 : cueWindow.startMs) : null;
+    const windowTimings = clock.getTimings() ?? clock.fallbackTimings ?? null;
+    const speechWindow =
+      !cueWindow && hasNarration && windowTimings
+        ? getCommandSpeechWindow(
+            narration,
+            command,
+            windowTimings,
+            isTextCommand ? textCommandIndex : 0,
+            speechMsPerChar,
+          )
+        : null;
+    // Code is not spoken character by character. A late explanatory phrase
+    // must still leave room for the block's ordinary typing pace. Start it
+    // earlier within this sentence; preceding commands and short-speech
+    // typing tails keep their existing order and bounds.
+    const commandStartMs = command.type === "TYPE" && speechWindow
+      ? typeCommandStartMs(command, clock, textCommandIndex)
+      : speechWindow?.startMs ?? 0;
+    const startDelayMs = cueStartMs !== null
+      ? Math.max(Math.round(cueStartMs - elapsedAtCommandStart), 0)
+      : speechWindow && !input.verifiedDiagramIntro && !focusSchedule
+        ? Math.min(
+            Math.max(Math.round(commandStartMs - elapsedAtCommandStart), 0),
+            // Allow waiting for the spoken cue; a 400ms cap made shapes appear
+            // long before the words they belong to.
+            6_000,
+          )
+        : 0;
+
+    if (startDelayMs > 0 && (cueStartMs !== null || speechWindow)) {
+      if (!input.verifiedDiagramIntro && canPointAtWork) {
+        await pointThroughExplanation({ clock, execute: executeExplanationPoint, isCancelled, beforeWriteMs: cueStartMs ?? commandStartMs });
+        if (isCancelled()) return;
+      }
+      const getTargetMs = command.type === "TYPE" && cueStartMs === null
+        ? () => typeCommandStartMs(command, clock, textCommandIndex)
+        : undefined;
+      if (clock.waitUntilMs) {
+        await clock.waitUntilMs(cueStartMs ?? commandStartMs, getTargetMs);
+      } else {
+        await waitUntilDrawClock(clock.getAudioPositionMs, cueStartMs ?? commandStartMs, {
+          shouldCancel: isCancelled,
+          getPlaybackRate: clock.getPlaybackRate,
+          ...(clock.isPaused ? { isPaused: clock.isPaused } : {}),
+          ...(clock.nowMs ? { nowMs: clock.nowMs } : {}),
+          ...(clock.waitForAdvance ? { waitForAdvance: clock.waitForAdvance } : {}),
+          ...(getTargetMs ? { getTargetMs } : {}),
+        });
+      }
+      if (isCancelled()) {
+        return;
+      }
+    }
+    if (cueWindow) {
+      input.trace?.cueWindowReady?.({
+        segment_index: index,
+        command_type: command.type,
+        text: command.text?.slice(0, 40),
+        token: spokenCue?.token,
+        entity_id: spokenCue?.entityId,
+        matched: cueWindow.matched,
+        source: clock.getTimings() ? "tts" : "estimated",
+        word_start_ms: cueWindow.startMs,
+        word_end_ms: cueWindow.endMs,
+        audio_pos_ms: Math.round(clock.getAudioPositionMs()),
+      });
+    }
+
+    // Ink budget. A cued part gets what is left of its word's window
+    // after the wait, less the hand time the later words' parts still
+    // need, shared with the parts under the same word; floored at
+    // hand speed and capped at an unhurried pace, so the pen holds on
+    // the finished part until the next word rather than crawling.
+    const cueRemainingMs =
+      cueWindow && cuedFloors
+        ? cueWindowRemainingMs(
+            cueWindow,
+            Math.max(clock.getAudioPositionMs(), cueStartMs ?? 0),
+            cueWindowReserveMs(segmentCommands, commandIndex, cuedFloors),
+          )
+        : null;
+    const commandBudgetMs = resolveCommandInkBudgetMs({
+      command,
+      pace,
+      verifiedDiagramIntro: input.verifiedDiagramIntro,
+      isTextCommand,
+      speechWindowMs: speechWindow?.durationMs,
+      commandSpeechMs,
+      naturalDrawMs,
+      multiShapeSegment,
+      sceneBatchDurationMs: sceneBatchDurations?.[commandIndex],
+      ...(cueRemainingMs !== null && cuedFloors && cuedCaps
+        ? {
+            cueWindow: {
+              remainingMs: cueRemainingMs,
+              sharers: cueWindowSharers(segmentCommands, commandIndex, cuedFloors, cuedCaps),
+            },
+          }
+        : {}),
+    });
+
+    const shareTimings = clock.getTimings();
+    await executeAuthored(command, {
+      segmentNarration: narration,
+      speechDurationMs: commandBudgetMs,
+      // What this command may spend of the segment's spoken time.
+      // Anything that fills time rather than drawing ink is capped by
+      // it, so two commands in one beat cannot each take the whole
+      // beat and leave the board running behind its own narration.
+      speechShareMs: cueWindow
+        ? Math.max(cueWindow.endMs - (cueStartMs ?? 0), commandBudgetMs)
+        : command.type === "POINT"
+          // A pointing walk has no word of its own to be matched on,
+          // so the fallback window handed it 300 ms of a 20 s DSA
+          // sentence and the pen stood still for the rest. It walks
+          // for what is left of the sentence.
+          ? Math.max(
+              (shareTimings?.totalDuration
+                ? Math.round(shareTimings.totalDuration * 1000)
+                : totalSpeechMs) - Math.round(clock.getAudioPositionMs()),
+              commandSpeechMs,
+              speechWindow?.durationMs ?? 0,
+            )
+          : speechWindow?.durationMs || commandSpeechMs,
+      ...input.commandOptions(command),
+      inkPace: pace,
+      // Finish only the remaining committed figure marks after this intro's
+      // voice ends. The current mark keeps its animation; work WRITE and code
+      // commands keep their schedules. Failed/cancelled live draws exit above.
+      ...(input.verifiedDiagramIntro && command.semanticRef &&
+        (command.type === "LABEL" || command.type.startsWith("DRAW_")) &&
+        clock.isSpeechComplete?.() && !isCancelled()
+        ? { durationScale: 0, finishVerifiedDiagramIntro: true }
+        : {}),
+      // The voice is on this part: the whiteboard honours the requested
+      // time instead of clipping it to the 320 ms scene ceiling.
+      ...(cueWindow ? { cued: true } : {}),
+      ...(focusSchedule ? { focusSchedule } : {}),
+      ...(focusDeadlineMs !== undefined ? { focusDeadlineMs } : {}),
+      ...(getFocusTiming ? { getFocusTiming } : {}),
+      ...(command.type === "POINT" && nextWorkPosition >= 0
+        ? { getPointDeadlineMs: () => readWorkCue(clock.getTimings()) }
+        : {}),
+      ...(clock.isPaused ? { isPaused: clock.isPaused } : {}),
+      ...(clock.waitUntilMs ? { waitUntilAudioMs: clock.waitUntilMs } : {}),
+      getAudioPositionMs: clock.getAudioPositionMs,
+      getPlaybackRate: clock.getPlaybackRate,
+      // The sentence's own clock for the code lesson. TYPE, FRAME and
+      // the code-lesson FOCUS follow its words with it (see
+      // lib/code-lesson/codeSpokenSync.ts, SpokenSegmentClock). The
+      // alignment is read through a getter: the first sentence's
+      // arrives while it plays, and a typed block reads it after
+      // typing, when it is there.
+      spokenClock: {
+        narration,
+        getTimings: clock.getTimings,
+        estimatedTotalMs: clock.estimatedSpeechMs,
+        getAudioPositionMs: clock.getAudioPositionMs,
+        getPlaybackRate: clock.getPlaybackRate,
+        isSpeechComplete: clock.isSpeechComplete,
+        canAdvanceAfterSpeech: clock.canAdvanceAfterSpeech,
+        msPerChar: speechMsPerChar,
+      },
+    });
+    if (isTextCommand) {
+      textCommandIndex++;
+    }
+  }
+  // An authored FOCUS keeps the pen on that target for the rest of the sentence.
+  // A sentence that also writes the work has already moved; another POINT would
+  // land after the gesture.
+  const wroteWork = segmentCommands.some((command) => command.type === "WRITE");
+  if (!input.verifiedDiagramIntro && (canPointAtWork || (completedTarget && !wroteWork))) {
+    await pointThroughExplanation({ clock, execute: executeExplanationPoint, isCancelled,
+      ...(completedTarget ? { completedTarget, getDiagram: input.getDiagram } : {}) });
+  }
+}

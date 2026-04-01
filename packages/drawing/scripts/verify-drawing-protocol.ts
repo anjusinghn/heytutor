@@ -1,0 +1,690 @@
+import {
+  IncrementalTagParser,
+  DRAW_COMMAND_TYPES,
+  checkSegmentAlignment,
+  lessonNarrationText,
+  normalizeBoardText,
+  normalizeStrokeText,
+  parseDrawingCommands,
+  parseFocusSpec,
+  parseStructuredLessonSteps,
+  parseWorkRowSelector,
+  prepareVerifiedLessonSegments,
+  isBlockedVerifiedDiagramCommand,
+  resolveWorkAreaRow,
+  hitTestVerifiedAnchor,
+  spokenFocusTarget,
+  takeDeferredAnnotations,
+  getSegmentCommands,
+  textToStrokePaths,
+  type DrawCommand,
+  type TutorSegment,
+  type VerifiedDiagram,
+} from "../src/index";
+
+function assert(condition: unknown, message: string): asserts condition {
+  if (!condition) {
+    throw new Error(message);
+  }
+}
+
+const nestedMathTag = "[WRITE:[4x - x^3/3]_(-2)^(2),90,325]";
+const expectedText = "[4x - x^3/3]_(-2)^(2)";
+
+// Captured from a normal matrix student lesson: commas within rows are
+// mathematical text, not the WRITE command's coordinate suffix.
+for (const [type, text, coordinates] of [
+  ["WRITE", "A = [[2,5,19,-7],[35,-2,2.5,12],[1.5,1,-5,17]]", "90,145"],
+  ["WRITE", "B = [[1,2],[3,4]]", "90,211"],
+  ["LABEL", "v=[1,2,3]", "480,180,20"],
+  ["WRITE", "x ∈ [0,1)", "90,277"],
+  ["WRITE", "f(x)=[g(x),h(x)]", "90,343"],
+] as const) {
+  const tag = `[${type}:${text},${coordinates}]`;
+  const parsed = parseDrawingCommands(`Show the values. ${tag}`);
+  assert(parsed.commands.length === 1, "matrix inline: exactly one complete command");
+  assert(parsed.commands[0]?.type === type, "matrix inline: command kind survives");
+  assert(parsed.commands[0]?.text === text, "matrix inline: every row and entry survives");
+  assert(parsed.commands[0]?.params.join(",") === coordinates, "matrix inline: only the outer suffix gives coordinates");
+  assert(parsed.narration === "Show the values.", "matrix inline: no matrix suffix or protocol coordinates in speech");
+  const steps = parseStructuredLessonSteps(`[STEP]Show the values. ${tag}[/STEP]`);
+  assert(steps.length === 1 && steps[0]?.command?.text === text, "matrix structured: complete mathematical text");
+  assert(steps[0]?.narration === "Show the values.", "matrix structured: no protocol leak");
+  assert(lessonNarrationText(`[STEP]Show the values. ${tag}[/STEP]`) === "Show the values.", "matrix speech: no protocol leak");
+  const chunks: TutorSegment[] = [];
+  const matrixParser = new IncrementalTagParser({ onSegmentReady: (segment) => chunks.push(segment) });
+  matrixParser.push(`Show the values. [${type}:${text}`);
+  assert(chunks.length === 0, "matrix streaming: row closures cannot emit a partial command");
+  for (const char of `,${coordinates}]`) matrixParser.push(char);
+  matrixParser.flush();
+  assert(chunks.length === 1 && chunks[0]?.command?.text === text, "matrix streaming: the complete command emits once");
+  assert(chunks[0]?.command?.params.join(",") === coordinates, "matrix streaming: only the outer coordinates survive");
+  assert(chunks[0]?.narration === "Show the values.", "matrix streaming: no protocol leak");
+}
+
+// A protocol name inside an indexed expression is text, not a second tag.
+// Exercise the whole-response, structured and actual live character parser.
+for (const name of DRAW_COMMAND_TYPES) {
+  for (const text of [
+    `dp[${name.toLowerCase()}] = 3`, `[${name.toLowerCase()}] = 3`,
+    `dp [${name.toLowerCase()}] = 3`, `(dp)[${name.toLowerCase()}] = 3`,
+    `Σ[${name.toLowerCase()}] = 3`, `dp[table[${name.toLowerCase()}]] = 3`,
+  ]) {
+    // A legacy bare header is ambiguous with a standalone bare text tag.
+    // Its indexed case remains covered; canonical bodies support both forms.
+    for (const header of text.startsWith("dp[") ? ["[WRITE:", "[WRITE]"] : ["[WRITE:"]) {
+      const tag = `${header}${text},90,274${header.endsWith(":") ? "]" : ""}`;
+      const source = `[STEP]Explain the index. ${tag}[/STEP]`;
+      const whole = parseDrawingCommands(source);
+      assert(whole.commands.length === 1 && whole.commands[0]?.type === "WRITE",
+        `indexed ${name}: one WRITE, no fabricated protocol command`);
+      assert(whole.commands[0]?.text === text && whole.commands[0]?.params.join(",") === "90,274",
+        `indexed ${name}: complete text and outer coordinates survive`);
+      const structured = parseStructuredLessonSteps(`[STEP]Explain the index. [WRITE:${text},90,274][/STEP]`);
+      assert(structured[0]?.command?.text === text && structured[0]?.narration === "Explain the index.",
+        `indexed ${name}: structured work never leaks into speech`);
+      for (const width of [1, 2, 7, source.length]) {
+        const segments: TutorSegment[] = [];
+        const parser = new IncrementalTagParser({ onSegmentReady: segment => segments.push(segment) });
+        for (let i = 0; i < source.length; i += width) parser.push(source.slice(i, i + width));
+        parser.flush();
+        const commands = segments.flatMap(getSegmentCommands);
+        assert(commands.length === 1 && commands[0]?.type === "WRITE" && commands[0]?.text === text,
+          `indexed ${name}: chunk width ${width} retains the work exactly once`);
+        assert(commands[0]?.params.join(",") === "90,274" &&
+          segments.map(segment => segment.narration).join(" ").trim() === "Explain the index.",
+          `indexed ${name}: chunk width ${width} never narrates coordinates or brackets`);
+      }
+    }
+  }
+}
+
+// Ordinary bracketed lists may name command words without becoming tags.
+// These are board text, so every parser must keep one row and no spoken suffix.
+for (const text of [
+  "actions = [clear, undo]", "row = [type, size]", "path = [arrow, node]",
+  "Interval [frame, 2]", "[Type: I] error",
+  "[Type: 1] error", "moves = [arrow, 1, 2]", "start at [frame: 0]",
+  "cells = [highlight, 3, 4]", "[Erase: 2] count",
+  "y = 2x [HIGHLIGHT: 90, 274, 200, 40] more",
+]) {
+  const tag = `[WRITE:${text},90,274]`;
+  const whole = parseDrawingCommands(tag);
+  assert(whole.commands.length === 1 && whole.commands[0]?.type === "WRITE",
+    `command-word list ${text}: one WRITE, no fabricated command`);
+  assert(whole.commands[0]?.text === text && whole.commands[0]?.params.join(",") === "90,274",
+    `command-word list ${text}: exact text and outer coordinates survive`);
+  assert(whole.narration === "", `command-word list ${text}: no tag or coordinates spoken`);
+  const source = `[STEP]Explain the notation. ${tag}[/STEP]`;
+  const steps = parseStructuredLessonSteps(source);
+  const stepCommands = steps.flatMap(getSegmentCommands);
+  assert(stepCommands.length === 1 && stepCommands[0]?.type === "WRITE" && stepCommands[0]?.text === text,
+    `command-word list ${text}: STEP retains one exact row`);
+  assert(steps.map(step => step.narration).join(" ") === "Explain the notation.",
+    `command-word list ${text}: STEP never speaks board text`);
+  for (const width of [1, 3, 1000]) {
+    const segments: TutorSegment[] = [];
+    const parser = new IncrementalTagParser({ onSegmentReady: segment => segments.push(segment) });
+    for (let from = 0; from < source.length; from += width) parser.push(source.slice(from, from + width));
+    parser.flush();
+    const commands = segments.flatMap(getSegmentCommands);
+    assert(commands.length === 1 && commands[0]?.type === "WRITE" && commands[0]?.text === text,
+      `command-word list ${text}: chunk width ${width} retains one exact row`);
+    assert(commands[0]?.params.join(",") === "90,274" &&
+      segments.map(segment => segment.narration).join(" ").trim() === "Explain the notation.",
+      `command-word list ${text}: chunk width ${width} never speaks coordinates`);
+  }
+}
+
+
+// Quoted full diagram/code tags inside a closed WRITE remain literal board
+// text. They never acquire execution or narration authority from their shape.
+for (const text of [
+  "missing [DRAW_LINE:90,142,1160,600] junk",
+  "missing [HIGHLIGHT:90,274,200,40] junk",
+  "i = 0 [FRAME:2] and more",
+]) {
+  const tag = `[WRITE:${text},90,274]`;
+  const whole = parseDrawingCommands(tag);
+  assert(whole.commands.length === 1 && whole.commands[0]?.type === "WRITE" && whole.commands[0]?.text === text,
+    "a closed WRITE keeps its quoted tag as one exact row");
+  assert(whole.narration === "", "quoted tag and outer coordinates never become narration");
+  const source = `[STEP]Explain the quoted tag. ${tag}[/STEP]`;
+  const steps = parseStructuredLessonSteps(source), stepCommands = steps.flatMap(getSegmentCommands);
+  assert(stepCommands.length === 1 && stepCommands[0]?.type === "WRITE" && stepCommands[0]?.text === text,
+    "STEP parsing retains one exact row without executing a quoted diagram/code tag");
+  assert(steps.map(step => step.narration).join(" ") === "Explain the quoted tag.",
+    "STEP parsing never speaks quoted board protocol");
+  for (const width of [1, 3, 7, 1000]) {
+    const segments: TutorSegment[] = [];
+    const parser = new IncrementalTagParser({ onSegmentReady: segment => segments.push(segment) });
+    for (let from = 0; from < source.length; from += width) parser.push(source.slice(from, from + width));
+    parser.flush();
+    const commands = segments.flatMap(getSegmentCommands);
+    assert(commands.length === 1 && commands[0]?.type === "WRITE" && commands[0]?.text === text,
+      `chunk width ${width} retains the quoted tag inside its row`);
+    assert(segments.map(segment => segment.narration).join(" ").trim() === "Explain the quoted tag.",
+      "streaming never speaks quoted board protocol");
+  }
+  const adjacent = parseDrawingCommands(`${tag}[CLEAR][WRITE:next row,90,340]`);
+  assert(adjacent.commands.map(command => command.type).join(",") === "WRITE,CLEAR,WRITE",
+    "a real tag after the closed row retains its separate command boundary");
+}
+
+// The malformed bare-header spelling still has an unambiguous row ending.
+// A bracketed word list inside the text must not become CLEAR or spoken ink.
+for (const ending of ["\n", "[/STEP]"]) {
+  const source = `[STEP]Explain the actions. [WRITE]actions = [clear, undo],90,274${ending}`;
+  const whole = parseDrawingCommands(source);
+  assert(whole.commands.length === 1 && whole.commands[0]?.type === "WRITE" &&
+    whole.commands[0]?.text === "actions = [clear, undo]",
+    "header-only command-word list retains one complete row");
+  assert(!whole.narration.includes("actions =") && !whole.narration.includes("90,274"),
+    "header-only list never speaks its row or coordinates");
+  for (const width of [1, 3, 1000]) {
+    const segments: TutorSegment[] = [];
+    const parser = new IncrementalTagParser({ onSegmentReady: segment => segments.push(segment) });
+    for (let from = 0; from < source.length; from += width) parser.push(source.slice(from, from + width));
+    parser.flush();
+    const commands = segments.flatMap(getSegmentCommands);
+    assert(commands.length === 1 && commands[0]?.type === "WRITE" &&
+      commands[0]?.text === "actions = [clear, undo]" && commands[0]?.params.join(",") === "90,274",
+      `header-only list: chunk width ${width} retains the row without CLEAR`);
+    assert(segments.map(segment => segment.narration).join(" ").trim() === "Explain the actions.",
+      `header-only list: chunk width ${width} never speaks coordinates`);
+  }
+}
+
+// An unclosed row must not borrow coordinates from a later tag. A complete
+// canonical row can contain numeric notation, so numeric controls deliberately
+// omit the row's outer closing bracket; semantic controls also exercise a
+// closing suffix because those tags remain explicit body boundaries.
+for (const tag of [
+  "[FOCUS:mirror]", "[WRITE:x,90,340]", "[LABEL:A,480,180]",
+  "[DRAW_LINE:90,142,1160,600]", "[ARROW,90,142,1160,600]",
+  "[FRAME:2]", "[TYPE:90,142,1160,600]",
+  "[ARROW,+90,142,1160,600]", "[DRAW_LINE,.5,1e2,1160,600]",
+]) {
+  const semantic = /^\[(FOCUS|WRITE|LABEL)[: ,]/.test(tag);
+  const source = `[STEP]Incomplete work. [WRITE:missing ${tag} junk,90,274${semantic ? "]" : ""}[/STEP]`;
+  assert(!parseDrawingCommands(source).commands.some(command => command.type === "WRITE" && command.text?.startsWith("missing")),
+    `real boundary ${tag}: whole parsing cannot borrow later coordinates`);
+  assert(!parseStructuredLessonSteps(source).flatMap(getSegmentCommands).some(command =>
+    command.type === "WRITE" && command.text?.startsWith("missing")),
+    `real boundary ${tag}: STEP parsing cannot borrow later coordinates`);
+  for (const width of [1, 3, 1000]) {
+    const segments: TutorSegment[] = [];
+    const parser = new IncrementalTagParser({ onSegmentReady: segment => segments.push(segment) });
+    for (let from = 0; from < source.length; from += width) parser.push(source.slice(from, from + width));
+    parser.flush();
+    assert(!segments.flatMap(getSegmentCommands).some(command => command.type === "WRITE" && command.text?.startsWith("missing")),
+      `real boundary ${tag}: chunk width ${width} cannot borrow later coordinates`);
+  }
+}
+
+function assertNestedMathCommand(
+  command: ReturnType<typeof parseDrawingCommands>["commands"][number] | null | undefined,
+  source: string,
+): void {
+  assert(command?.type === "WRITE", `${source}: expected one WRITE command`);
+  assert(command.text === expectedText, `${source}: nested math text was truncated`);
+  assert(command.params.join(",") === "90,325", `${source}: coordinates were not parsed`);
+}
+
+const inline = parseDrawingCommands(nestedMathTag);
+assert(inline.commands.length === 1, "inline: expected exactly one command");
+assertNestedMathCommand(inline.commands[0], "inline");
+assert(inline.narration === "", "inline: tag suffix leaked into narration");
+
+const structured = parseStructuredLessonSteps(
+  `[STEP]Now evaluate the antiderivative. ${nestedMathTag}[/STEP]`,
+);
+assert(structured.length === 1, "structured: expected exactly one lesson segment");
+assertNestedMathCommand(structured[0]?.command, "structured");
+assert(
+  structured[0]?.narration === "Now evaluate the antiderivative.",
+  "structured: tag suffix leaked into narration",
+);
+assert(
+  lessonNarrationText(`[STEP]Now evaluate the antiderivative. ${nestedMathTag}[/STEP]`) ===
+    "Now evaluate the antiderivative.",
+  "speech: nested tag text leaked into narration",
+);
+
+const streamed: TutorSegment[] = [];
+const parser = new IncrementalTagParser({
+  onSegmentReady: (segment) => streamed.push(segment),
+});
+for (const chunk of [
+  "Now evaluate ",
+  "[WRITE:[4x - x^3/3]",
+  "_(-2)^(2),90,",
+  "325]",
+]) {
+  parser.push(chunk);
+}
+parser.flush();
+
+assert(streamed.length === 1, "streaming: expected exactly one lesson segment");
+assertNestedMathCommand(streamed[0]?.command, "streaming");
+assert(streamed[0]?.narration === "Now evaluate", "streaming: tag suffix leaked into narration");
+
+const invalidTagSegments: TutorSegment[] = [];
+const invalidTagParser = new IncrementalTagParser({
+  onSegmentReady: (segment) => invalidTagSegments.push(segment),
+});
+invalidTagParser.push("Keep [UNKNOWN:value] as narration.");
+invalidTagParser.flush();
+assert(
+  invalidTagSegments[0]?.narration === "Keep [UNKNOWN:value] as narration.",
+  "streaming: an unknown bracket tag must remain narration",
+);
+
+const inlineUnknown = parseDrawingCommands("Keep [UNKNOWN:value] as narration.");
+assert(
+  inlineUnknown.segments.some((segment) =>
+    segment.text.includes("[UNKNOWN:value]"),
+  ),
+  "inline: unknown bracket tag must remain in a segment",
+);
+assert(
+  inlineUnknown.narration.includes("[UNKNOWN:value]"),
+  "inline: unknown bracket tag must remain in aggregate narration",
+);
+
+const deltaBoard = "[WRITE:Delta T = delta x,10,20]";
+const deltaParsed = parseDrawingCommands(deltaBoard);
+assert(deltaParsed.commands[0]?.text?.includes("Δ"), "uppercase Delta must become Δ");
+assert(deltaParsed.commands[0]?.text?.includes("δ"), "lowercase delta must become δ");
+assert(
+  !deltaParsed.commands[0]?.text?.includes("δ T"),
+  "uppercase Delta must not be lowercased to δ before Δ normalization",
+);
+
+
+
+const nestedLabel = parseStructuredLessonSteps(
+  "[STEP]Mark the evaluated value. [LABEL:A(2)=[x^2]_0^(2),480,180,20][/STEP]",
+);
+assert(nestedLabel.length === 1, "label: expected exactly one lesson segment");
+assert(nestedLabel[0]?.command?.type === "LABEL", "label: expected one LABEL command");
+assert(
+  nestedLabel[0]?.command?.text === "A(2)=[x^2]_0^(2)",
+  "label: nested math text was truncated",
+);
+assert(
+  nestedLabel[0]?.command?.params.join(",") === "480,180,20",
+  "label: coordinates or font size were not parsed",
+);
+
+const piWrite = parseDrawingCommands("[WRITE:V = 8pi,10,20]");
+assert(piWrite.commands[0]?.text?.includes("π"), "8pi in WRITE must become π, not the letters p-i");
+assert(!piWrite.commands[0]?.text?.includes("pi"), "8pi must not remain as latin letters after board normalization");
+
+const latexPiWrite = parseDrawingCommands("[WRITE:\\pi r^2,10,20]");
+assert(latexPiWrite.commands[0]?.text?.includes("π"), "\\pi in WRITE must become π");
+assert(!latexPiWrite.commands[0]?.text?.includes("\\"), "\\pi must not leave a leftover backslash");
+
+assert(normalizeBoardText("area = pi x r^2").includes("π"), "word pi must become π");
+assert(normalizeStrokeText("V=8pi").includes("π"), "8pi must become π even without word boundaries");
+assert(!normalizeBoardText("speed").includes("π"), "English speed must not become π");
+assert(!normalizeBoardText("picky").includes("π"), "picky must not become π");
+
+const piGlyphs = await textToStrokePaths("π", 0, 100, 40);
+const nGlyphs = await textToStrokePaths("n", 0, 100, 40);
+const piGlyph = piGlyphs[0];
+const nGlyph = nGlyphs[0];
+assert(piGlyph && piGlyph.strokes.length >= 3, "handwritten π must be a top bar plus two legs");
+assert(nGlyph && nGlyph.strokes.length >= 1, "latin n must still render");
+assert(
+  piGlyph.strokes[0]?.pathData !== nGlyph.strokes[0]?.pathData,
+  "π must not reuse the latin n glyph (n-with-a-bar)",
+);
+
+const diagram: VerifiedDiagram = {
+  id: "verified_scene",
+  name: "optics",
+  commands: [],
+  anchors: [
+    { id: "object_base", labels: ["object_base", "O", "object position"], x: 420, y: 300, width: 12, height: 12 },
+    { id: "image_base", labels: ["image_base", "I", "image position"], x: 360, y: 300, width: 12, height: 12 },
+    { id: "object", labels: ["object", "O", "object"], x: 420, y: 250, width: 12, height: 80 },
+    { id: "ab", labels: ["ab", "AB"], x: 450, y: 300, width: 200, height: 8 },
+    { id: "mirror", labels: ["mirror", "M"], x: 700, y: 200, width: 16, height: 140 },
+  ],
+  reveals: [],
+  promptAddon: "",
+};
+
+const imageAnchor = spokenFocusTarget("this is I, the image.", diagram);
+assert(imageAnchor?.id === "image_base", "spoken I must mark the image point");
+const objectAnchor = spokenFocusTarget("the object sits in front of the mirror.", diagram);
+assert(objectAnchor?.id === "object_base", "spoken object must mark the smaller object point, not the arrow");
+assert(
+  spokenFocusTarget("i will substitute the given distances.", diagram) === null,
+  "first-person i must not be treated as the image point",
+);
+
+const namedImage = prepareVerifiedLessonSegments([
+  { narration: "this is I, the image.", command: null },
+], diagram);
+assert(namedImage.segments[0]?.command?.type === "FOCUS", "naming I must attach a FOCUS command");
+assert(namedImage.segments[0]?.command?.text === "image_base|pulse", "naming a compact point must pulse the verified image entity");
+assert(
+  checkSegmentAlignment({
+    narration: "this is I, the image.",
+    command: namedImage.segments[0]!.command,
+  }).aligned,
+  "verified FOCUS must stay aligned with the spoken name",
+);
+
+const firstPerson = prepareVerifiedLessonSegments([
+  { narration: "i will substitute the given distances.", command: null },
+], diagram);
+assert(firstPerson.segments[0]?.command === null, "first-person speech must not invent a FOCUS mark");
+
+assert(spokenFocusTarget("notice AB.", diagram)?.id === "ab", "notice AB must select the labeled segment");
+assert(spokenFocusTarget("look at the mirror.", diagram)?.id === "mirror", "a spoken display label must select the figure part");
+const noticedMirror = prepareVerifiedLessonSegments([
+  { narration: "look at the mirror.", command: null },
+], diagram);
+assert(noticedMirror.segments[0]?.command?.type === "FOCUS", "naming the mirror must move the marker");
+assert(noticedMirror.segments[0]?.command?.text === "mirror", "the mirror label must trace the verified apparatus");
+assert(
+  spokenFocusTarget("the mirror equation is one over f.", diagram) === null,
+  "a formula name must not steal FOCUS from a nearby apparatus label",
+);
+assert(
+  spokenFocusTarget("the object sits in front of the mirror.", diagram)?.id === "object_base",
+  "object role still wins over a later apparatus label",
+);
+const noticedEdge = prepareVerifiedLessonSegments([
+  { narration: "notice AB.", command: null },
+], diagram);
+assert(noticedEdge.segments[0]?.command?.type === "FOCUS", "notice AB must attach FOCUS without a teaching tag");
+assert(
+  noticedEdge.segments[0]?.command?.text === "ab",
+  "a long segment is traced, not pulsed like a point",
+);
+
+const circledImage = prepareVerifiedLessonSegments([
+  { narration: "let me circle the image I.", command: null },
+], diagram);
+assert(circledImage.segments[0]?.command?.type === "FOCUS", "circle intent must become FOCUS, not CIRCLE_AROUND");
+assert(
+  circledImage.segments[0]?.command?.text === "image_base|pulse",
+  "circling a labeled point must pulse the verified image entity",
+);
+assert(
+  !/let me circle/i.test(circledImage.segments[0]?.narration ?? ""),
+  "first-person circle speech must be stripped after the semantic focus is attached",
+);
+assert(
+  /notice/i.test(circledImage.segments[0]?.narration ?? ""),
+  "a stripped circle sentence must still leave a spoken notice cue",
+);
+
+// A withheld label is lettered when its name is spoken, never when a WRITE
+// row happens to contain its letter. On the mirror lesson "Given: f = 15 cm"
+// released C, F, M and I under the row (single letters match any row) and
+// they were gone before the FOCUS that named them. Only an entity id releases.
+{
+  const withheld = (): VerifiedDiagram => ({
+    id: "verified_scene",
+    name: "mirror",
+    commands: [],
+    anchors: [],
+    reveals: [],
+    promptAddon: "",
+    deferredAnnotations: [
+      { entityId: "C", commands: [{ type: "LABEL", params: [500, 300, 20], text: "C" }] },
+      { entityId: "F", commands: [{ type: "LABEL", params: [560, 300, 20], text: "F" }] },
+      { entityId: "M", commands: [{ type: "LABEL", params: [640, 200, 20], text: "M" }] },
+      { entityId: "I", commands: [{ type: "LABEL", params: [540, 320, 20], text: "I" }] },
+    ],
+  });
+  const byRow = withheld();
+  const leaked = takeDeferredAnnotations(
+    byRow,
+    // The text trigger is gone from the type; a caller that still passes one
+    // must release nothing.
+    { text: "Given: f = 15 cm" } as unknown as { entityIds?: readonly string[] },
+  );
+  assert(
+    leaked.length === 0,
+    `a WRITE row must release no withheld label, released ${leaked.map((command) => command.text).join(",")}`,
+  );
+  assert(byRow.deferredAnnotations?.length === 4, "a WRITE row must leave every withheld label in place");
+  const byName = withheld();
+  const released = takeDeferredAnnotations(byName, { entityIds: ["C"] });
+  assert(
+    released.length === 1 && released[0]?.text === "C",
+    `naming C must release C alone, released ${released.map((command) => command.text).join(",")}`,
+  );
+  assert(
+    byName.deferredAnnotations?.map((entry) => entry.entityId).join(",") === "F,M,I",
+    "naming C must leave F, M and I withheld",
+  );
+  assert(takeDeferredAnnotations(withheld(), {}).length === 0, "no id releases nothing");
+}
+
+// Spoken-name inference: one FOCUS per figure part the step names, in spoken
+// order, case-sensitive for short names, and none when the model tagged the
+// step itself. "f is the focal length" traced the point F and "m is positive"
+// traced the mirror on the mirror lesson; the letter's case is the difference.
+{
+  const mirrorScene: VerifiedDiagram = {
+    id: "verified_scene",
+    name: "concave mirror",
+    commands: [],
+    reveals: [],
+    promptAddon: "",
+    anchors: [
+      { id: "F", labels: ["F", "focus"], x: 560, y: 296, width: 12, height: 12 },
+      { id: "M", labels: ["M", "mirror"], x: 700, y: 200, width: 16, height: 200 },
+      { id: "C", labels: ["C", "centre of curvature"], x: 500, y: 296, width: 12, height: 12 },
+    ],
+  };
+  const inferredIds = (narration: string, command: DrawCommand | null = null): string[] => {
+    const prepared = prepareVerifiedLessonSegments([{ narration, command }], mirrorScene);
+    return getSegmentCommands(prepared.segments[0] ?? { narration, command: null })
+      .filter((candidate) => candidate.type === "FOCUS")
+      .map((candidate) => parseFocusSpec(candidate.text).targetIds.join(","));
+  };
+  assert(
+    inferredIds("f is the focal length of the concave mirror.").length === 0,
+    `lowercase f is the quantity, not the point F: inferred ${inferredIds("f is the focal length of the concave mirror.").join(" ")}`,
+  );
+  assert(inferredIds("the focus F sits halfway to C.").join(",") === "F", "the focus F must attach one FOCUS on F");
+  assert(
+    inferredIds("M is the mirror, C is the centre.").join(",") === "M,C",
+    `two spoken names must give two FOCUS in spoken order, got ${inferredIds("M is the mirror, C is the centre.").join(",")}`,
+  );
+  assert(
+    inferredIds("C is the centre, and M is the mirror.").join(",") === "C,M",
+    "spoken order, not anchor order, decides the sequence",
+  );
+  const tagged: DrawCommand = { type: "FOCUS", params: [], text: "F", charPosition: 0, narrationBefore: "" };
+  assert(
+    inferredIds("M is the mirror, C is the centre.", tagged).join(",") === "F",
+    "a step with its own FOCUS gets no inferred one, even for names the tag does not cover",
+  );
+  assert(inferredIds("m is positive, so the image is upright.").length === 0, "lowercase m is the magnification, not the mirror");
+}
+
+// A POINT is a FOCUS that draws nothing. It had no case in the verified-scene
+// guard and fell through to "blocked", so every pointing beat the code-lesson
+// conductor issued was dropped: 81.8 s of DSA speech with no ink.
+{
+  const pointAt = (text: string): DrawCommand => ({
+    type: "POINT",
+    params: [],
+    text,
+    charPosition: 0,
+    narrationBefore: "",
+    semanticRef: { entityId: text },
+  });
+  const pointScene: VerifiedDiagram = {
+    id: "verified_scene",
+    name: "point",
+    commands: [],
+    reveals: [],
+    promptAddon: "",
+    anchors: [
+      { id: "F", labels: ["F", "focus"], x: 560, y: 296, width: 12, height: 12 },
+      { id: "C", labels: ["C", "centre"], x: 500, y: 296, width: 12, height: 12 },
+    ],
+  };
+  assert(!isBlockedVerifiedDiagramCommand(pointAt("F,C"), pointScene), "a POINT naming figure parts must reach the marker");
+  assert(isBlockedVerifiedDiagramCommand(pointAt("cell9"), pointScene), "a POINT with a made-up id is still an unverified marker");
+  assert(
+    !isBlockedVerifiedDiagramCommand(pointAt("cell0,cell3"), { ...pointScene, layout: "code_lesson" }),
+    "a code lesson's pointing beats must pass to the conductor",
+  );
+}
+
+const spotlight = parseDrawingCommands("[STEP]notice AB. [FOCUS:ab|spotlight][/STEP]");
+assert(spotlight.commands[0]?.type === "FOCUS" && spotlight.commands[0].text === "ab|spotlight", "FOCUS spotlight form must parse");
+assert(parseFocusSpec(spotlight.commands[0]?.text).emphasis === "spotlight", "FOCUS|spotlight must decode as spotlight");
+assert(parseFocusSpec("ab,cd|pulse").targetIds.join(",") === "ab,cd", "multi-id FOCUS must split entity ids");
+assert(parseFocusSpec("ab,cd|pulse").emphasis === "pulse", "FOCUS|pulse must decode as pulse");
+
+const emphasize = parseDrawingCommands("[STEP]keep this line. [EMPHASIZE:last][/STEP]");
+assert(emphasize.commands[0]?.type === "EMPHASIZE" && emphasize.commands[0].text === "last", "EMPHASIZE must parse a work-row selector");
+const supersede = parseDrawingCommands("[STEP]that earlier line is replaced. [SUPERSEDE:1][/STEP]");
+assert(supersede.commands[0]?.type === "SUPERSEDE" && supersede.commands[0].text === "1", "leftover SUPERSEDE tags must still parse so they do not leak into speech");
+assert(isBlockedVerifiedDiagramCommand(supersede.commands[0]!, null), "SUPERSEDE must not execute as a strike");
+const annotate = parseDrawingCommands("[STEP]the length is 4. [ANNOTATE:u_dim][/STEP]");
+assert(annotate.commands[0]?.type === "ANNOTATE" && annotate.commands[0].text === "u_dim", "ANNOTATE must parse an entity id");
+
+const workRow = resolveWorkAreaRow(parseWorkRowSelector("w2"), [
+  { x: 90, y: 145, width: 120, height: 32, text: "a = 1", workIndex: 1, workId: "w1" },
+  { x: 90, y: 205, width: 120, height: 32, text: "b = 2", workIndex: 2, workId: "w2" },
+]);
+assert(workRow?.text === "b = 2", "work-row selectors must resolve by workId");
+
+const hitDiagram: VerifiedDiagram = {
+  id: "verified_scene",
+  name: "hit",
+  commands: [{
+    type: "DRAW_LINE",
+    params: [450, 300, 700, 300],
+    semanticRef: { entityId: "ab" },
+  }],
+  anchors: [{ id: "ab", labels: ["ab", "AB"], x: 450, y: 292, width: 250, height: 16 }],
+  reveals: [],
+  promptAddon: "",
+};
+assert(hitTestVerifiedAnchor(575, 300, hitDiagram)?.id === "ab", "path-distance hit test must select the traced segment");
+
+// A code lesson's [FOCUS] names a frame of the worked example, not an entity of
+// the figure that happens to be drawn right now. Blocking it as an unverified
+// marker is what froze the board: every figure beat the tutor narrated was
+// dropped before the conductor could advance the walk-through, so the figure
+// stood still for the whole lesson while the voice carried on.
+{
+  const frameBeat = parseDrawingCommands("[STEP]look at the next frame. [FOCUS:store2|spotlight][/STEP]").commands[0]!;
+  assert(
+    isBlockedVerifiedDiagramCommand(frameBeat, hitDiagram),
+    "outside a code lesson an unknown focus target is still an unverified marker",
+  );
+  const codeLessonDiagram: VerifiedDiagram = { ...hitDiagram, layout: "code_lesson" };
+  assert(
+    !isBlockedVerifiedDiagramCommand(frameBeat, codeLessonDiagram),
+    "a code lesson's figure beat must reach the conductor, which resolves the frame",
+  );
+  const prepared = prepareVerifiedLessonSegments(
+    [{ narration: "look at the next frame.", command: frameBeat, commands: [frameBeat] } as unknown as TutorSegment],
+    codeLessonDiagram,
+  );
+  assert(
+    prepared.blockedCommandCount === 0 &&
+      (prepared.segments[0]?.commands ?? []).some((command) => command.type === "FOCUS"),
+    "the mini-buffer must pass a code-lesson figure beat through untouched",
+  );
+}
+assert(hitTestVerifiedAnchor(100, 100, hitDiagram) === null, "far clicks must not select a diagram entity");
+
+// `[WRITE]text,x,y` instead of `[WRITE:text,x,y]`. Seen live: every row of a
+// dimensional-analysis lesson closed after the name, so the board stayed blank
+// and the coordinates were read out loud. Both parsers must recover the row.
+const headerOnlySource =
+  "First, name each quantity. [WRITE]N: [L^-3],90,211\nNext the charge. [WRITE]e: [I T],90,277\n";
+const headerOnlyBatch = parseDrawingCommands(headerOnlySource);
+assert(
+  headerOnlyBatch.commands.length === 2,
+  "a header-only [WRITE] row must be repaired into a board command, not dropped",
+);
+assert(
+  headerOnlyBatch.commands[0]?.text === "N: [L^-3]" &&
+    headerOnlyBatch.commands[0].params[0] === 90 &&
+    headerOnlyBatch.commands[0].params[1] === 211,
+  "the repaired row must keep its text and its coordinates",
+);
+assert(
+  !headerOnlyBatch.narration.includes("90,211") && !headerOnlyBatch.narration.includes("L^-3"),
+  "a repaired row must not leave its text or coordinates in the spoken narration",
+);
+const headerOnlyStreamed: TutorSegment[] = [];
+const headerOnlyParser = new IncrementalTagParser({
+  onSegmentReady: (segment) => headerOnlyStreamed.push(segment),
+});
+for (const char of headerOnlySource) headerOnlyParser.push(char);
+headerOnlyParser.flush();
+assert(
+  headerOnlyStreamed.filter((segment) => segment.command?.type === "WRITE").length === 2,
+  "the streaming parser must repair header-only rows too, since it is the live path",
+);
+assert(
+  headerOnlyStreamed.every((segment) => !segment.narration.includes(",90,")),
+  "streamed narration must never carry board coordinates",
+);
+// A bare header with no row behind it writes nothing, and the tag name itself
+// is protocol, not speech: carrying it into the narration read "[WRITE]" out
+// loud and put it into the continuation history.
+const bareHeader = parseDrawingCommands("[STEP]a header with nothing after it. [WRITE] and prose.[/STEP]");
+assert(
+  bareHeader.commands.length === 0,
+  "a bare [WRITE] carries no row, so it must not compile to an empty board write",
+);
+assert(
+  !bareHeader.narration.includes("[WRITE]"),
+  "a bare [WRITE] must not survive into the spoken narration",
+);
+
+// A header that turns out not to be a row must not swallow a real tag sitting
+// on the same line. Handing the whole buffer back to the narration lost the
+// FOCUS and spoke the tag names instead.
+const salvageSource = "Look here. [WRITE] [FOCUS:crest]\nDone.\n";
+const salvageBatch = parseDrawingCommands(salvageSource);
+assert(
+  salvageBatch.commands.length === 1 && salvageBatch.commands[0]?.type === "FOCUS",
+  "a tag following an unrepairable [WRITE] header must still parse",
+);
+assert(
+  !salvageBatch.narration.includes("[FOCUS") && !salvageBatch.narration.includes("[WRITE]"),
+  "no protocol tag may reach the narration when a header repair fails",
+);
+const salvageStreamed: TutorSegment[] = [];
+const salvageParser = new IncrementalTagParser({
+  onSegmentReady: (segment) => salvageStreamed.push(segment),
+});
+for (const char of salvageSource) salvageParser.push(char);
+salvageParser.flush();
+assert(
+  salvageStreamed.some((segment) => segment.command?.type === "FOCUS"),
+  "the streaming parser must recover a tag that follows an unrepairable header",
+);
+assert(
+  salvageStreamed.every((segment) => !segment.narration.includes("[")),
+  "streamed narration must never carry a protocol tag after a failed repair",
+);
+
+// The repair must not touch a well-formed tag whose body contains brackets.
+const mathRow = parseDrawingCommands("Bar. [WRITE:[4x - x^3/3]_(-2)^(2),90,325]\n");
+assert(
+  mathRow.commands[0]?.text === "[4x - x^3/3]_(-2)^(2)",
+  "the header repair must leave a correct WRITE with bracketed math alone",
+);
+
+console.log("verify-drawing-protocol: nested WRITE/LABEL math tags pass inline, structured, and streaming parsing; header-only text tags are repaired");

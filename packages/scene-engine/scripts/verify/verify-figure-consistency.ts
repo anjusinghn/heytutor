@@ -1,0 +1,368 @@
+/**
+ * Figure consistency rules (compile/figureConsistency.ts), on synthetic documents.
+ * The rules run when compile is asked for them (planner candidate admission).
+ *
+ * Production admitted planner figures whose ink contradicted their own
+ * document: a current mark running against the cell, a cell drawn inside a
+ * galvanometer ring, force arrows stacked on one line, unnamed arrows, and a
+ * region name placed inside a body nested in that region. Each rule is checked
+ * on a figure built here, then mutated so the defect disappears (or appears)
+ * and the verdict must flip. A rule that does not react to its mutation fails.
+ *
+ *   pnpm --filter @heytutor/scene-engine exec tsx scripts/verify/verify-figure-consistency.ts
+ */
+import { compileSceneDocument, validateSceneDocument } from "../../src/index";
+
+type Doc = Record<string, unknown>;
+type Entity = { id: string; kind: string; role: string; label?: string };
+type Construction = { id: string; operator: string; inputs: Record<string, unknown>; outputs: string[] };
+
+const failures: string[] = [];
+let passed = 0;
+
+function scene(entities: Entity[], constructions: Construction[]): Doc {
+  return {
+    schemaVersion: "scene-document/v2",
+    source: { nonMetric: true, representationTier: "qualitative_verified" },
+    visualDecision: { mode: "scene", reason: "synthetic consistency fixture" },
+    entities, relations: [], assertions: [], quantities: [], annotations: [], teachingTimeline: [],
+    revealGroups: [{ id: "setup", dependsOn: [], entityIds: entities.map((entity) => entity.id), narrationCue: "setup" }],
+    constructions, requiredEntityIds: entities.map((entity) => entity.id),
+  };
+}
+const point = (id: string, x: number, y: number, role = "node"): [Entity, Construction] =>
+  [{ id, kind: "point", role }, { id: `make_${id}`, operator: "point", inputs: { x, y, coordinateSpace: "layout" }, outputs: [id] }];
+function build(parts: Array<[Entity, Construction]>): Doc {
+  return scene(parts.map((part) => part[0]), parts.map((part) => part[1]));
+}
+function annotate(document: Doc, ...annotations: Array<{ id: string; kind: string; targetIds: string[] }>): Doc {
+  (document.annotations as unknown[]).push(...annotations);
+  return document;
+}
+
+function codes(document: Doc, figureConsistency = true): string[] {
+  const validated = validateSceneDocument(structuredClone(document));
+  if (!validated.document) return [`invalid:${validated.report.issues.map((issue) => `${issue.code} ${issue.message}`).join(",")}`];
+  // Planner candidate admission opts in; engine built figures keep their own conventions.
+  const compiled = compileSceneDocument(validated.document, { figureConsistency });
+  return compiled.report.issues.filter((issue) => issue.severity === "fatal").map((issue) => issue.code);
+}
+
+function expect(name: string, document: Doc, code: string, present: boolean): void {
+  const found = codes(document);
+  if (found.some((value) => value.startsWith("invalid:"))) { failures.push(`${name}: ${found.join(" ")}`); console.log(`FAIL ${name}: ${found.join(" ")}`); return; }
+  if (found.includes(code) === present) { passed += 1; console.log(`pass ${name}`); return; }
+  const message = `${name}: expected ${code} ${present ? "present" : "absent"}, fatal codes [${found.join(", ")}]`;
+  failures.push(message); console.log(`FAIL ${message}`);
+}
+
+// --- current sense against the cell -------------------------------------------------
+// One loop P -cell- S -wire- R -resistor- Q -wire- P. The cell's long plate is at its
+// start, P, so conventional current runs P to Q along the bottom wire.
+function loop(sense: string, role = "current direction", extraSource = false, label = "I"): Doc {
+  return build([
+    point("P", 0, 0), point("Q", 5, 0), point("R", 5, 3), point("S", 0, 3),
+    [{ id: "cell", kind: "component", role: "source", label: "E" }, { id: "make_cell", operator: "symbol", inputs: { start: "P", end: "S", symbol: "cell" }, outputs: ["cell"] }],
+    [{ id: "top", kind: "connector", role: "wire" }, { id: "make_top", operator: "connect", inputs: { start: "S", end: "R" }, outputs: ["top"] }],
+    [{ id: "load", kind: "component", role: extraSource ? "source" : "resistor", label: "R" }, { id: "make_load", operator: "symbol", inputs: { start: "R", end: "Q", symbol: extraSource ? "battery" : "resistor" }, outputs: ["load"] }],
+    [{ id: "bottom", kind: "connector", role: "wire" }, { id: "make_bottom", operator: "connect", inputs: { start: "P", end: "Q" }, outputs: ["bottom"] }],
+    [{ id: "flow", kind: "sign_badge", role, label }, { id: "make_flow", operator: "sign_badge", inputs: { target: "bottom", at: 0.5, sense }, outputs: ["flow"] }],
+  ]);
+}
+expect("current leaving the positive plate is admitted", loop("positive"), "current_against_source_polarity", false);
+expect("mutation: the same mark reversed is refused", loop("negative"), "current_against_source_polarity", true);
+expect("an electron flow mark runs the other way and is not judged", loop("negative", "electron flow"), "current_against_source_polarity", false);
+expect("two cells: the polarity alone does not fix the current", loop("negative", "current direction", true), "current_against_source_polarity", false);
+expect("a voltage reference badge may point against the current and is not judged", loop("negative", "voltage reference", false, "V"), "current_against_source_polarity", false);
+expect("mutation: a badge labelled I with a neutral role is still judged as a current", loop("negative", "direction marker", false, "I"), "current_against_source_polarity", true);
+expect("mutation: a badge whose role names a current is judged whatever its label", loop("negative", "conventional current", false, "flow"), "current_against_source_polarity", true);
+// A badge may carry its name in a label annotation instead of the entity label.
+function annotatedLoop(sense: string, text: string): Doc {
+  const document = loop(sense, "direction marker");
+  for (const entity of document.entities as Entity[]) if (entity.id === "flow") delete entity.label;
+  (document.annotations as unknown[]).push({ id: "flow_name", kind: "label", targetIds: ["flow"], text });
+  return document;
+}
+expect("mutation: a reversed badge named I only by a label annotation is still judged as a current", annotatedLoop("negative", "I"), "current_against_source_polarity", true);
+expect("a badge named I only by a label annotation and drawn forward is admitted", annotatedLoop("positive", "I"), "current_against_source_polarity", false);
+expect("a badge named V only by a label annotation is not judged", annotatedLoop("negative", "V"), "current_against_source_polarity", false);
+// The compiler draws a label only on its first target; a later target is not named by it.
+function sharedLabelLoop(sense: string): Doc {
+  const document = loop(sense, "direction marker");
+  for (const entity of document.entities as Entity[]) if (entity.id === "flow") delete entity.label;
+  (document.annotations as unknown[]).push({ id: "wire_name", kind: "label", targetIds: ["bottom", "flow"], text: "I" });
+  return document;
+}
+expect("a reversed unnamed badge listed second on a wire's label is not judged as a current", sharedLabelLoop("negative"), "current_against_source_polarity", false);
+
+// A stub off the loop carries no current, so a mark on it is not the source current.
+const stub = loop("positive");
+(stub.entities as Entity[]).push({ id: "T", kind: "point", role: "node" }, { id: "stub", kind: "connector", role: "wire" }, { id: "stubFlow", kind: "sign_badge", role: "current direction", label: "I2" });
+(stub.constructions as Construction[]).push({ id: "make_T", operator: "point", inputs: { x: 7, y: 0, coordinateSpace: "layout" }, outputs: ["T"] },
+  { id: "make_stub", operator: "connect", inputs: { start: "T", end: "Q" }, outputs: ["stub"] },
+  { id: "make_stubFlow", operator: "sign_badge", inputs: { target: "stub", at: 0.5, sense: "positive" }, outputs: ["stubFlow"] });
+for (const key of ["requiredEntityIds"]) (stub[key] as string[]).push("T", "stub", "stubFlow");
+((stub.revealGroups as Array<{ entityIds: string[] }>)[0]!.entityIds).push("T", "stub", "stubFlow");
+expect("a mark on a dead end stub off the loop is not judged", stub, "current_against_source_polarity", false);
+
+// A switch drawn open (the renderer's default when no state is given) is no bypass:
+// the resistor still carries the whole cell current, so a reversed mark on it is refused.
+// Current runs P to Q along the bottom and so Q to R through the resistor, against its start-to-end sense.
+function bypassed(state?: string): Doc {
+  return build([
+    point("P", 0, 0), point("Q", 5, 0), point("R", 5, 3), point("S", 0, 3),
+    [{ id: "cell", kind: "component", role: "source", label: "E" }, { id: "make_cell", operator: "symbol", inputs: { start: "P", end: "S", symbol: "cell" }, outputs: ["cell"] }],
+    [{ id: "top", kind: "connector", role: "wire" }, { id: "make_top", operator: "connect", inputs: { start: "S", end: "R" }, outputs: ["top"] }],
+    [{ id: "load", kind: "component", role: "resistor", label: "R" }, { id: "make_load", operator: "symbol", inputs: { start: "R", end: "Q", symbol: "resistor" }, outputs: ["load"] }],
+    [{ id: "bottom", kind: "connector", role: "wire" }, { id: "make_bottom", operator: "connect", inputs: { start: "P", end: "Q" }, outputs: ["bottom"] }],
+    [{ id: "key", kind: "component", role: "switch", label: "K" }, { id: "make_key", operator: "symbol", inputs: { start: "R", end: "Q", symbol: "switch", ...(state ? { state } : {}) }, outputs: ["key"] }],
+    [{ id: "flow", kind: "sign_badge", role: "current direction", label: "I" }, { id: "make_flow", operator: "sign_badge", inputs: { target: "load", at: 0.5, sense: "positive" }, outputs: ["flow"] }],
+  ]);
+}
+expect("an open switch bypass with no state (drawn open) does not hide a reversed current mark", bypassed(), "current_against_source_polarity", true);
+expect("an open switch bypass with state open does not hide a reversed current mark", bypassed("open"), "current_against_source_polarity", true);
+expect("mutation: a closed switch bypass shares the current, so the mark is not judged", bypassed("closed"), "current_against_source_polarity", false);
+
+// --- glyphs on top of each other ----------------------------------------------------
+// A bridge on A B C D with the meter across B D. With the cell across A C its plates
+// sit inside the meter ring; routed outside the diamond the two glyphs are apart.
+function bridge(cellAcross: boolean): Doc {
+  const parts: Array<[Entity, Construction]> = [
+    point("A", 0, 2), point("B", 2, 4), point("C", 4, 2), point("D", 2, 0),
+    [{ id: "r1", kind: "component", role: "arm", label: "P" }, { id: "make_r1", operator: "symbol", inputs: { start: "A", end: "B", symbol: "resistor" }, outputs: ["r1"] }],
+    [{ id: "r2", kind: "component", role: "arm", label: "Q" }, { id: "make_r2", operator: "symbol", inputs: { start: "B", end: "C", symbol: "resistor" }, outputs: ["r2"] }],
+    [{ id: "r3", kind: "component", role: "arm", label: "S" }, { id: "make_r3", operator: "symbol", inputs: { start: "A", end: "D", symbol: "resistor" }, outputs: ["r3"] }],
+    [{ id: "r4", kind: "component", role: "arm", label: "T" }, { id: "make_r4", operator: "symbol", inputs: { start: "D", end: "C", symbol: "resistor" }, outputs: ["r4"] }],
+    [{ id: "meter", kind: "component", role: "galvanometer", label: "G" }, { id: "make_meter", operator: "symbol", inputs: { start: "B", end: "D", symbol: "galvanometer" }, outputs: ["meter"] }],
+  ];
+  if (cellAcross) {
+    parts.push([{ id: "cell", kind: "component", role: "source", label: "E" }, { id: "make_cell", operator: "symbol", inputs: { start: "A", end: "C", symbol: "cell" }, outputs: ["cell"] }]);
+  } else {
+    parts.push(point("E1", 0, -2), point("E2", 4, -2),
+      [{ id: "cell", kind: "component", role: "source", label: "E" }, { id: "make_cell", operator: "symbol", inputs: { start: "E1", end: "E2", symbol: "cell" }, outputs: ["cell"] }],
+      [{ id: "lead1", kind: "connector", role: "wire" }, { id: "make_lead1", operator: "connect", inputs: { start: "A", end: "E1" }, outputs: ["lead1"] }],
+      [{ id: "lead2", kind: "connector", role: "wire" }, { id: "make_lead2", operator: "connect", inputs: { start: "C", end: "E2" }, outputs: ["lead2"] }]);
+  }
+  return build(parts);
+}
+expect("a cell across the meter's diagonal is refused", bridge(true), "component_glyph_overlap", true);
+expect("mutation: the cell routed outside the bridge is admitted", bridge(false), "component_glyph_overlap", false);
+
+// --- arrows stacked on one line, and unnamed arrows ---------------------------------
+function body(arrows: Array<{ id: string; from: [number, number]; to: [number, number]; label?: string; role?: string; operator?: string; inputs?: Record<string, unknown> }>): Doc {
+  const parts: Array<[Entity, Construction]> = [
+    point("centre", 3, 2, "construction helper"),
+    [{ id: "block", kind: "rectangle", role: "body", label: "block" }, { id: "make_block", operator: "rectangle", inputs: { center: "centre", width: 2, height: 1.4 }, outputs: ["block"] }],
+  ];
+  for (const arrow of arrows) {
+    parts.push(point(`${arrow.id}_a`, ...arrow.from, "construction helper"), point(`${arrow.id}_b`, ...arrow.to, "construction helper"));
+    parts.push([{ id: arrow.id, kind: "vector", role: arrow.role ?? "force", ...(arrow.label ? { label: arrow.label } : {}) },
+      { id: `make_${arrow.id}`, operator: arrow.operator ?? "vector", inputs: arrow.inputs ?? { start: `${arrow.id}_a`, end: `${arrow.id}_b` }, outputs: [arrow.id] }]);
+  }
+  return build(parts);
+}
+expect("two forces drawn through one line are refused", body([
+  { id: "down", from: [3, 2.7], to: [3, 1.8], label: "F1" }, { id: "up", from: [3, 1.3], to: [3, 2.5], label: "F2" },
+]), "vector_collinear_overlap", true);
+expect("mutation: the same forces side by side are admitted", body([
+  { id: "down", from: [2.6, 2.7], to: [2.6, 1.8], label: "F1" }, { id: "up", from: [3.4, 1.3], to: [3.4, 2.5], label: "F2" },
+]), "vector_collinear_overlap", false);
+expect("opposite forces meeting at one point do not overlap", body([
+  { id: "down", from: [3, 2], to: [3, 0.5], label: "W" }, { id: "up", from: [3, 2], to: [3, 3.5], label: "N" },
+]), "vector_collinear_overlap", false);
+expect("a projection on its basis line is not an overlap", body([
+  { id: "a", from: [1, 0], to: [4, 3], label: "a" }, { id: "b", from: [1, 0], to: [6, 0], label: "b" },
+  { id: "pa", from: [1, 0], to: [1, 0], label: "p", operator: "vector_projection", inputs: { vector: "a", onto: "b", origin: "a_a" } },
+]), "vector_collinear_overlap", false);
+expect("an unnamed arrow is refused", body([
+  { id: "push", from: [1, 2], to: [2, 2], label: "F", role: "push" }, { id: "pull", from: [4, 2], to: [5.5, 2], role: "pull" },
+]), "vector_without_label", true);
+expect("mutation: the arrow named is admitted", body([
+  { id: "push", from: [1, 2], to: [2, 2], label: "F", role: "push" }, { id: "pull", from: [4, 2], to: [5.5, 2], label: "T", role: "pull" },
+]), "vector_without_label", false);
+expect("an arrow mirroring a named arrow is read as its twin", body([
+  { id: "push", from: [1, 2], to: [2, 2], label: "F", role: "push" }, { id: "pull", from: [5, 2], to: [4, 2], role: "pull" },
+]), "vector_without_label", false);
+expect("an unnamed arrow beside a named arrow of the same length and direction is refused", body([
+  { id: "push", from: [0.5, 3.5], to: [1.5, 3.5], label: "F", role: "push" }, { id: "pull", from: [4.5, 3.5], to: [5.5, 3.5], role: "pull" },
+]), "vector_without_label", true);
+expect("an unnamed arrow parallel to a named one, same length and sense, is refused", body([
+  { id: "push", from: [0.5, 0.5], to: [0.5, 1.5], label: "F", role: "push" }, { id: "pull", from: [5.5, 2.5], to: [5.5, 3.5], role: "pull" },
+]), "vector_without_label", true);
+expect("a family of like arrows sharing one role is named once", body([
+  { id: "line1", from: [0.5, 3.5], to: [2, 3.5], role: "field line" }, { id: "line2", from: [4, 0.5], to: [5.5, 0.5], role: "field line" },
+]), "vector_without_label", false);
+
+// A trace annotation redraws its arrow's own ink; the copy is not a second arrow on that line.
+const traced = () => annotate(body([
+  { id: "down", from: [2.6, 2.7], to: [2.6, 1.8], label: "F1" }, { id: "up", from: [3.4, 1.3], to: [3.4, 2.5], label: "F2" },
+]), { id: "traceUp", kind: "trace", targetIds: ["up"] });
+expect("tracing an arrow is not a collinear overlap", traced(), "vector_collinear_overlap", false);
+expect("a trace of a named arrow is not an unnamed arrow", traced(), "vector_without_label", false);
+expect("tracing still leaves two forces through one line refused", annotate(body([
+  { id: "down", from: [3, 2.7], to: [3, 1.8], label: "F1" }, { id: "up", from: [3, 1.3], to: [3, 2.5], label: "F2" },
+]), { id: "traceUp", kind: "trace", targetIds: ["up"] }), "vector_collinear_overlap", true);
+
+// --- a region name inside a nested body ---------------------------------------------
+function tank(bodyAt: number): Doc {
+  return build([
+    point("t1", 0, 0, "construction helper"), point("t2", 6, 0, "construction helper"), point("t3", 6, 4, "construction helper"), point("t4", 0, 4, "construction helper"),
+    [{ id: "liquid", kind: "polygon", role: "liquid region" }, { id: "make_liquid", operator: "polygon", inputs: { points: ["t1", "t2", "t3", "t4"] }, outputs: ["liquid"] }],
+    point("bodyCentre", bodyAt, 2, "construction helper"),
+    [{ id: "solid", kind: "rectangle", role: "immersed body", label: "body" }, { id: "make_solid", operator: "rectangle", inputs: { center: "bodyCentre", width: 1.6, height: 1.2 }, outputs: ["solid"] }],
+    [{ id: "liquidName", kind: "label", role: "region name", label: "liquid" }, { id: "make_liquidName", operator: "label", inputs: { text: "liquid", target: "liquid" }, outputs: ["liquidName"] }],
+  ]);
+}
+expect("a region name inside the body nested in it is refused", tank(3), "region_label_in_nested_body", true);
+expect("mutation: the body moved aside, the name stays in the liquid", tank(1.2), "region_label_in_nested_body", false);
+// A loop highlight draws a larger outline around its target under the annotation's own id.
+// Around a diagonal rod in the liquid that outline is a box holding the liquid's name,
+// which sits clear of every body: the highlight is not a body.
+function highlightedRod(): Doc {
+  const document = tank(1.2);
+  const parts: Array<[Entity, Construction]> = [point("r1", 2.5, 0.5, "construction helper"), point("r2", 5.5, 3.5, "construction helper"),
+    [{ id: "rod", kind: "segment", role: "rod", label: "rod" }, { id: "make_rod", operator: "segment", inputs: { start: "r1", end: "r2" }, outputs: ["rod"] }]];
+  for (const [entity, construction] of parts) {
+    (document.entities as Entity[]).push(entity);
+    (document.constructions as Construction[]).push(construction);
+    (document.requiredEntityIds as string[]).push(entity.id);
+    ((document.revealGroups as Array<{ entityIds: string[] }>)[0]!.entityIds).push(entity.id);
+  }
+  return annotate(document, { id: "ring", kind: "loop", targetIds: ["rod"] });
+}
+expect("a loop highlight holding the region name does not count as a nested body", highlightedRod(), "region_label_in_nested_body", false);
+expect("mutation: a highlighted body still refuses a name inside the body", annotate(tank(3), { id: "ring", kind: "loop", targetIds: ["solid"] }), "region_label_in_nested_body", true);
+
+// --- two axes drawn over one another ------------------------------------------------
+// Production drew a transverse and a longitudinal wave as two axes in two reveal groups
+// with no placement: both landed on one frame, so the compression mark sat on a crest.
+function frames(count: 1 | 2, options: { curves?: boolean; firstRange?: [number, number, number, number]; secondRange?: [number, number, number, number]; expressions?: [string, string] } = {}): Doc {
+  const parts: Array<[Entity, Construction]> = [];
+  const names = ["T", "L"].slice(0, count);
+  for (const [index, name] of names.entries()) {
+    const [xMin, xMax, yMin, yMax] = index === 1 && options.secondRange ? options.secondRange : index === 0 && options.firstRange ? options.firstRange : [-0.4, 8.6, -2.6, 2.6];
+    parts.push([{ id: `axes${name}`, kind: "axes", role: `${name} axes` }, { id: `make_axes${name}`, operator: "axes", inputs: { xMin, xMax, yMin, yMax }, outputs: [`axes${name}`] }]);
+    if (options.curves !== false) parts.push([{ id: `wave${name}`, kind: "polyline", role: `${name} wave`, label: `wave ${index + 1}` }, { id: `make_wave${name}`, operator: "function_curve", inputs: { expression: options.expressions?.[index] ?? "1.6*sin(1.5707963267948966*x)", variable: "x", xMin: 0, xMax: 8, samples: 49 }, outputs: [`wave${name}`] }]);
+  }
+  const document = build(parts);
+  document.revealGroups = names.map((name, index) => ({
+    id: `panel${name}`, dependsOn: index === 0 ? [] : ["panelT"], entityIds: [`axes${name}`, ...(options.curves === false ? [] : [`wave${name}`])], narrationCue: `panel ${name}` }));
+  return document;
+}
+expect("two axes in two reveal groups drawn on one frame are refused", frames(2), "axes_frames_overlap", true);
+expect("two axes with different ranges still share the world frame and are refused", frames(2, { secondRange: [-1, 4, -1, 1] }), "axes_frames_overlap", true);
+expect("mutation: the same figure with one axes is admitted", frames(1), "axes_frames_overlap", false);
+expect("two lone axes the compiler packs into separate panels are admitted", frames(2, { curves: false }), "axes_frames_overlap", false);
+// One graph split at its axis (g(r) above, V(r) below a shared r axis) is not two graphs
+// on one scale: each frame reaches past the shared axis only by a margin.
+const decay: [string, string] = ["2*exp(-0.3*x)", "-2*exp(-0.3*x)"];
+expect("two frames on opposite halves of one shared axis are admitted", frames(2, { firstRange: [-0.4, 8.6, -0.3, 2.6], secondRange: [-0.4, 8.6, -2.6, 0.3], expressions: decay }), "axes_frames_overlap", false);
+expect("a frame spanning both signs beside a half-plane frame is still refused", frames(2, { firstRange: [-0.4, 8.6, -2.6, 2.6], secondRange: [-0.4, 8.6, -2.6, 0.3], expressions: decay }), "axes_frames_overlap", true);
+expect("opposite-half frames whose curves cross the shared axis are still refused", frames(2, { firstRange: [-0.4, 8.6, -0.3, 2.6], secondRange: [-0.4, 8.6, -2.6, 0.3] }), "axes_frames_overlap", true);
+expect("two frames in the same half are still refused", frames(2, { firstRange: [-0.4, 8.6, -0.3, 2.6], secondRange: [-0.4, 8.6, -0.3, 2.6], expressions: ["2*exp(-0.3*x)", "1.5*exp(-0.2*x)"] }), "axes_frames_overlap", true);
+
+// Each half must hold a curve of its own: frames that claim opposite halves with both
+// curves above the axis are two graphs on one scale (x beside a positive v).
+const halves = { firstRange: [-0.4, 8.6, -0.3, 2.6] as [number, number, number, number], secondRange: [-0.4, 8.6, -2.6, 0.3] as [number, number, number, number] };
+expect("opposite-half frames with both curves above the axis are still refused", frames(2, { ...halves, expressions: ["2*exp(-0.3*x)", "1.5*exp(-0.2*x)"] }), "axes_frames_overlap", true);
+expect("opposite-half frames with both curves below the axis are still refused", frames(2, { ...halves, expressions: ["-2*exp(-0.3*x)", "-1.5*exp(-0.2*x)"] }), "axes_frames_overlap", true);
+expect("opposite halves listed lower first are still one graph split at its axis", frames(2, { firstRange: halves.secondRange, secondRange: halves.firstRange, expressions: ["-2*exp(-0.3*x)", "2*exp(-0.3*x)"] }), "axes_frames_overlap", false);
+expect("opposite-half frames over different x spans are still refused", frames(2, { firstRange: [-0.4, 8.6, -0.3, 2.6], secondRange: [-0.4, 4.6, -2.6, 0.3], expressions: decay }), "axes_frames_overlap", true);
+// A straight segment crossing the shared axis lands in the other graph's half just as a curve does.
+function halvesWithLine(expressions: [string, string], from: [number, number], to: [number, number]): Doc {
+  const document = frames(2, { ...halves, expressions });
+  const parts: Array<[Entity, Construction]> = [point("c1", from[0], from[1], "construction helper"), point("c2", to[0], to[1], "construction helper"),
+    [{ id: "crossing", kind: "segment", role: "line", label: "crossing" }, { id: "make_crossing", operator: "segment", inputs: { start: "c1", end: "c2" }, outputs: ["crossing"] }]];
+  for (const [entity, construction] of parts) {
+    (document.entities as Entity[]).push(entity);
+    (document.constructions as Construction[]).push(construction);
+    (document.requiredEntityIds as string[]).push(entity.id);
+    ((document.revealGroups as Array<{ entityIds: string[] }>)[0]!.entityIds).push(entity.id);
+  }
+  return document;
+}
+expect("a straight line crossing the shared axis still refuses opposite-half frames", halvesWithLine(decay, [4, 1.5], [4, -1.5]), "axes_frames_overlap", true);
+const sameHalf: [string, string] = ["2*exp(-0.3*x)", "1.5*exp(-0.2*x)"];
+expect("a short line below does not stand in for the lower graph", halvesWithLine(sameHalf, [3, -1], [4, -1.5]), "axes_frames_overlap", true);
+expect("a flat reference line below does not stand in for the lower graph", halvesWithLine(sameHalf, [0, -1], [8, -1]), "axes_frames_overlap", true);
+expect("a true split graph with a short line in one half is still admitted", halvesWithLine(decay, [3, 1], [4, 1.5]), "axes_frames_overlap", false);
+
+// --- two cells, for polarity marks -------------------------------------------------
+// Rails T (top) and B (bottom). Branch i: T -wire- Ti -resistor ri- Mi -cell- Bi -wire- B. A cell drawn from Mi to
+// Bi has its long plate at Mi.
+function parallel(up: boolean[] = [true, true]): Doc {
+  const parts: Array<[Entity, Construction]> = [point("T", 3, 4), point("B", 3, -4)];
+  up.forEach((positiveUp, index) => {
+    const x = index === 0 ? 0 : 6;
+    parts.push(point(`T${index}`, x, 4), point(`M${index}`, x, 0), point(`B${index}`, x, -4),
+      [{ id: `wt${index}`, kind: "connector", role: "wire" }, { id: `make_wt${index}`, operator: "connect", inputs: { start: "T", end: `T${index}` }, outputs: [`wt${index}`] }],
+      [{ id: `r${index}`, kind: "component", role: "internal resistance", label: `r${index + 1}` }, { id: `make_r${index}`, operator: "symbol", inputs: { start: `T${index}`, end: `M${index}`, symbol: "resistor" }, outputs: [`r${index}`] }],
+      [{ id: `cell${index}`, kind: "component", role: "source", label: `E${index + 1}` }, { id: `make_cell${index}`, operator: "symbol", inputs: positiveUp ? { start: `M${index}`, end: `B${index}`, symbol: "cell" } : { start: `B${index}`, end: `M${index}`, symbol: "cell" }, outputs: [`cell${index}`] }],
+      [{ id: `wb${index}`, kind: "connector", role: "wire" }, { id: `make_wb${index}`, operator: "connect", inputs: { start: `B${index}`, end: "B" }, outputs: [`wb${index}`] }]);
+  });
+  parts.push([{ id: "load", kind: "component", role: "load", label: "R" }, { id: "make_load", operator: "symbol", inputs: { start: "T", end: "B", symbol: "resistor" }, outputs: ["load"] }]);
+  return build(parts);
+}
+// --- polarity marks against the plates ----------------------------------------------
+// The loop's cell runs P to S, so its long plate is at P. Marks on terminal points land in the order the points are
+// drawn, P before S, whatever order the targets are listed in.
+const MARK = "polarity_mark_against_plates";
+function marked(text: string | undefined, targetIds: string[], reversedCell = false): Doc {
+  const document = loop("positive");
+  if (reversedCell) for (const construction of document.constructions as Construction[]) if (construction.id === "make_cell") construction.inputs = { start: "S", end: "P", symbol: "cell" };
+  (document.annotations as unknown[]).push({ id: "signs", kind: "polarity", targetIds, ...(text === undefined ? {} : { text }) });
+  if (reversedCell) for (const construction of document.constructions as Construction[]) if (construction.id === "make_flow") construction.inputs = { ...construction.inputs, sense: "negative" };
+  return document;
+}
+expect("a + written at the long plate is admitted", marked("+-", ["P", "S"]), MARK, false);
+expect("the same marks listed the other way still land at the long plate", marked("+-", ["S", "P"]), MARK, false);
+expect("mutation: a + written at the short plate is refused", marked("-+", ["P", "S"]), MARK, true);
+expect("mutation: a cell drawn the other way under the same marks is refused", marked("+-", ["P", "S"], true), MARK, true);
+expect("marks with no written text are not judged", marked(undefined, ["P", "S"], true), MARK, false);
+// Marks on the cell itself land at its start terminal and its long plate whatever the text says, so they are not judged.
+expect("marks on the cell itself are not judged, written +-", marked("+-", ["cell"]), MARK, false);
+expect("marks on the cell itself are not judged, written -+", marked("-+", ["cell"]), MARK, false);
+expect("marks on a resistor are not judged", marked("-+", ["load"]), MARK, false);
+expect("marks spread over three points are not judged", marked("+-", ["S", "P", "Q"], true), MARK, false);
+// Recorded pairs write the Unicode minus (U+2212), and some draw the source as a battery: both must be judged.
+function batteryMarked(text: string): Doc {
+  const document = marked(text, ["P", "S"]);
+  for (const construction of document.constructions as Construction[]) if (construction.id === "make_cell") construction.inputs = { ...construction.inputs, symbol: "battery" };
+  for (const entity of document.entities as Entity[]) if (entity.id === "cell") entity.role = "battery";
+  return document;
+}
+expect("a battery's + written with the Unicode minus at its long plate is admitted", batteryMarked("+\u2212"), MARK, false);
+expect("mutation: a battery's + written with the Unicode minus at its short plate is refused", batteryMarked("\u2212+"), MARK, true);
+const twoMarked = parallel();
+(twoMarked.annotations as unknown[]).push({ id: "signs0", kind: "polarity", targetIds: ["M0", "B0"], text: "+-" }, { id: "signs1", kind: "polarity", targetIds: ["M1", "B1"], text: "-+" });
+expect("mutation: one cell's marks right and the other's at its short plate is refused", twoMarked, MARK, true);
+const twoRight = parallel();
+(twoRight.annotations as unknown[]).push({ id: "signs0", kind: "polarity", targetIds: ["M0", "B0"], text: "+-" }, { id: "signs1", kind: "polarity", targetIds: ["M1", "B1"], text: "+-" });
+expect("both cells' marks at their long plates are admitted", twoRight, MARK, false);
+
+// A short cell between two resistors: its label's leader runs beside the plates and must not be read as one.
+function crowded(text: string): Doc {
+  const named = (id: string, symbol: string, start: string, end: string, role: string, label: string): [Entity, Construction] =>
+    [{ id, kind: "component", role, label }, { id: `make_${id}`, operator: "symbol", inputs: { start, end, symbol }, outputs: [id] }];
+  const join = (id: string, start: string, end: string): [Entity, Construction] =>
+    [{ id, kind: "connector", role: "wire" }, { id: `make_${id}`, operator: "connect", inputs: { start, end }, outputs: [id] }];
+  const document = build([
+    point("P", 0, 0), point("A", 0, 1.2), point("C", 0, 2.8), point("S", 0, 4),
+    point("P2", 0.9, 0), point("S2", 0.9, 4), point("R", 6, 4), point("Q", 6, 0),
+    join("w1", "P", "A"), named("cell", "cell", "C", "A", "source", "E"), join("w2", "C", "S"),
+    named("ra", "resistor", "P2", "S2", "resistor", "R_a = 2 Ω"), join("w3", "S", "S2"), join("w4", "P", "P2"),
+    point("L1", -0.9, 0), point("L2", -0.9, 4), named("rb", "resistor", "L1", "L2", "resistor", "R_b = 3 Ω"), join("w5", "L1", "P"), join("w6", "L2", "S"),
+    join("top", "S2", "R"), named("load", "resistor", "R", "Q", "resistor", "R"), join("bottom", "Q", "P2"),
+  ]);
+  // Points are drawn A before C, and the cell's long plate is at C, so "-+" puts the + at the long plate.
+  return annotate(document, { id: "signs", kind: "polarity", targetIds: ["A", "C"], text } as never);
+}
+expect("a true + at the long plate beside the cell's label leader is admitted", crowded("-+"), MARK, false);
+expect("mutation: the same crowded cell with the + at its short plate is refused", crowded("+-"), MARK, true);
+
+// Scope: without the option (engine built figures) the rules do not run.
+if (codes(loop("negative"), false).includes("current_against_source_polarity")) { failures.push("the rules ran without the figureConsistency option"); console.log("FAIL the rules ran without the figureConsistency option"); }
+else { passed += 1; console.log("pass the rules run only when admission opts in"); }
+
+console.log(`\n${passed} passed, ${failures.length} failed`);
+if (failures.length) process.exit(1);
