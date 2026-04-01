@@ -39,3 +39,5 @@ CREATE TABLE IF NOT EXISTS "user_settings" (
   CONSTRAINT "user_settings_pkey" PRIMARY KEY ("user_id"),
   CONSTRAINT "user_settings_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
+
+# session wip 0
