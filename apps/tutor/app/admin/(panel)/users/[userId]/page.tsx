@@ -13,3 +13,5 @@ export default async function AdminUserDetailPage({
   const { userId } = await params;
   return <UserDetailView userId={userId} />;
 }
+
+# session wip 0
