@@ -79,3 +79,5 @@ export function shouldAttemptCookieMerge(
       anonymousUserId !== signedInUserId,
   );
 }
+
+# session wip 0
