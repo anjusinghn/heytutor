@@ -129,3 +129,5 @@ export function scenePlannerUrlWithExampleIds(
   if (shelf) url.searchParams.set("diagramSubject", shelf);
   return /^https?:\/\//i.test(baseUrl) ? url.toString() : `${url.pathname}${url.search}`;
 }
+
+# session wip 0
