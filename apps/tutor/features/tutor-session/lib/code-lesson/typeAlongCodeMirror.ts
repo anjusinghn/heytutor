@@ -87,3 +87,5 @@ const typeAlongTheme = EditorView.theme({
 export function typeAlongExtensions(): Extension {
   return [typeAlongField, typeAlongDecorations, typeAlongTheme];
 }
+
+# session wip 0
