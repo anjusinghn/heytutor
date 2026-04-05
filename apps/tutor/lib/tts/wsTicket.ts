@@ -103,3 +103,5 @@ export function readWsTicket(
 export function verifyWsTicket(ticket: string, nowMs = Date.now(), env?: NodeJS.ProcessEnv): boolean {
   return readWsTicket(ticket, nowMs, env) !== null;
 }
+
+# session wip 0
