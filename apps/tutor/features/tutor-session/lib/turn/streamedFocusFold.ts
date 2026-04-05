@@ -37,3 +37,5 @@ export function createStreamedFocusFold(
     foldedFocusSegmentCount: () => folder?.foldedFocusSegmentCount() ?? 0,
   };
 }
+
+# session wip 0
