@@ -9,3 +9,5 @@ CREATE TABLE IF NOT EXISTS "admins" (
 INSERT INTO "admins" ("email")
 VALUES ('rishivhavle21@gmail.com')
 ON CONFLICT ("email") DO NOTHING;
+
+# session wip 0
