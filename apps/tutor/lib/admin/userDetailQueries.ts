@@ -189,3 +189,5 @@ export async function userDetail(userId: string): Promise<UserDetailPayload | nu
     inference: costs.inference,
   };
 }
+
+# session wip 0
