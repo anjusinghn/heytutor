@@ -51,3 +51,5 @@ assert.match(read('src/components/hero-lesson/LiveLessonBoard.tsx'), /<Whiteboar
 assert.match(read('src/components/hero-lesson/heroLessonPlayer.ts'), /drawSegmentInk/)
 
 console.log('verify-hero-lesson: verified scene and exact results play through the live whiteboard renderer')
+
+# session wip 0
