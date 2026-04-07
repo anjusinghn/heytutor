@@ -34,3 +34,5 @@ if (process.argv[1]?.endsWith("judge-check.ts")) {
   console.log(`confusion: ${Object.entries(result.confusion).sort().map(([key, count]) => `${key}=${count}`).join(" ") || "none"}`);
   if (result.missing.length > 0) process.exitCode = 2;
 }
+
+# session wip 0
