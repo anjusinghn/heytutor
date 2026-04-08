@@ -38,3 +38,5 @@ export async function GET(request: Request): Promise<Response> {
     fxDate: rate?.date ?? null, unavailableReason: currency === "INR" && !rate ? "exchange_rate_unavailable" : !available ? "payments_unavailable" : null, plans,
     promo: requestedPromo ? { code: requestedPromo, percentOff: promo?.percentOff ?? null } : null }, { headers });
 }
+
+# session wip 0
