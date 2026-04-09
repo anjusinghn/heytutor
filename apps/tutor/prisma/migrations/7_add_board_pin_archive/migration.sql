@@ -6,3 +6,5 @@ ALTER TABLE "boards" ADD COLUMN IF NOT EXISTS "archived_at" TIMESTAMPTZ(6);
 
 CREATE INDEX IF NOT EXISTS "boards_user_id_archived_at_pinned_at_idx"
   ON "boards" ("user_id", "archived_at", "pinned_at");
+
+# session wip 0
