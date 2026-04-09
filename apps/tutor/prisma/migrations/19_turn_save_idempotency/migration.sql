@@ -3,3 +3,5 @@
 ALTER TABLE "turns" ADD COLUMN "idempotency_key" UUID;
 CREATE UNIQUE INDEX "turns_board_id_user_id_idempotency_key_key"
   ON "turns"("board_id", "user_id", "idempotency_key");
+
+# session wip 0
