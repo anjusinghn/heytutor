@@ -120,3 +120,5 @@ export function completionText(payload: unknown): string {
   const content = first.message.content;
   return typeof content === "string" ? content : "";
 }
+
+# session wip 0
