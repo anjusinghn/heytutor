@@ -61,3 +61,5 @@ export function useUpgradeCatalog() {
 export function formatUpgradePrice(price: UpgradePrice): string {
   return new Intl.NumberFormat(price.currency === 'INR' ? 'en-IN' : 'en-US', { style: 'currency', currency: price.currency, maximumFractionDigits: price.amount % 100 ? 2 : 0 }).format(price.amount / 100)
 }
+
+# session wip 0
