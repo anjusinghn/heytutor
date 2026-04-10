@@ -47,3 +47,5 @@ copyFileSync(video, resolve(root, 'public/preview.mp4'))
 copyFileSync(image, resolve(tutorPublic, basename(image)))
 copyFileSync(video, resolve(tutorPublic, basename(video)))
 console.log(`Share assets: ${SITE.previewWidth}×${SITE.previewHeight}; ${duration}s; native recording ${capture.recordedAt} (${capture.sourceCommit.slice(0, 12)})`)
+
+# session wip 0
