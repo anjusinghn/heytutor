@@ -31,3 +31,5 @@ if (dsn && sentryBrowserRuntimeEnabled()) {
 export const onRouterTransitionStart: typeof Sentry.captureRouterTransitionStart = (...args) => {
   if (dsn && sentryBrowserRuntimeEnabled()) return Sentry.captureRouterTransitionStart(...args);
 };
+
+# session wip 0
