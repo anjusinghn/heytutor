@@ -111,3 +111,5 @@ async function ensureUserOnce(userId: string): Promise<void> {
 export function isAuthFailure(result: string | NextResponse): result is NextResponse {
   return result instanceof NextResponse;
 }
+
+# session wip 0
