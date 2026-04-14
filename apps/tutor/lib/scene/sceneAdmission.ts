@@ -394,3 +394,5 @@ function refuse(code: StoredSceneAdmissionCode, message: string): { ok: false; c
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+
+# session wip 0
