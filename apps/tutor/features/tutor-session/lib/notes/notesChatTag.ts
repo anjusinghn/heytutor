@@ -75,3 +75,5 @@ export function formatTaggedUserMessage(message: string, tag: NotesChatTag | nul
 export function defaultTaggedQuestion(tag: NotesChatTag): string {
   return tag.kind === "question" ? "explain this question" : "explain this line";
 }
+
+# session wip 0
