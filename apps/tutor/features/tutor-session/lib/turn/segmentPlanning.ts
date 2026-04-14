@@ -240,3 +240,5 @@ export function normalizeSegmentForAlignment(segment: TutorSegment): TutorSegmen
     commands: alignedCommands,
   };
 }
+
+# session wip 0
