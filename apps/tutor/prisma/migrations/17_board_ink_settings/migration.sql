@@ -5,3 +5,5 @@ ALTER TABLE "user_settings"
 
 -- Existing accounts used the marker color for both instruments.
 UPDATE "user_settings" SET "pencil_color" = "marker_color";
+
+# session wip 0
