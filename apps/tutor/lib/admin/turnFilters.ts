@@ -47,3 +47,5 @@ export function failedTurnWhere(since?: Date): Prisma.TurnWhereInput {
   };
   return since ? { AND: [failed, { createdAt: { gte: since } }] } : failed;
 }
+
+# session wip 0
