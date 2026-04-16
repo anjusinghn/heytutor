@@ -239,3 +239,5 @@ export async function canReadCommunityObject(key: string, options: { adminPrevie
 export function recordCommunityView(boardId: string): void {
   void prisma.board.update({ where: { id: boardId }, data: { viewCount: { increment: 1 } } }).catch(() => {});
 }
+
+# session wip 0
