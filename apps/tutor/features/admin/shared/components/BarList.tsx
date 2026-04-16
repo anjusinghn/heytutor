@@ -58,3 +58,5 @@ export function BarList({ title, entries, emptyLabel = "Nothing yet", note }: Ba
     </div>
   );
 }
+
+# session wip 0
