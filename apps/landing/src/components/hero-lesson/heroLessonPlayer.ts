@@ -86,3 +86,5 @@ export async function drawStaticLesson(board: WhiteboardHandle, ink: HeroInk): P
   }
   board.setCursorState('idle')
 }
+
+# session wip 0
