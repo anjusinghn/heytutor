@@ -18,3 +18,5 @@ export function applyPlannerSpeedSettings(
 export function plannerTierCostMultiplier(returnedTier: unknown, requestedPriority: boolean): 1 | 2 {
   return returnedTier === "priority" || (requestedPriority && returnedTier !== "default") ? 2 : 1;
 }
+
+# session wip 0
