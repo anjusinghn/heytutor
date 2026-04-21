@@ -34,3 +34,5 @@ export default function LinkedCopy({ text }: { text: string }) {
   if (last < text.length) nodes.push(text.slice(last))
   return nodes
 }
+
+# session wip 0
