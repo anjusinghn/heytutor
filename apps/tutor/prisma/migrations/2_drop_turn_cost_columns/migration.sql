@@ -2,3 +2,5 @@
 -- metadata, not in the turns table.
 ALTER TABLE "turns" DROP COLUMN IF EXISTS "llm_cost_usd";
 ALTER TABLE "turns" DROP COLUMN IF EXISTS "tts_cost_usd";
+
+# session wip 0
