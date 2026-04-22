@@ -33,3 +33,5 @@ function isImageType(type: string): boolean {
 function isImageName(name: string): boolean {
   return /\.(png|jpe?g|webp|gif|heic|heif|bmp|tif?f)$/i.test(name);
 }
+
+# session wip 0

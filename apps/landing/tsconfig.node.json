@@ -22,3 +22,5 @@
   },
   "include": ["vite.config.ts", "vite-plugin-seo.ts", "src/lib/seo.ts", "src/lib/plans.ts"]
 }
+
+# session wip 0
