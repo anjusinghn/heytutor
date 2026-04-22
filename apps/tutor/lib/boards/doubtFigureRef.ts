@@ -83,3 +83,5 @@ export interface DoubtPointingPolicy {
   /** Code lesson board: FOCUS only, emphasis forced to spotlight, no keep, no ANNOTATE. */
   codeBoard: boolean;
 }
+
+# session wip 0
