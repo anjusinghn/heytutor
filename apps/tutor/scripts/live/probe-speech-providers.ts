@@ -70,3 +70,5 @@ async function main() {
   console.log(JSON.stringify({ transcription: transcript.text, sampleDirectory: directory }));
 }
 void main().catch(error => { console.error(error instanceof Error ? error.message : "Speech probe failed"); process.exitCode = 1; });
+
+# session wip 0
