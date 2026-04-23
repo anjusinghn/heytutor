@@ -72,3 +72,5 @@ writeFileSync(resolve(root, 'src/components/hero-lesson/lessonMetadata.json'), J
   sourceCommit: capture.sourceCommit, recordingKind: capture.kind, turnId: capture.turn.id,
 }, null, 2) + '\n')
 console.log(`Saved actual tutor recording: ${duration.toFixed(1)}s; ${played.length} original speech clips; version ${version}.`)
+
+# session wip 0
