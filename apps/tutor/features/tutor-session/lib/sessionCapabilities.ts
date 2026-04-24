@@ -103,3 +103,5 @@ export function sessionCapabilities(variant: TutorSessionVariant): SessionCapabi
  * differ only in whether the app frame is around it.
  */
 export const LESSON_VARIANTS: readonly TutorSessionVariant[] = ["full", "panel"];
+
+# session wip 0
