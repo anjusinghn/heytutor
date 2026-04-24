@@ -86,3 +86,5 @@ data/diagram-eval/v1/anchor-images/
 # Local Playwright accessibility dumps
 .playwright-mcp/
 .speech-probe/
+
+# session wip 0
