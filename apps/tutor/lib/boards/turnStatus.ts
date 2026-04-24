@@ -87,3 +87,5 @@ export function lessonMsOf(segments: ReadonlyArray<{ orderIndex: number; audioRe
   for (const ms of clips.values()) total += ms;
   return Math.min(Math.round(total), 2_147_483_647);
 }
+
+# session wip 0
