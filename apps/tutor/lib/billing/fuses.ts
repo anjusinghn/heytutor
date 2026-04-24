@@ -36,3 +36,5 @@ export function questionsRemainingThisHour(userId: string): number {
   const used = bucket.starts.filter((start) => start > cutoff).length;
   return Math.max(0, MAX_NEW_QUESTIONS_PER_HOUR - used);
 }
+
+# session wip 0
