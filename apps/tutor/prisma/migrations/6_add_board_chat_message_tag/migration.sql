@@ -2,3 +2,5 @@
 -- still shows that tag on the message.
 ALTER TABLE "board_chat_messages"
   ADD COLUMN "tag" JSONB;
+
+# session wip 0
