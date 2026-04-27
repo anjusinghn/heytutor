@@ -92,3 +92,5 @@ export default atmn({
   features: [lessons, notesMessages, ttsChars, llmTokens],
   plans: [free, plus, pro, lessonTopUp],
 });
+
+# session wip 0
