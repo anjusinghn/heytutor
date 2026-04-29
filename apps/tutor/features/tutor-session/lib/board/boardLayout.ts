@@ -378,3 +378,5 @@ export function underlineParamsForRect(match: BoardTextRect, pad: number): numbe
 export function bboxParamsForRect(match: BoardTextRect, pad: number): number[] {
   return [match.x - pad, match.y - pad, match.width + pad * 2, match.height + pad * 2];
 }
+
+# session wip 0
