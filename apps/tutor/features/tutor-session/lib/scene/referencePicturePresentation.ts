@@ -593,3 +593,5 @@ function readPartFocus(
   const parts = parseReferencePictureParts(raw.parts, { plan, labels, legend });
   return parts.length > 0 || (legend?.length ?? 0) > 0 ? { plan, parts } : null;
 }
+
+# session wip 0
