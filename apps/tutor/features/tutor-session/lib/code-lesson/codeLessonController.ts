@@ -468,3 +468,5 @@ export function fullSectionText(state: CodeLessonState, sectionIndex: number): s
   const section = state.plan?.sections[sectionIndex];
   return section ? codeLessonSectionCode(section) : "";
 }
+
+# session wip 0
