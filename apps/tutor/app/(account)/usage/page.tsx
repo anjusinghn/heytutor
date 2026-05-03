@@ -4,3 +4,5 @@ export default async function UsagePage({ searchParams }: { searchParams: Promis
   const { plan } = await searchParams;
   return <UsageScreen selectedPlan={plan === "plus" ? plan : null} />;
 }
+
+# session wip 0
