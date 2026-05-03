@@ -106,3 +106,5 @@ export function codeLessonCaretLineCol(text: string): { line: number; column: nu
   const lines = text.split("\n");
   return { line: lines.length, column: lines[lines.length - 1]!.length + 1 };
 }
+
+# session wip 0
