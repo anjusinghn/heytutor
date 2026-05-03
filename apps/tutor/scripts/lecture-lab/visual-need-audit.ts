@@ -175,3 +175,5 @@ async function main(): Promise<void> {
 if (process.argv[1]?.endsWith("visual-need-audit.ts")) {
   main().catch((error) => { console.error(error instanceof Error ? error.message : "audit failed"); process.exitCode = 1; });
 }
+
+# session wip 0
