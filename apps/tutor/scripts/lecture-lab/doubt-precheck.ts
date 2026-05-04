@@ -422,3 +422,5 @@ export function matchExpectation(probe: DoubtProbe, lesson: FigureCheck, doubt: 
   if (probe.offlineOnly) return { matches: problems.length === 0, why: problems.length ? problems.join("; ") : "offline row ($0)" };
   return { matches: problems.length === 0, why: problems.length ? problems.join("; ") : freshPage ? "draws on a fresh page as expected" : textOnly ? "expects text only" : "draws as expected" };
 }
+
+# session wip 0
