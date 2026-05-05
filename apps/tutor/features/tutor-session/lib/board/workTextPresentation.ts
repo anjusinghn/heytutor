@@ -31,3 +31,5 @@ export function canonicalRecordedWorkWrite(command: DrawCommand): DrawCommand[] 
     params: [TEXT_LAYOUT.marginX, Math.min(y + index * TEXT_LAYOUT.lineHeight, bottom), fontSize],
   }));
 }
+
+# session wip 0
