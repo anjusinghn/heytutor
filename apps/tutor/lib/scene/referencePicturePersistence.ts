@@ -214,3 +214,5 @@ export async function canonicalizeReferencePictureTurn<Row extends PictureRow>(
   // A resume inherits its lesson's outcome; count outcomes on lesson turns.
   return { ...rows, outcome: readReferencePictureOutcome(sceneArtifacts) };
 }
+
+# session wip 0

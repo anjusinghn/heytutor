@@ -6,3 +6,5 @@ if (
 ) {
   Reflect.deleteProperty(globalThis, "localStorage");
 }
+
+# session wip 0
