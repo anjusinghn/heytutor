@@ -370,3 +370,5 @@ export type TurnControlApi = {
    */
   handleAskDoubt: (question: string, options?: { prompt?: string; title?: string; markedFigureIds?: readonly string[] }) => void;
 };
+
+# session wip 0
