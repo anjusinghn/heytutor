@@ -20,3 +20,5 @@ ALTER TABLE "board_chat_messages"
 ALTER TABLE "board_chat_messages"
   ADD CONSTRAINT "board_chat_messages_user_id_fkey"
   FOREIGN KEY ("user_id") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+# session wip 0

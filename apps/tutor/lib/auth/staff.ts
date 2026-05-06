@@ -25,3 +25,5 @@ export function isAdminAllowlisted(
   if (isStaffEmail(normalized, envAllowlist)) return true;
   return tableEmails.some((entry) => normalizeEmail(entry) === normalized);
 }
+
+# session wip 0
