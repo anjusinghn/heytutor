@@ -56,3 +56,5 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: "audio unavailable" }, { status: 502 });
   }
 }
+
+# session wip 0

@@ -125,3 +125,5 @@ export function appendCodeLessonNotesImages(
     if (index !== -1) sections[index]!.images.push(...codeLessonNotesImages(plan, revealed));
   }
 }
+
+# session wip 0
