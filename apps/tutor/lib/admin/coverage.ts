@@ -155,3 +155,5 @@ export function aggregateCoverage(facts: readonly CoverageFact[], window: Covera
     emptyReasons: [...emptyReasons.values()].sort((a, b) => b.lessons - a.lessons || JSON.stringify(a).localeCompare(JSON.stringify(b))),
     scan: coverageScan(facts) };
 }
+
+# session wip 0
