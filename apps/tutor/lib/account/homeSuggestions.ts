@@ -258,3 +258,5 @@ export function fallbackHomeSuggestions(
   const outlier = different[Math.max(0, cursor) % different.length]!;
   return [...mixHomeSuggestions(four, 4), outlier];
 }
+
+# session wip 0

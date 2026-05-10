@@ -1197,3 +1197,5 @@ function stepsFromSegments(parsed: ReturnType<typeof parseDrawingCommands>): Lec
   }
   return steps.filter((step) => step.speech.length > 0 || step.tags.length > 0);
 }
+
+# session wip 0
