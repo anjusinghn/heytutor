@@ -19,3 +19,5 @@ ALTER TABLE "segments" ADD COLUMN "audio_ref" INTEGER;
 
 ALTER TABLE "turns" ADD CONSTRAINT "turns_status_check" CHECK ("status" IN ('live', 'stopped', 'complete'));
 ALTER TABLE "turns" ADD CONSTRAINT "turns_kind_check" CHECK ("kind" IN ('lesson', 'doubt', 'resume'));
+
+# session wip 0
