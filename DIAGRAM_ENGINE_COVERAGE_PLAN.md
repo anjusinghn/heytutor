@@ -518,3 +518,5 @@ For CH-08b, for example, assign only the infinite line/sheet/thin-shell Gauss-la
 ### Resume seed for the coordinating agent
 
 This planning update starts no implementation work. On an explicit resume, retain the 34-row order, run DCP-01/02 and refresh the baseline first. Then assign at most three ready disjoint slices using the template, integrate shared seams serially, and publish a per-slice evidence/gap report before taking the next batch. Add the Chemistry/Advanced/Biology lanes only to the selected versioned exam scope; do not rewrite the historical 25-chapter completion record as full-syllabus coverage.
+
+# session wip 0
