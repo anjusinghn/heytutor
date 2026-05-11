@@ -264,3 +264,5 @@ export function currentPausedLesson(request: PausedLessonRequest, turns: readonl
     !request.parentTraceId || request.parentTraceId !== fresh.parentTraceId) return null;
   return { ...fresh, ...(request.remainingIntro ? { remainingIntro: request.remainingIntro } : {}) };
 }
+
+# session wip 0
