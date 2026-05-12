@@ -79,3 +79,5 @@ export function useBoardThumbnail(input: {
     };
   }, [enabled, boardId, turnCount, whiteboardRef, publishable]);
 }
+
+# session wip 0
