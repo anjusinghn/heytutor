@@ -17,3 +17,5 @@ async function main(): Promise<void> {
   console.log(`${topic}:\n  ${outcomes.join("\n  ")}`);
 }
 main().catch((error) => { console.error(error); process.exit(1); });
+
+# session wip 0
