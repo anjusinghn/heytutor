@@ -94,3 +94,5 @@ async function main(): Promise<void> {
 main()
   .catch((error) => { console.error(error); process.exitCode = 1; })
   .finally(() => prisma.$disconnect());
+
+# session wip 0
