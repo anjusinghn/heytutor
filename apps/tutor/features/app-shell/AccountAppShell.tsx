@@ -94,3 +94,5 @@ export function AccountAppShell({ children }: { children: ReactNode }) {
     </AppShell>
   );
 }
+
+# session wip 0
