@@ -23,3 +23,5 @@ export async function GET(request: Request): Promise<Response> {
     return Response.json({ error: "ratings query failed" }, { status: 500 });
   }
 }
+
+# session wip 0

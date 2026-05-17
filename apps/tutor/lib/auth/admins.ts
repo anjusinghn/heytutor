@@ -11,3 +11,5 @@ export async function isAdminEmail(email: string | null | undefined): Promise<bo
   });
   return row != null;
 }
+
+# session wip 0
