@@ -489,3 +489,5 @@ export interface PicturesReport extends PictureOutcomeSummary {
   library: { total: number; wikimedia: number; generated: number; truncated: boolean; rows: PictureLibraryRow[] };
   cache: PictureCacheSummary;
 }
+
+# session wip 0
