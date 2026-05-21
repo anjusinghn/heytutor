@@ -127,3 +127,5 @@ for (const [index, line] of lines.entries()) {
 
 fs.writeFileSync(path.join(outDir, "results.json"), JSON.stringify(results, null, 2));
 console.log(`\naudio and results in ${outDir}`);
+
+# session wip 0

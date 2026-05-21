@@ -475,3 +475,5 @@ export function renderPenSprite(length: number, dpr: number): PenSprite {
 
   return sprite
 }
+
+# session wip 0
