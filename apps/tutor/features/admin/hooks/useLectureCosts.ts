@@ -177,3 +177,5 @@ export function useLectureCosts(
 
   return bySession;
 }
+
+# session wip 0
