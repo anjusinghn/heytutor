@@ -11,3 +11,5 @@ export function failedTurnRuntimeEnvironment(env: Record<string, string | undefi
 export function failedTurnDeliveryEnabled(env: Record<string, string | undefined> = process.env): boolean {
   return failedTurnRuntimeEnvironment(env) === "production";
 }
+
+# session wip 0
