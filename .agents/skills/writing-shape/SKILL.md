@@ -77,3 +77,5 @@ Append to the article file as each block is agreed. Re-read the file from disk b
 - Publishing, formatting for a specific platform, or adding frontmatter the user didn't ask for.
 
 </supporting-info>
+
+# session wip 0
