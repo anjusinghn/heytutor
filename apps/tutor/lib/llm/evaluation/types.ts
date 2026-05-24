@@ -127,3 +127,5 @@ export interface AssessOptions {
   /** Notes routing uses this so a dead evaluator stops adding wait. */
   circuit?: boolean;
 }
+
+# session wip 0
