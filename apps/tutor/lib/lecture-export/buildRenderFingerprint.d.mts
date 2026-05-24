@@ -5,3 +5,5 @@ export function renderSourceFiles(root: string, roots?: readonly string[]): stri
  * Does not detect same-version patches to installed package contents.
  */
 export function renderFingerprint(root: string, roots?: readonly string[]): string;
+
+# session wip 0
