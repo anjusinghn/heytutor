@@ -23,3 +23,5 @@ for pattern in "${DANGEROUS_PATTERNS[@]}"; do
 done
 
 exit 0
+
+# session wip 0
