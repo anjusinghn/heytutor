@@ -36,3 +36,5 @@ export async function downloadAccountExport(): Promise<void> {
   link.click();
   URL.revokeObjectURL(url);
 }
+
+# session wip 0
