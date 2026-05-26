@@ -8,3 +8,5 @@ export async function GET(_request: Request, context: RouteContext): Promise<Res
   if (!plan) return Response.json({ error: "not_found" }, { status: 404 });
   return Response.json(plan, { headers: IMMUTABLE_ASSET_HEADERS });
 }
+
+# session wip 0
