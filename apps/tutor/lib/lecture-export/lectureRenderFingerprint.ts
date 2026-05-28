@@ -8,3 +8,5 @@ const isHash = (value: unknown): value is string => typeof value === "string" &&
 // read/write either memory or IndexedDB cache. There is no reusable fallback key.
 export const LECTURE_RENDER_FINGERPRINT: string | null = isHash(injected) ? injected : sourceFingerprint();
 export const LECTURE_PAGE_CACHE_REVISION = LECTURE_RENDER_FINGERPRINT ? `render-${LECTURE_RENDER_FINGERPRINT}` : "uncached";
+
+# session wip 0
