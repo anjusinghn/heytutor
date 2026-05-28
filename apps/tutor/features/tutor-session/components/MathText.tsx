@@ -65,3 +65,5 @@ export function MathText({ children, handwritten = true, className, style }: Mat
     </span>
   );
 }
+
+# session wip 0
