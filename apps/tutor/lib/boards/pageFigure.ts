@@ -254,3 +254,5 @@ export function lessonFigureReturnAfter(
   const at = pageFigureAt([...turns, resume], turns.length);
   return at.returnsLesson ? { sourceIndex: at.sourceIndex, consumedIds: at.consumedIds, figureId: at.figureId } : null;
 }
+
+# session wip 0
