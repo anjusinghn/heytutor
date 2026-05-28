@@ -37,3 +37,5 @@ export async function PATCH(request: Request) {
   });
   return NextResponse.json({ settings: mapAccountSettings(row), hinglishAvailable: hinglishVoiceAvailable() });
 }
+
+# session wip 0
