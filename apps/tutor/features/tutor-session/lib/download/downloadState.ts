@@ -39,3 +39,5 @@ export function downloadIsCancellable(state: DownloadState): boolean {
 export function downloadIsBusy(state: DownloadState): boolean {
   return state.kind === "pdf" || state.kind === "video";
 }
+
+# session wip 0
