@@ -42,3 +42,5 @@ export function bucketCountsByDay(
   }
   return range.map((day) => ({ day, count: counts.get(day) ?? 0 }));
 }
+
+# session wip 0
