@@ -50,3 +50,5 @@ export async function assessDsaTeachingPolicy(input: {
   );
   return { policy: policyFromDsaAssessment(assessment, input.familiarity), assessment };
 }
+
+# session wip 0
