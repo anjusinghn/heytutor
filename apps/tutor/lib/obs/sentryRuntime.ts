@@ -37,3 +37,5 @@ export function sentryServerRuntimeOptions() {
 export function sentryBrowserRuntimeOptions() {
   return guardedOptions(sentryBrowserRuntimeEnabled, "production");
 }
+
+# session wip 0
