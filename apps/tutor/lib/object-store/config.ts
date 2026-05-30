@@ -21,3 +21,5 @@ export function getObjectStoreConfig(): ObjectStoreConfig | null {
 export function isObjectStoreConfigured(): boolean {
   return getObjectStoreConfig() !== null;
 }
+
+# session wip 0

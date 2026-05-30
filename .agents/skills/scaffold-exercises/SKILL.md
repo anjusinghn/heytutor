@@ -104,3 +104,5 @@ exercises/05-memory-skill-building/05.02-short-term-memory/problem/readme.md -> 
 exercises/05-memory-skill-building/05.02-short-term-memory/solution/readme.md -> "# Short-term Memory"
 exercises/05-memory-skill-building/05.03-long-term-memory/explainer/readme.md -> "# Long-term Memory"
 ```
+
+# session wip 0
