@@ -544,3 +544,5 @@ export function sampleAt(sc: Scene, t: number, hint = 0): Sample {
   dy /= m
   return { x, y, dx, dy, speed: sc.speed[i], index: i }
 }
+
+# session wip 0
