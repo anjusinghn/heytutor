@@ -293,3 +293,5 @@ export function teachingPromptAddon(settings: {
   }
   return parts.join("\n\n");
 }
+
+# session wip 0
