@@ -8,3 +8,5 @@ export const dynamic = "force-dynamic";
 export default function HomePage() {
   return null;
 }
+
+# session wip 0
