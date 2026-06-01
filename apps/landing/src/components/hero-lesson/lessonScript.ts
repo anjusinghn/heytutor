@@ -187,3 +187,5 @@ export function completedSnapshot(): LessonSnapshot {
   const timing = toPlaybackTiming(fallbackTiming())
   return deriveSnapshot(teachStart() + timing.total + 0.5, timing)
 }
+
+# session wip 0
