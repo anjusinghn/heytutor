@@ -15,3 +15,5 @@ CREATE INDEX IF NOT EXISTS "billing_period_spend_user_id_idx" ON "billing_period
 
 ALTER TABLE "billing_period_spend" DROP CONSTRAINT IF EXISTS "billing_period_spend_user_id_fkey";
 ALTER TABLE "billing_period_spend" ADD CONSTRAINT "billing_period_spend_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+# session wip 0
