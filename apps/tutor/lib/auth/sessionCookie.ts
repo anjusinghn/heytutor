@@ -4,3 +4,5 @@ export function hasAuthSessionCookie(request: { cookies: { get(name: string): { 
       request.cookies.get("__Secure-authjs.session-token")?.value,
   );
 }
+
+# session wip 0

@@ -19,3 +19,5 @@ export async function GET(request: Request) {
 
   return serveUserObject(userId, key, { isAdmin: async () => (await requireAdminRequest()) === null });
 }
+
+# session wip 0
