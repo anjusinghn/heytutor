@@ -245,3 +245,5 @@ export function downloadPopoverKey(state: DownloadState): string | null {
   if (state.kind === "done" && downloadNoteCopy(state.note)) return `note:${state.file}:${state.note}`;
   return null;
 }
+
+# session wip 0
