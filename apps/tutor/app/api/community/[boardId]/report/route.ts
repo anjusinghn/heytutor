@@ -42,3 +42,5 @@ export async function POST(request: Request, context: RouteContext) {
   await prisma.communityReport.create({ data: { boardId, reporterId, reason } });
   return NextResponse.json({ ok: true });
 }
+
+# session wip 0
