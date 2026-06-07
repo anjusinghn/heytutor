@@ -56,3 +56,5 @@ assert.match(css, /data-compact/, 'the live product has an explicit compact layo
 assert.match(css, /display:\s*none/, 'compact mode removes the sidebar rather than cropping pixels')
 
 console.log('verify-hero-localization: India gets Hinglish; everyone else UK English; live board stays fully framed')
+
+# session wip 0
