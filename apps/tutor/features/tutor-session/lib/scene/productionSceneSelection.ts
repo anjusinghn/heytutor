@@ -916,3 +916,5 @@ export function selectProductionScene(input: ProductionSceneSelectionInput): Pro
       validScene(candidateValidation) ? { code: "selection_error", reason: message, preferred: false, replacedBy: null } : null);
   }
 }
+
+# session wip 0
