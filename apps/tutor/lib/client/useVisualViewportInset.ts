@@ -35,3 +35,5 @@ export function useVisualViewportInset(): number {
 
   return useSyncExternalStore(subscribe, readInset, () => 0);
 }
+
+# session wip 0
