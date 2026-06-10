@@ -144,3 +144,5 @@ if (process.argv[1]?.endsWith("topicCoverageSample.ts")) {
   }, null, 2)}\n`);
   console.log(JSON.stringify({ ...sample.manifest, sourceRefs }, null, 2));
 }
+
+# session wip 0
