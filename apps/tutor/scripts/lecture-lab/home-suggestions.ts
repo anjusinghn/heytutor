@@ -214,3 +214,5 @@ function command(args: string[]): void {
 }
 
 command(process.argv.slice(2));
+
+# session wip 0
