@@ -104,3 +104,5 @@ export async function exportNotesPdf({ title, sections }: ExportNotesParams): Pr
   }
   doc.save(`${sanitizeFilename(title)}.pdf`);
 }
+
+# session wip 0
