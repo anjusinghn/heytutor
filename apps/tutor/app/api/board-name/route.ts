@@ -31,3 +31,5 @@ export async function POST(request: Request): Promise<Response> {
     );
   return Response.json({ title: finalizeBoardTitle(question) });
 }
+
+# session wip 0

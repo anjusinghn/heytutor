@@ -6,3 +6,5 @@ Latin, operators, and most maths come from Anthropic Sans Roman
 Missing Greek and a few operators were added from STIX Two Math,
 licensed under the SIL Open Font License 1.1:
 https://github.com/stipub/stixfonts
+
+# session wip 0
