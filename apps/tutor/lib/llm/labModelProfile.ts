@@ -205,3 +205,5 @@ function sameAlternate(a: LabModelProfile["teachingAlternate"] | null, b: LabMod
   return a.model === b.model && a.rates.lane === b.rates.lane
     && RATE_FIELDS.every(([field]) => a.rates[field] === b.rates[field]);
 }
+
+# session wip 0
