@@ -218,3 +218,5 @@ export const BOARD_TITLE_SYSTEM_PROMPT = [
   "",
   "Output ONLY the title. No quotes, no trailing punctuation, no explanation.",
 ].join("\n");
+
+# session wip 0
