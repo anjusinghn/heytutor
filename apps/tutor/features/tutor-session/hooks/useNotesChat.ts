@@ -136,3 +136,5 @@ export function useNotesChat(boardId: string, enabled = true) {
 
   return { messages, sending, error, send, stop };
 }
+
+# session wip 0
