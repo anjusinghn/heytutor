@@ -77,3 +77,5 @@ export async function preloadReferencePictureIds(
   const ready = await Promise.all(ids.map((id) => preloadReferencePictureWithin(id, timeoutMs, undefined, preload)));
   return { missing: ids.filter((_, i) => !ready[i]) };
 }
+
+# session wip 0
