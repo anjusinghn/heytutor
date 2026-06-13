@@ -74,3 +74,5 @@ export function storedTurnSceneQuestion<Q extends string | undefined>(turn: { qu
 export function resolveDoubtFiguresEnabled(env: Record<string, string | undefined> = process.env): boolean {
   return env.DIAGRAM_DOUBT_FIGURES === "on";
 }
+
+# session wip 0

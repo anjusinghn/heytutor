@@ -27,3 +27,5 @@ export async function GET(_request: Request, context: RouteContext): Promise<Res
     return Response.json({ error: "user_detail_failed" }, { status: 500 });
   }
 }
+
+# session wip 0
