@@ -253,3 +253,5 @@ function LabelCard({ spot, scale, pinned }: { spot: Hotspot; scale: number; pinn
     </div>
   );
 }
+
+# session wip 0
