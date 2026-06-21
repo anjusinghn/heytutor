@@ -131,3 +131,5 @@ export function useHeroVideo(rootRef: RefObject<HTMLElement | null>) {
   const onError = useCallback(() => commitSound('unavailable'), [commitSound])
   return { videoRef, sound, onScreen, toggleSound, reduced, onReady, onError }
 }
+
+# session wip 0
