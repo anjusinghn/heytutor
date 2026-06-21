@@ -55,3 +55,5 @@ export function paymentErrorResponse(error: unknown): Response {
   if (!(error instanceof PaymentError)) console.error("[billing] payment operation failed");
   return Response.json({ code: failure.code, remaining: null }, { status: failure.status });
 }
+
+# session wip 0
