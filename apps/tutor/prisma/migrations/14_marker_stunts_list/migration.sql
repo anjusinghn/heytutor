@@ -21,3 +21,5 @@ ALTER TABLE "user_settings"
 ALTER TABLE "user_settings"
   ALTER COLUMN "marker_stunts"
   SET DEFAULT ARRAY['thumbAround', 'knuckleRoll', 'helicopter', 'tossCatch']::TEXT[];
+
+# session wip 0
