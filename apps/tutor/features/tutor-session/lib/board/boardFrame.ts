@@ -43,3 +43,5 @@ export function shouldLockBoardScale(input: {
   if (Math.abs(input.heightDelta) < BOARD_FRAME_HEIGHT_JITTER_PX) return true;
   return input.heightDelta < 0 && input.keyboardInset >= BOARD_FRAME_KEYBOARD_INSET_PX;
 }
+
+# session wip 0

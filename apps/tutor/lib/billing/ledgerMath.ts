@@ -67,3 +67,5 @@ export function balanceFromRow(input: {
     nextResetAt: input.nextResetAt ?? billingPeriodResetAt(nowMs),
   };
 }
+
+# session wip 0
