@@ -23,3 +23,5 @@ export function speakSegmentTimeoutMs(text: string, playbackRate = 1): number {
   const rate = segmentWatchdogPlaybackRate(playbackRate);
   return naturalBudgetMs / rate;
 }
+
+# session wip 0

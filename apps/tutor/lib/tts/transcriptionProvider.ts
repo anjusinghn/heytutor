@@ -29,3 +29,5 @@ export function transcriptionRequest(
     : { "xi-api-key": config.apiKey! };
   return { body, headers };
 }
+
+# session wip 0
