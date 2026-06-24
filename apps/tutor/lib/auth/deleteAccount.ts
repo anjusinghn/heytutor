@@ -29,3 +29,5 @@ export async function deleteAuthenticatedAccount(userId: string): Promise<void> 
   releaseTurnGrant(userId);
   revokeWsTickets(userId);
 }
+
+# session wip 0
