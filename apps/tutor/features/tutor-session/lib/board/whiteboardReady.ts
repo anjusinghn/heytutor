@@ -31,3 +31,5 @@ export async function waitForWhiteboard(
   }
   return !isCancelled();
 }
+
+# session wip 0

@@ -113,3 +113,5 @@ for (const row of moved) {
     `  ${String(row.before).padStart(3)} -> ${String(row.after).padStart(3)}  ${delta(row.after - (row.before ?? 0)).padStart(4)}  ${row.probeId}`,
   );
 }
+
+# session wip 0
