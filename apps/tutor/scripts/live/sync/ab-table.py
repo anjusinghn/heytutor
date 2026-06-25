@@ -19,3 +19,5 @@ for n in order:
 print("| lesson | pen parked while voice speaks | rows on exact timings | row finish vs sentence end (median ms) | intro ink/speech | labels focus/writeleak/intro/flush | focus gestures |")
 print("|---|---|---|---|---|---|---|")
 for r in rows: print("| "+" | ".join(r)+" |")
+
+# session wip 0

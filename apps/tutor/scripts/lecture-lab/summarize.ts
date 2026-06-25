@@ -112,3 +112,5 @@ function duplicateFigureSignatures(
   }
   return groups;
 }
+
+# session wip 0
