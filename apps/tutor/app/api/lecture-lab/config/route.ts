@@ -6,3 +6,5 @@ export async function GET(request: Request) {
   if (!isLectureLabRequest(request)) return new Response(null, { status: 404 });
   return NextResponse.json(labProviderConfig(), { headers: { "cache-control": "no-store" } });
 }
+
+# session wip 0
