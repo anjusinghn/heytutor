@@ -106,3 +106,5 @@ if (process.argv[1]?.endsWith("regrade-empty-causes.ts")) {
   if (rounds.length === 0) throw new Error("Usage: regrade-empty-causes.ts <round dir> [...round dirs]");
   for (const round of rounds) console.log(JSON.stringify(regradeEmptyCauses(round), null, 2));
 }
+
+# session wip 0
