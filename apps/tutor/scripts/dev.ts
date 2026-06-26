@@ -120,3 +120,5 @@ removeProductionNextOutput();
 generatePrismaClient();
 ensureLocalDb();
 startServer();
+
+# session wip 0
