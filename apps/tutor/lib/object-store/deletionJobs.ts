@@ -127,3 +127,5 @@ export function startObjectDeletionWorker(): () => void {
   void tick();
   return () => { stopped = true; clearInterval(timer); };
 }
+
+# session wip 0
