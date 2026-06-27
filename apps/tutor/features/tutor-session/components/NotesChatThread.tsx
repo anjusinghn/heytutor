@@ -165,3 +165,5 @@ export function NotesChatThread({
     </div>
   );
 }
+
+# session wip 0

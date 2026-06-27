@@ -112,3 +112,5 @@ export function restoreLessonFigures(
   // The surface draws figure `at` whole itself: a seek, never a pending advance (round 3 M1).
   if (isLessonFigureAdvanceId(at)) sequence.seekTo(at);
 }
+
+# session wip 0
