@@ -5,3 +5,5 @@ ALTER TABLE "turns"
   ADD COLUMN "scene_engine_version" TEXT,
   ADD COLUMN "validation_report" JSONB,
   ADD COLUMN "visual_status" TEXT;
+
+# session wip 0
