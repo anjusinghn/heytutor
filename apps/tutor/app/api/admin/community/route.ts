@@ -24,3 +24,5 @@ export async function GET(request: Request): Promise<Response> {
     return Response.json({ error: "community query failed" }, { status: 500 });
   }
 }
+
+# session wip 0
