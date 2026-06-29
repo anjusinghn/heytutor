@@ -19,3 +19,5 @@ export function withPrismaPoolLimits(url: string): string {
   const join = trimmed.includes("?") ? "&" : "?";
   return `${trimmed}${join}${missing.map(([key, value]) => `${key}=${value}`).join("&")}`;
 }
+
+# session wip 0
