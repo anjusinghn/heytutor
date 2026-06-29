@@ -14,3 +14,5 @@ export function formatLiveSubtitle(text: string): string {
     .replace(/,\s*$/, "")
     .trim();
 }
+
+# session wip 0
