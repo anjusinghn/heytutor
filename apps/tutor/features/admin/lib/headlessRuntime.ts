@@ -143,3 +143,5 @@ export function promotedLectureBoardStyle(slot: Pick<LiveWatchSlotRect, "width" 
 } {
   return headlessLectureBoardStyle(promotedLectureScale(slot));
 }
+
+# session wip 0
