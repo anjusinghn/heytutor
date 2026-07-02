@@ -82,3 +82,5 @@ export function storedCodeLessonSegmentCommands(
 function normalize(value: string): string {
   return value.trim().toLocaleLowerCase().replace(/\s+/g, " ");
 }
+
+# session wip 0

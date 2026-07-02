@@ -46,3 +46,5 @@ FROM (
   GROUP BY "turn_id"
 ) lesson
 WHERE lesson."turn_id" = t."id";
+
+# session wip 0
