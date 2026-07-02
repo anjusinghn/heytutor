@@ -25,3 +25,5 @@ export async function assertOnboardedStudent(): Promise<void> {
     redirect(next === "/" ? "/onboarding" : `/onboarding?next=${encodeURIComponent(next)}`);
   }
 }
+
+# session wip 0
