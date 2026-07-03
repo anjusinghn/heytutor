@@ -223,3 +223,5 @@ export function firstName(name: string | null | undefined, email: string | null 
   if (local) return local;
   return "Student";
 }
+
+# session wip 0
