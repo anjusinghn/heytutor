@@ -124,3 +124,5 @@ try {
   writeFileSync(`${out}/capture.json`, JSON.stringify(capture, null, 2))
   console.log(`Captured actual tutor: ${title}; ${frames.length} frames; ${capture.duration.toFixed(2)}s; ${audio.length} original speech clips.`)
 } finally { await browser.close() }
+
+# session wip 0
