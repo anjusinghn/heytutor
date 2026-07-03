@@ -57,3 +57,5 @@ for (const fixture of fixtures) {
   const warm = Array.from({ length: RUNS }, () => once(fixture).ms).sort((a, b) => a - b);
   console.log(`${fixture.name}: drawn ${cold.drawn}, cold ${cold.ms.toFixed(1)} ms, warm p50 ${quantile(warm, 0.5).toFixed(1)} ms, max ${warm[warm.length - 1]!.toFixed(1)} ms (${RUNS} runs)`);
 }
+
+# session wip 0
