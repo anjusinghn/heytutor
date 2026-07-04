@@ -183,3 +183,5 @@ export function parseLiveDiagramExampleIds(value: string | null | undefined): st
   return [...new Set(value.split(",").map((id) => id.trim()).filter((id) =>
     /^[a-z0-9][a-z0-9:/_-]{0,127}$/i.test(id)))].slice(0, 3);
 }
+
+# session wip 0
