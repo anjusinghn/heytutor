@@ -43,3 +43,5 @@ export function logWorkerFailure(worker: WorkerName, error: unknown, code = work
   console.error(MESSAGES[worker], { worker, error_code: code, suppressed: prior?.suppressed ?? 0 });
   recent.set(key, { at: now, suppressed: 0 });
 }
+
+# session wip 0
