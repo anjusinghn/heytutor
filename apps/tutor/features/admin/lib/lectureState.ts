@@ -70,3 +70,5 @@ export function cellStateFor(
   }
   return { state: hasFixture ? "idle" : "missing" };
 }
+
+# session wip 0
