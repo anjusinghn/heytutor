@@ -49,3 +49,5 @@ export function doubtThinkingAnchor(
       : nextRowY + TEXT_LAYOUT.textHeight / 2;
   return clampToBoard({ x: TEXT_LAYOUT.marginX + BESIDE_MARK_PX, y });
 }
+
+# session wip 0
