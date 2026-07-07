@@ -53,3 +53,5 @@ export default function GlobalError({
     </html>
   );
 }
+
+# session wip 0
