@@ -53,3 +53,5 @@ This is why question 1 comes first. You only pay the lossiness when staying cost
 ## These are judgement calls
 
 The questions are not objective: each has taste in it, and the same boundary can go two ways on two days. The value is in asking them **in order**, at the boundary rather than in the middle of the work.
+
+# session wip 0
