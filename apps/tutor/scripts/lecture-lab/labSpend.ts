@@ -38,3 +38,5 @@ export function assertLabUsageCheckpoint(checkpoint: { chargedUsd: number; known
     throw new Error("invalid known usage checkpoint: response charges require the measured subtotal");
   }
 }
+
+# session wip 0

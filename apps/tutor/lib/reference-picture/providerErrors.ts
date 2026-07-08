@@ -22,3 +22,5 @@ export function neverReachedProvider(error: unknown): boolean {
   const cause = (error as { cause?: { code?: unknown } } | null)?.cause;
   return error instanceof TypeError && typeof cause?.code === "string" && NEVER_REACHED_CODES.has(cause.code);
 }
+
+# session wip 0
