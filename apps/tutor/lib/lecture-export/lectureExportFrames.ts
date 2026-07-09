@@ -80,3 +80,5 @@ export function lectureExportProgressLabel(progress: {
   const pct = Math.min(99, Math.max(0, Math.round((100 * progress.currentMs) / progress.totalMs)));
   return `${pct}%`;
 }
+
+# session wip 0
