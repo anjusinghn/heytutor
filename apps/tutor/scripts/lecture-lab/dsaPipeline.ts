@@ -729,3 +729,5 @@ export async function runDsaLecture(
   run.timings.totalMs = Date.now() - startedAt;
   return run;
 }
+
+# session wip 0
