@@ -211,3 +211,5 @@ function clone<T>(value: T): T {
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+
+# session wip 0
