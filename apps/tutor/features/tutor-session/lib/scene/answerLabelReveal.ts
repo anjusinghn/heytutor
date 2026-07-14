@@ -189,3 +189,5 @@ export function withoutEarlyAnswerLabels(document: SceneDocument, commands: read
     return !(command.visualStyle?.labelLeader === true && id.endsWith("_leader") && held.has(id.slice(0, -"_leader".length)));
   });
 }
+
+# session wip 0
