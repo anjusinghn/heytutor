@@ -135,3 +135,4 @@ export async function writeQueryCache(queryKey: string, outcome: { pictureId: st
 
 /** Asset responses are public on purpose: free licence pictures, no student data, and the landing replay is anonymous. Ids are content-addressed, so a response never changes. */
 export const IMMUTABLE_ASSET_HEADERS = { "cache-control": "public, max-age=31536000, immutable", "x-content-type-options": "nosniff" } as const;
+# session wip 0

@@ -19,3 +19,5 @@ export function lectureRatingLogs(
   }
   return logs;
 }
+
+# session wip 0
