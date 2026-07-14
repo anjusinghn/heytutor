@@ -391,3 +391,5 @@ export function useSessionChromeHidden(input: SessionChromeIdleInput): boolean {
 
   return shouldHideSessionChrome({ fullscreen, live, pinned, idle });
 }
+
+# session wip 0
