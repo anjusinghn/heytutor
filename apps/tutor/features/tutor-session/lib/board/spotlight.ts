@@ -77,3 +77,5 @@ export async function withSpotlight(
 export function clearSpotlight(host: SpotlightHost | null | undefined): void {
   host?.setSpotlight?.(null);
 }
+
+# session wip 0

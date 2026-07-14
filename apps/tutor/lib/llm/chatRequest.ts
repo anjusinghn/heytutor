@@ -50,3 +50,5 @@ export const TEACHING_HEDGE_HEADER = "x-heytutor-teaching-hedge";
 export function isTeachingHedge(headers: Headers): boolean {
   return headers.get(TEACHING_HEDGE_HEADER) === "1";
 }
+
+# session wip 0
