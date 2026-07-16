@@ -352,3 +352,5 @@ export function prepareLessonFigureSegments(
     foldedFocusSegmentCount: folded.foldedFocusSegmentCount,
   };
 }
+
+# session wip 0
