@@ -207,3 +207,5 @@ if (process.argv.includes('--check')) {
     `Generated ${diagram.length} verified primitives and ${work.length} work rows`,
   )
 }
+
+# session wip 0
