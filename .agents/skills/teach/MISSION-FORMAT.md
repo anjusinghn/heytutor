@@ -29,3 +29,5 @@
 - **Push back on vagueness.** If the user cannot articulate why, interview them before writing anything. A bad mission is worse than no mission.
 - **Revise when reality shifts.** Missions change. When the user's goal moves, update this file: don't leave a stale mission steering future sessions.
 - **Keep it short.** If `MISSION.md` runs past a screen, it has stopped being a compass and started being a plan.
+
+# session wip 0
