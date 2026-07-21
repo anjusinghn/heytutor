@@ -43,5 +43,3 @@ export async function PUT(request: Request, context: RouteContext) {
   const updated = await prisma.board.updateMany({ where: { id: boardId, userId }, data: { thumbnailAt: new Date() } });
   return NextResponse.json({ ok: updated.count > 0 });
 }
-
-# session wip 0
