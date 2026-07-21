@@ -9,5 +9,3 @@ export async function attachFreePlan(input: {
   if (!isAutumnEnabled()) return;
   await ensureAutumnCustomer(input);
 }
-
-# session wip 0
