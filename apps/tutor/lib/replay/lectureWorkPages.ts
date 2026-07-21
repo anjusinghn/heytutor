@@ -214,5 +214,3 @@ function trustedCommandStartsDiagram(command: ReplayCue["commands"][number]): bo
     default: return false;
   }
 }
-
-# session wip 0
