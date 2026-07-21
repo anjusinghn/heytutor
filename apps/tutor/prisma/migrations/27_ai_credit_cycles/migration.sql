@@ -8,5 +8,3 @@ CREATE TABLE IF NOT EXISTS "ai_credit_cycles" (
   "polled_at" TIMESTAMPTZ(6) NOT NULL,
   CONSTRAINT "ai_credit_cycles_pkey" PRIMARY KEY ("cycle_key")
 );
-
-# session wip 0
