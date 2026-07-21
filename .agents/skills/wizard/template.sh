@@ -202,5 +202,3 @@ set_secret STRIPE_SECRET_KEY "$STRIPE_SECRET_KEY"   # CI needs this one
 # ──────────────────────────────────────────────────────────────────────────
 
 finish
-
-# session wip 0
