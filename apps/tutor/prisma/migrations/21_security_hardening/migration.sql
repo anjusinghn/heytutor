@@ -106,5 +106,3 @@ ALTER TABLE "owned_traces" ADD CONSTRAINT "owned_traces_user_id_fkey" FOREIGN KE
 
 -- AddForeignKey
 ALTER TABLE "user_storage" ADD CONSTRAINT "user_storage_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE;
-
-# session wip 0

@@ -8,5 +8,3 @@ export const metadata: Metadata = {
 export default function AdminUsersPage() {
   return <UsersView />;
 }
-
-# session wip 0
