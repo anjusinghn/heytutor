@@ -113,5 +113,3 @@ export async function streamNotesChatMessage(input: {
   }
   return accumulated;
 }
-
-# session wip 0
