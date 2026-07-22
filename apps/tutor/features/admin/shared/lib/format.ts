@@ -56,5 +56,3 @@ export function truncateText(text: string, max: number): string {
   if (text.length <= max) return text;
   return `${text.slice(0, Math.max(1, max - 1)).trimEnd()}…`;
 }
-
-# session wip 0
