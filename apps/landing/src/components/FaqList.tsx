@@ -19,5 +19,3 @@ export default function FaqList({ faqs }: { faqs: readonly Faq[] }) {
     </div>
   )
 }
-
-# session wip 0

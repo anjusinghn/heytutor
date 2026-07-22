@@ -29,5 +29,3 @@ export function focusTraceCommands(diagram: VerifiedDiagram, entityIds: Readonly
     && isFocusTraceInk(candidate),
   );
 }
-
-# session wip 0
