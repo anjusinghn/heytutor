@@ -679,5 +679,3 @@ export const MARK_SUBMIT_LABEL = "Explain this";
 export function markGestureVerb(gesture: MarkGesture): string {
   return GESTURE_VERB[gesture];
 }
-
-# session wip 0
