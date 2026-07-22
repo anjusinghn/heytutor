@@ -41,5 +41,3 @@ export default function DemoPointer({ frame }: { frame: DemoFrame }) {
     />
   )
 }
-
-# session wip 0
