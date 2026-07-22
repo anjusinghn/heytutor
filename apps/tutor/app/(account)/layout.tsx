@@ -9,5 +9,3 @@ export default async function AccountLayout({
   await assertOnboardedStudent();
   return <AccountAppShell>{children}</AccountAppShell>;
 }
-
-# session wip 0
