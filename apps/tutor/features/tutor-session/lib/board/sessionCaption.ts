@@ -47,5 +47,3 @@ export function sessionCaption({
     notice: silent ? VOICE_UNAVAILABLE_NOTICE : null,
   };
 }
-
-# session wip 0
