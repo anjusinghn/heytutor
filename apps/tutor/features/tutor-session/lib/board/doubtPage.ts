@@ -106,5 +106,3 @@ export function returnLessonPage(wb: PageBoard | null, layout: BoardLayoutState 
   if (notes && typeof held?.narration === "string") notes.narration.current = held.narration;
   return true;
 }
-
-# session wip 0
