@@ -151,5 +151,3 @@ export default function SafariChrome({
     </div>
   )
 }
-
-# session wip 0
