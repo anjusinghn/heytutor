@@ -37,5 +37,3 @@ export function paidCallAccess(input: {
   if (input.remainingMillicents > 0) return "allow";
   return "out_of_credits";
 }
-
-# session wip 0

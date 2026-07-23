@@ -63,5 +63,3 @@ export function restoreVerifiedDiagramFromTurn(
 ): VerifiedDiagram | null {
   return restoreVerifiedPresentationFromTurn(turn)?.diagram ?? null;
 }
-
-# session wip 0
