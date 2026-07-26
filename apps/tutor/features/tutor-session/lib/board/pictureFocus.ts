@@ -134,5 +134,3 @@ export function focusVeilZone<T extends SpotlightRect>(
   const zone = REFERENCE_PICTURE_ZONE;
   return { x: zone.x, y: zone.y, width: zone.width, height: zone.height };
 }
-
-# session wip 0
