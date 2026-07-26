@@ -2226,5 +2226,3 @@ function isUnsafeUncompiledDiagramCommand(command: DrawCommand): boolean {
     bounds.top <= zoneBottom
   );
 }
-
-# session wip 0
