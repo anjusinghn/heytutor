@@ -221,5 +221,3 @@ export function narrationTourMs(
   if (shareMs === undefined || !Number.isFinite(shareMs) || shareMs <= 0) return wanted;
   return Math.min(wanted, Math.max(Math.round(shareMs), budgetMs));
 }
-
-# session wip 0
