@@ -198,5 +198,3 @@ export function pdfSafeText(text: string): string {
   }
   return out.replace(/\?{2,}/g, "?");
 }
-
-# session wip 0
