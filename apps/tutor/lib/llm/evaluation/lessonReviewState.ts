@@ -79,5 +79,3 @@ function canonicalJson(value: unknown): string {
   }
   return JSON.stringify(value) ?? "null";
 }
-
-# session wip 0
