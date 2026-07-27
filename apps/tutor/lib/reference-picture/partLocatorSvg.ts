@@ -881,5 +881,3 @@ async function textsIn(element: Element, pace: () => Promise<void>): Promise<str
   }
   return out;
 }
-
-# session wip 0
