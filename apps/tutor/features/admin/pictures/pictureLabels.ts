@@ -34,5 +34,3 @@ export const PICTURE_STATUS_STYLE: Record<PictureStatus, { label: string; classN
   unavailable: { label: "Unavailable", className: "border-danger/20 bg-danger/10 text-danger/80" },
   skipped: { label: "Skipped", className: "border-white/15 bg-white/5 text-soft" },
 };
-
-# session wip 0

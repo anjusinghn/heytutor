@@ -96,5 +96,3 @@ export function UnsavedBoardNotice({
     </section>
   );
 }
-
-# session wip 0

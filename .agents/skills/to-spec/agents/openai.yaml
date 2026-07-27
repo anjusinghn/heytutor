@@ -3,5 +3,3 @@ interface:
   short_description: "Turn a conversation into a spec"
 policy:
   allow_implicit_invocation: false
-
-# session wip 0
