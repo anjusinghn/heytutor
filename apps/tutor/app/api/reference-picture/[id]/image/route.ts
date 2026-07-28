@@ -8,5 +8,3 @@ export async function GET(_request: Request, context: RouteContext): Promise<Res
   if (!image || !/^image\/(png|jpeg|webp)$/.test(image.contentType)) return Response.json({ error: "not_found" }, { status: 404 });
   return new Response(new Uint8Array(image.bytes), { headers: { ...IMMUTABLE_ASSET_HEADERS, "content-type": image.contentType, "content-length": String(image.bytes.byteLength) } });
 }
-
-# session wip 0

@@ -375,5 +375,3 @@ export async function runFrameWalkBeat(input: FrameWalkBeatInput): Promise<Spoke
   );
   return { ...result, stops: plan.stops.length };
 }
-
-# session wip 0
