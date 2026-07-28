@@ -638,5 +638,3 @@ export function doubtFigurePageCheckFor(
 ): DoubtFigurePageCheck {
   return bindDoubtFigurePageCheck(context, { store: prismaPageFigureStore(db) });
 }
-
-# session wip 0
