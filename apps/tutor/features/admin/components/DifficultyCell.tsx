@@ -72,5 +72,3 @@ export function DifficultyCell({ difficulty, state, onActivate }: DifficultyCell
     </button>
   );
 }
-
-# session wip 0
