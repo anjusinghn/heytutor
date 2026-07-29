@@ -13,5 +13,3 @@ export async function register(): Promise<void> {
 export const onRequestError: typeof Sentry.captureRequestError = (...args) => {
   if (sentryServerRuntimeEnabled()) return Sentry.captureRequestError(...args);
 };
-
-# session wip 0

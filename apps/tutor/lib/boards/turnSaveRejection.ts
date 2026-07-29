@@ -37,5 +37,3 @@ export function rejectTurnSave(
   // Recovery fields (serverCount/turn receipt) remain response-only.
   return NextResponse.json({ ...responseFields, error, code }, { status });
 }
-
-# session wip 0
