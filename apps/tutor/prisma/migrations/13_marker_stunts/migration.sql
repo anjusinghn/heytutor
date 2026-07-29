@@ -3,5 +3,3 @@
 -- without a write.
 ALTER TABLE "user_settings"
   ADD COLUMN IF NOT EXISTS "marker_stunts" BOOLEAN NOT NULL DEFAULT true;
-
-# session wip 0
