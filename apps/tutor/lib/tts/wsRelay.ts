@@ -296,5 +296,3 @@ export function relayTtsWebSocket(client: WebSocket, context: TtsRelayContext): 
     queue = queue.then(() => accept(message)).catch(error => { captureTtsRelayFailure(error); close("speech_generation_failed", 1011); }).finally(() => { queued--; });
   });
 }
-
-# session wip 0
