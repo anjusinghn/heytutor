@@ -36,5 +36,3 @@ export async function pickProductionLabExamples(examples: readonly DiagramExempl
     usageKnown: false, usageKnownCalls: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0,
     fallbackReason: picked.status === 'timeout' || picked.status === 'failed' ? `live_picker_${picked.status}` : null } };
 }
-
-# session wip 0
