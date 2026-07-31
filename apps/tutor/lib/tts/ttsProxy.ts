@@ -68,5 +68,3 @@ export function ttsNotConfiguredResponse(): Response {
     { status: 503 },
   );
 }
-
-# session wip 0
