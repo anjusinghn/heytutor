@@ -29,5 +29,3 @@ export function formatCheckoutPrice(price: CheckoutPrice): string {
 export function promoCodeInput(value: string | null | undefined): string | null {
   return value?.trim().toUpperCase().slice(0, 32) || null;
 }
-
-# session wip 0

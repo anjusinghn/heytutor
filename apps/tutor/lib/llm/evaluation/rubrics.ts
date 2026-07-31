@@ -163,5 +163,3 @@ export function notesDecisionFromAnswers(
   }
   return null;
 }
-
-# session wip 0
