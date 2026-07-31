@@ -346,5 +346,3 @@ export function gradeDsaLecture(run: DsaLectureRun): DsaLectureGrade {
   );
   return { ...base, passed, score, findings, metrics };
 }
-
-# session wip 0
