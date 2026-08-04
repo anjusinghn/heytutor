@@ -2196,5 +2196,3 @@ function flatten(points: readonly { x: number; y: number }[]): number[] {
 function radiansToDegrees(value: number): number {
   return value * 180 / Math.PI;
 }
-
-# session wip 0
