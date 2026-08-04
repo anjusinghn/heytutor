@@ -12,5 +12,3 @@ export function requestBodyLimitForPath(pathname: string): number {
   // retain their original bytes inside this same bounded transport envelope.
   return MAX_JSON_BODY_BYTES;
 }
-
-# session wip 0
