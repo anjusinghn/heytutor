@@ -37,5 +37,3 @@ export default function FaqSection() {
     </section>
   )
 }
-
-# session wip 0

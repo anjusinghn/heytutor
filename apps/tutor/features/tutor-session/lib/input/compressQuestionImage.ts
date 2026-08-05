@@ -49,5 +49,3 @@ export async function compressQuestionImage(file: File): Promise<string> {
   }
   throw new Error("That photo is too detailed to send. Try a closer shot of just the question.");
 }
-
-# session wip 0
