@@ -18,5 +18,3 @@ export async function GET(request: Request) {
   });
   return NextResponse.json(result, { headers: { "cache-control": "public, max-age=30" } });
 }
-
-# session wip 0

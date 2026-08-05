@@ -245,5 +245,3 @@ export function evaluate(expression: string): number | null {
   }
   return values.length === 1 && Number.isFinite(values[0]) ? values[0] : null;
 }
-
-# session wip 0
