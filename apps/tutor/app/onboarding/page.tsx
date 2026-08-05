@@ -34,5 +34,3 @@ export default async function OnboardingPage({ searchParams }: OnboardingPagePro
     />
   );
 }
-
-# session wip 0
