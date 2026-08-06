@@ -125,5 +125,3 @@ export function BoardMarkingLayer({
     </div>
   );
 }
-
-# session wip 0
