@@ -176,5 +176,3 @@ export function isTypingElement(
   const tag = (element.tagName ?? "").toUpperCase();
   return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
 }
-
-# session wip 0

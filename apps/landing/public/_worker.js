@@ -17,5 +17,3 @@ export default {
     return Response.json({ country: typeof country === 'string' && /^[A-Z]{2}$/.test(country) && country !== 'XX' ? country : null }, { headers })
   },
 }
-
-# session wip 0
