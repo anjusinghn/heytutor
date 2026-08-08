@@ -166,5 +166,3 @@ export const ANNOTATION_SNAP_DISTANCE = 40;
  * pen keeps walking after it lifts.
  */
 export const CODE_FOCUS_SPOTLIGHT_MS = 1_600;
-
-# session wip 0
