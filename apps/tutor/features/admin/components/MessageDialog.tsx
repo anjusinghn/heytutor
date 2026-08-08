@@ -64,5 +64,3 @@ export function MessageDialog({
     </Dialog>
   );
 }
-
-# session wip 0

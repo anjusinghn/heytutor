@@ -98,5 +98,3 @@ export async function uploadBoardThumbnail(boardId: string, blob: Blob): Promise
     return false;
   }
 }
-
-# session wip 0
