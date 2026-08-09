@@ -92,5 +92,3 @@ export async function fetchAiCreditsSnapshot(nowMs: number = Date.now(), env: En
     servingProvider: endpoint.provider, fallbackReason: endpoint.fallbackReason,
   });
 }
-
-# session wip 0
