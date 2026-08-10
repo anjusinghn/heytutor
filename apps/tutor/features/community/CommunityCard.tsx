@@ -66,5 +66,3 @@ export function CommunityCard({ board }: { board: CommunityCardData }) {
     </Link>
   );
 }
-
-# session wip 0
