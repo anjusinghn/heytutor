@@ -22,5 +22,3 @@ export type AppShellBoardHandlers = {
 };
 
 export type AppShellVariant = "session" | "account";
-
-# session wip 0
