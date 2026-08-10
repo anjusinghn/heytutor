@@ -237,5 +237,3 @@ export function shouldResumeLiveAfterRewind(input: {
 }): boolean {
   return input.rewindPausedTheLecture && input.lecturePhase !== "idle";
 }
-
-# session wip 0
