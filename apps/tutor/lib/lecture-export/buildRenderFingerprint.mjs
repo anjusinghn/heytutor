@@ -241,5 +241,3 @@ export function renderFingerprint(root, roots = RENDER_SOURCE_ROOTS) {
   for (const version of installedRenderVersions(root, files)) hash.update(`dependency:${version.length}:${version}`);
   return hash.digest('hex');
 }
-
-# session wip 0
