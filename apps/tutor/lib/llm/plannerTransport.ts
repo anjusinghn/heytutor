@@ -287,5 +287,3 @@ function mergeAbortSignals(first: AbortSignal, second: AbortSignal): AbortSignal
   else second.addEventListener("abort", () => abort(second), { once: true });
   return controller.signal;
 }
-
-# session wip 0
