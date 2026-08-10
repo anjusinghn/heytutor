@@ -68,5 +68,3 @@ export function labProviderConfig() {
       configured: Boolean(process.env.AI_GATEWAY_API_KEY?.trim()) },
   };
 }
-
-# session wip 0
