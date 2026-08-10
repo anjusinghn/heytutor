@@ -16,5 +16,3 @@ export function Logo({ className }: LogoProps) {
     </svg>
   );
 }
-
-# session wip 0
