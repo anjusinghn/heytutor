@@ -58,5 +58,3 @@ export default function DashboardStage({ frame }: { frame: DemoFrame }) {
     </div>
   )
 }
-
-# session wip 0
