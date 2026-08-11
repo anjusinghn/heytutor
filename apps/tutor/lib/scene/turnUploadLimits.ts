@@ -199,5 +199,3 @@ export function validateCheckpointUploadParts(
   }
   return { ok: true, audioIndexes };
 }
-
-# session wip 0
