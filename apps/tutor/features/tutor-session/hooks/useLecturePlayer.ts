@@ -1303,5 +1303,3 @@ export function useLecturePlayer({
     halt,
   };
 }
-
-# session wip 0
