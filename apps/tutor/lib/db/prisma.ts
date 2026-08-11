@@ -18,5 +18,3 @@ export const prisma = globalForPrisma.prisma ?? createPrisma();
 // Next compiles API routes into more than one chunk. Without this, production
 // mints a PrismaClient per chunk and Neon exhausts connections until queries hang.
 globalForPrisma.prisma = prisma;
-
-# session wip 0
