@@ -43,5 +43,3 @@ export function prepareLessonOpening(input: {
     }));
   return JSON.stringify(openings[0]) === JSON.stringify(openings[1]) ? openings[0] ?? null : null;
 }
-
-# session wip 0
