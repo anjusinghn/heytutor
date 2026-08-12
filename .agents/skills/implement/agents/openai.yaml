@@ -3,5 +3,3 @@ interface:
   short_description: "Build work from a spec or tickets"
 policy:
   allow_implicit_invocation: false
-
-# session wip 0
