@@ -76,5 +76,3 @@ export default function StudentMark({
     </>
   )
 }
-
-# session wip 0
