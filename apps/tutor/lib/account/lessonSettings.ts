@@ -125,5 +125,3 @@ export function toggleMarkerStunt(
     : [...selected, kind];
   return STUNT_KINDS.filter((entry) => next.includes(entry));
 }
-
-# session wip 0
