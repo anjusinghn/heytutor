@@ -383,5 +383,3 @@ export function capStrokes(strokes: number[][], cap: number): number[][] {
   });
   return out;
 }
-
-# session wip 0
