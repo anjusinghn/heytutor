@@ -79,5 +79,3 @@ export function classifyEarlyLessonProgress(input: EarlyLessonProgressInput): Ea
   if (activeProgress === "substantive") return activeProgress;
   return openingHeard || activeProgress === "opening_only" ? "opening_only" : "none";
 }
-
-# session wip 0

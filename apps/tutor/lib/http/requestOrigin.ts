@@ -19,5 +19,3 @@ export function hasAllowedMutationOrigin(request: Request): boolean {
   // A browser claiming only same-site is insufficient: sibling origins differ.
   return site === null || site === "same-origin" || site === "none";
 }
-
-# session wip 0
