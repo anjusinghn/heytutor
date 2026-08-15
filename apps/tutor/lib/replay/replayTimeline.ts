@@ -165,5 +165,3 @@ export function getPartialCommandCount(cue: ReplayCue, offsetMs: number): number
     Math.max(0, Math.ceil(cue.commands.length * progress)),
   );
 }
-
-# session wip 0
