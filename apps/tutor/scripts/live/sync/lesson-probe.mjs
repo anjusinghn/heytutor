@@ -83,5 +83,3 @@ writeFileSync(join(out, "console.jsonl"), lines.map((l) => JSON.stringify(l)).jo
 writeFileSync(join(out, "console.txt"), lines.map((l) => `${String(l.wall).padStart(7)} ${l.type} ${l.text}`).join("\n"));
 await browser.close();
 console.log(`wrote ${lines.length} lines, ${shotIndex} shots to ${out}; done=${done}`);
-
-# session wip 0

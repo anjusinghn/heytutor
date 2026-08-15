@@ -34,5 +34,3 @@ export function contentDispositionForKey(key: string): string {
   if (parsed?.kind === "image") return `inline; filename="question.${parsed.ext}"`;
   return 'attachment; filename="download"';
 }
-
-# session wip 0
