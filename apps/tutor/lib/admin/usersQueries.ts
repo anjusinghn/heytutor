@@ -174,5 +174,3 @@ export async function listUsersWithStats(input: ListUsersInput): Promise<UsersPa
     period,
   };
 }
-
-# session wip 0
