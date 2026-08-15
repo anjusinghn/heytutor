@@ -424,5 +424,3 @@ export function sentryBeforeSend(event: ErrorEvent): ErrorEvent {
 export function sentryBeforeBreadcrumb(breadcrumb: Breadcrumb): Breadcrumb | null {
   return scrubSentryBreadcrumb(breadcrumb);
 }
-
-# session wip 0
