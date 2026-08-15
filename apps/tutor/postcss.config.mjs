@@ -5,5 +5,3 @@ const config = {
 };
 
 export default config;
-
-# session wip 0
