@@ -266,5 +266,3 @@ export async function DELETE(request: Request, context: RouteContext) {
     return NextResponse.json({ error: "failed to delete board" }, { status: 500 });
   }
 }
-
-# session wip 0
