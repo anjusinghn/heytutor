@@ -86,5 +86,3 @@ export default function Button({
     </button>
   )
 }
-
-# session wip 0
