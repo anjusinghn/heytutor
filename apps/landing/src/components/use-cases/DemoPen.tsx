@@ -59,5 +59,3 @@ export default forwardRef<
     </g>
   )
 })
-
-# session wip 0

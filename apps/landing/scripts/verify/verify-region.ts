@@ -21,5 +21,3 @@ for (const handler of [region, (request: Request) => worker.fetch(request, { ASS
 }
 assert.equal(await worker.fetch(new Request('https://accelute.co/terms'), { ASSETS: assets }).text(), 'static asset', 'ordinary pages still use the static asset binding')
 console.log('✓ Vercel/Cloudflare country-only endpoints, private cache, CORS, methods, and static pages')
-
-# session wip 0
