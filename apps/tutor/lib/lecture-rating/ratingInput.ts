@@ -49,5 +49,3 @@ export function parseLectureRatingInput(body: unknown): LectureRatingParse {
     : 0;
   return { ok: true, input: { moment: record.moment, stars: record.stars, feedback, stepsTaught } };
 }
-
-# session wip 0

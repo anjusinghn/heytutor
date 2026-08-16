@@ -5,5 +5,3 @@ Disallow: /record.html
 Disallow: /record
 
 Sitemap: https://accelute.co/sitemap.xml
-
-# session wip 0
