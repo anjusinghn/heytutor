@@ -131,5 +131,3 @@ export async function POST(request: Request): Promise<Response> {
 
   return Response.json({ ok: true, events: body.events?.length ?? 0 });
 }
-
-# session wip 0

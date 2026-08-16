@@ -84,5 +84,3 @@ export default function LiveLessonWindow({
     </>
   )
 }
-
-# session wip 0
