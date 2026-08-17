@@ -254,5 +254,3 @@ export function useBoardViewport(
 
   return viewport;
 }
-
-# session wip 0
