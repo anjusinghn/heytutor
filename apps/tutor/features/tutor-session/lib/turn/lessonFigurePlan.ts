@@ -215,5 +215,3 @@ export function lessonFiguresArtifact(figures: readonly PlannedLessonFigure[]): 
     })),
   };
 }
-
-# session wip 0
