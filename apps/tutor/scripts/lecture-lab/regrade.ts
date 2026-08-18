@@ -37,5 +37,3 @@ const summary = { regradedAt: new Date().toISOString(), ...summarize(grades, run
 writeFileSync(`${outDir}/summary.json`, `${JSON.stringify(summary, null, 1)}\n`);
 console.log(`regraded ${summary.total}:`);
 printSummary(summary);
-
-# session wip 0

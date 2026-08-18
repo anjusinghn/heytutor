@@ -148,5 +148,3 @@ export function lectureRatingQueue(): LectureRatingQueue {
   });
   return tabQueue;
 }
-
-# session wip 0
