@@ -23,5 +23,3 @@ Students can ask a doubt on the same board, replay saved lessons, and download n
 
 - App: https://app.accelute.co/
 - Email: hi@accelute.co
-
-# session wip 0
