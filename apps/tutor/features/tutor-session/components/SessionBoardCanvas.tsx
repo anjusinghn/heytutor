@@ -401,5 +401,3 @@ export function SessionBoardCanvas({
     </div>
   );
 }
-
-# session wip 0

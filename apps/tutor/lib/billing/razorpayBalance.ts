@@ -61,5 +61,3 @@ export async function spendRazorpayBalance(userId: string, millicents: number) {
     return loadRazorpayBalance(userId, tx);
   });
 }
-
-# session wip 0
