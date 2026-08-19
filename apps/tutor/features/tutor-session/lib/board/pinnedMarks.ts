@@ -109,5 +109,3 @@ export function pinnedInkCountOf(board: { pinnedInkCount?: () => number }): numb
 export function erasePinnedInkOf(board: { erasePinnedInk?: () => void }): void {
   if (typeof board.erasePinnedInk === "function") board.erasePinnedInk();
 }
-
-# session wip 0
