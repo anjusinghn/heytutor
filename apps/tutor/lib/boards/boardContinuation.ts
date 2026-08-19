@@ -152,5 +152,3 @@ export function storedPageTurnAt(turns: readonly PageTurnTurn[], index: number):
   if (turn.kind === "resume" && storedFreshPageOpen(turns, index)) return "return";
   return null;
 }
-
-# session wip 0
