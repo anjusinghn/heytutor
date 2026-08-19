@@ -55,5 +55,3 @@ export async function generatePicture(mustShow: string, provider: ImageProviderC
   if (!b64) throw new Error("Image generation returned no image");
   return { bytes: Buffer.from(b64, "base64"), contentType: "image/png" };
 }
-
-# session wip 0
