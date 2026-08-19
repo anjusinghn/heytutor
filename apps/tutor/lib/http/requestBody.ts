@@ -76,5 +76,3 @@ export async function readBoundedFormData(request: Request, maxBytes: number): P
     }).formData();
   } catch { throw new RequestBodyError("invalid multipart form data", 400); }
 }
-
-# session wip 0

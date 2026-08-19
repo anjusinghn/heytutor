@@ -23,5 +23,3 @@ export async function GET() {
     { status: ok ? 200 : 503 },
   );
 }
-
-# session wip 0
