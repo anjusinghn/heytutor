@@ -596,5 +596,3 @@ export function snapshotPresentation(presentation: { diagram: VerifiedDiagram; i
     return null;
   }
 }
-
-# session wip 0
