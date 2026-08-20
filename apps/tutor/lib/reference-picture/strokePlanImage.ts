@@ -359,5 +359,3 @@ export function simplifyPolyline(pts: readonly number[], epsilon: number): numbe
   for (let i = 0; i < n; i++) if (keep[i]) out.push(pts[2 * i]!, pts[2 * i + 1]!);
   return out;
 }
-
-# session wip 0
