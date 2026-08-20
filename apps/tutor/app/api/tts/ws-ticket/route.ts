@@ -8,5 +8,3 @@ export async function GET(request: Request): Promise<Response> {
 
   return NextResponse.json({ ticket: mintWsTicket(actor.userId) });
 }
-
-# session wip 0
