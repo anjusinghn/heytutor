@@ -41,5 +41,3 @@ export async function POST(request: Request): Promise<Response> {
   };
   return Response.json(payload);
 }
-
-# session wip 0
