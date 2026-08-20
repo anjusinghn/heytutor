@@ -230,5 +230,3 @@ assert.match(
 );
 
 console.log("verify-hero-audio-clock: no overlapping start, no seek, audio is master, flicker does not pause");
-
-# session wip 0
