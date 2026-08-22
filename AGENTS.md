@@ -141,5 +141,3 @@ Never add Cursor / `cursoragent` as a commit co-author. Never commit `.cursor/` 
     then promotes the same commit to `main`. Leave `BACKEND_ORIGIN` unset.
     Postgres is hosted (`DATABASE_URL`); lecture MP3s and question photos
     are private S3. Runbook: [docs/ops/ci-cd.md](docs/ops/ci-cd.md).
-
-# session wip 0

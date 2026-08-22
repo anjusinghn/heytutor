@@ -1790,5 +1790,3 @@ function wordPresent(value: string, word: string): boolean {
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-
-# session wip 0

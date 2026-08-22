@@ -331,5 +331,3 @@ export function planFillStrokes(input: FillPlanInput): number[][] {
   }
   return strokes;
 }
-
-# session wip 0
