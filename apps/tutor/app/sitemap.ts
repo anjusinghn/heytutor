@@ -19,5 +19,3 @@ export default function sitemap(): MetadataRoute.Sitemap {
     },
   ];
 }
-
-# session wip 0

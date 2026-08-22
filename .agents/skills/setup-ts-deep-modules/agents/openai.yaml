@@ -3,5 +3,3 @@ interface:
   short_description: "Enforce deep TypeScript modules"
 policy:
   allow_implicit_invocation: false
-
-# session wip 0
