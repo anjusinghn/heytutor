@@ -56,5 +56,3 @@ export function referencePictureIdsOfTurns(turns: readonly (RestorableTurn | nul
   }
   return ids;
 }
-
-# session wip 0

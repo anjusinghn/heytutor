@@ -54,5 +54,3 @@ export function emptySnapshot(): AccountSnapshot {
     lastBoard: null,
   };
 }
-
-# session wip 0
