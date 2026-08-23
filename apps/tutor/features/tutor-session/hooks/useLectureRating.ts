@@ -134,5 +134,3 @@ export function useLectureRating({ enabled, sessionId, owner, lecturing, paused 
 
   return { prompt, rate, hold, close };
 }
-
-# session wip 0
