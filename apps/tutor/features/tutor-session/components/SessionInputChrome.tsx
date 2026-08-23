@@ -161,5 +161,3 @@ export function SessionInputChrome({
     </div>
   );
 }
-
-# session wip 0
