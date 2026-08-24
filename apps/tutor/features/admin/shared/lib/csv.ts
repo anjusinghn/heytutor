@@ -41,5 +41,3 @@ export function downloadCsv(
   // Revoking in the same tick can cancel the download in some browsers.
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
-
-# session wip 0
