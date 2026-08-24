@@ -186,5 +186,3 @@ assert.ok(footer.includes("href: '/#faq'"));
 console.log(
   `seo ok: ${PAGES.length} urls, home title "${home.title}" (${home.title.length} chars)`,
 );
-
-# session wip 0
