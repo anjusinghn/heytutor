@@ -9,5 +9,3 @@ export function userLabel(input: {
   if (input.email) return input.email;
   return input.userId.slice(0, 8);
 }
-
-# session wip 0
