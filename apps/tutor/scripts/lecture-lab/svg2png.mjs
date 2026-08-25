@@ -214,5 +214,3 @@ try {
 
 console.log(`rasterized ${files.length - failures}/${files.length}`);
 process.exit(failures === 0 ? 0 : 1);
-
-# session wip 0

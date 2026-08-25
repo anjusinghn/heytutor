@@ -359,5 +359,3 @@ export function createHeroAudioEngine(options: { onBlocked: () => void }): HeroA
     },
   }
 }
-
-# session wip 0
