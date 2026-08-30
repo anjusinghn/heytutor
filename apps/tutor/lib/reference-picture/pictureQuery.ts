@@ -124,5 +124,3 @@ export async function writePictureQuery(question: string, options: { apiKey: str
   }
   return { query, model, usage: data.usage };
 }
-
-# session wip 0
