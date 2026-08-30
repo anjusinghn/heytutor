@@ -63,5 +63,3 @@ export function normalizeMultiContextServerPayload(raw: string): {
     ...(final && contextId ? { finalContextId: contextId } : {}),
   };
 }
-
-# session wip 0
