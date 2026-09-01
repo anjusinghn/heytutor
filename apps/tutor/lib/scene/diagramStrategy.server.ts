@@ -91,5 +91,3 @@ export function resolveReferencePictureEnabled(raw = process.env.DIAGRAM_REFEREN
 export function resolveReferencePicturePartFocusEnabled(raw = process.env.REFERENCE_PICTURE_PART_FOCUS): boolean {
   return raw?.trim().toLowerCase() === "on";
 }
-
-# session wip 0

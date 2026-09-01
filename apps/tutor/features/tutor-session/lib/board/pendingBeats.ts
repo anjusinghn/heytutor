@@ -12,5 +12,3 @@ export const LESSON_PENDING_BEATS = [
 ] as const;
 
 export const PENDING_BEAT_MS = 2800;
-
-# session wip 0
