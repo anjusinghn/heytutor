@@ -162,5 +162,3 @@ export function formatJudgeCounts(summary: JudgeSummary | undefined): string {
     .join(" ");
   return `${counts || "none"}; human=${summary.needsHuman}`;
 }
-
-# session wip 0
