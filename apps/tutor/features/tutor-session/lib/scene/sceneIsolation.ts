@@ -77,5 +77,3 @@ export function canAdoptVerifiedScene(input: {
   }
   return true;
 }
-
-# session wip 0

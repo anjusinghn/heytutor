@@ -249,5 +249,3 @@ export function enrichTraceMetadataWithCosts(
 
   return enriched;
 }
-
-# session wip 0
