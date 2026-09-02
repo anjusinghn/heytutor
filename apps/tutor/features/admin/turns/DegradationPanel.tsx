@@ -61,5 +61,3 @@ export function DegradationPanel({ turns }: { turns: AdminTurnRow[] }) {
     </div>
   );
 }
-
-# session wip 0
