@@ -20,5 +20,3 @@ export function sentryReceiptEventUrl(receipt: {
   if (!receipt.sentryReportedAt && !(receipt.sentryFailureEvent && receipt.sentryNextAttemptAt)) return null;
   return sentryEventUrl(receipt.sentryEventId, env);
 }
-
-# session wip 0
