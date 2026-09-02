@@ -53,5 +53,3 @@ export default async function AdminPlaygroundPage() {
 
   return <AdminPlayground tree={tree} probes={probes} />;
 }
-
-# session wip 0
