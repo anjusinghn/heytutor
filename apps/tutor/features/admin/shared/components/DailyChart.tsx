@@ -48,5 +48,3 @@ export function DailyChart({ title, points, tone = "sky", note }: DailyChartProp
     </div>
   );
 }
-
-# session wip 0
