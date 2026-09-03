@@ -32,5 +32,3 @@ export function applyPromoCode(offer: PaymentOffer, promo: PromoCode | null): Pa
   if (!promo || !promo.plans.includes(offer.planId)) return offer;
   return { ...offer, amount: Math.round(offer.amount * (100 - promo.percentOff) / 100), promoCode: promo.code };
 }
-
-# session wip 0
