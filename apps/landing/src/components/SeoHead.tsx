@@ -66,5 +66,3 @@ export default function SeoHead({ path }: { path: string }) {
 
   return null
 }
-
-# session wip 0
