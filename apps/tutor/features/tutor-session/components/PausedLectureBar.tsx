@@ -62,5 +62,3 @@ export function PausedLectureBar(props: PausedLectureBarProps) {
     </div>
   );
 }
-
-# session wip 0
