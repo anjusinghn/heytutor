@@ -15,5 +15,3 @@ export async function GET(): Promise<Response> {
     return Response.json({ error: "overview_failed" }, { status: 500 });
   }
 }
-
-# session wip 0
