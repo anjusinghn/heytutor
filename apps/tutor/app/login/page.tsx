@@ -33,5 +33,3 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
     />
   );
 }
-
-# session wip 0
