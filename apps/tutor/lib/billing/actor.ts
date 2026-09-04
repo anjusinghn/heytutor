@@ -71,5 +71,3 @@ export async function requireSpendActor(
 export function isSpendActor(value: SpendActor | Response): value is SpendActor {
   return typeof value === "object" && value !== null && "userId" in value && !("headers" in value);
 }
-
-# session wip 0

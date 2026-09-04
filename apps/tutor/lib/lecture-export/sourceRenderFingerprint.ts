@@ -12,5 +12,3 @@ export function sourceFingerprint(): string | null {
     root = parent;
   }
 }
-
-# session wip 0
