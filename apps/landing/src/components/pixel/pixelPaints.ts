@@ -165,5 +165,3 @@ export const paintBulb: PixelPaint = (ctx, s) => {
 
   ctx.restore()
 }
-
-# session wip 0
