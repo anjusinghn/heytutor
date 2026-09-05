@@ -136,5 +136,3 @@ export function sttConfig(env: SpeechEnvironment = process.env) {
         url: "https://api.elevenlabs.io/v1/speech-to-text",
       };
 }
-
-# session wip 0
