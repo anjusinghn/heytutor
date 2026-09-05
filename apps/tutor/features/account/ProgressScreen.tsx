@@ -105,5 +105,3 @@ function Stat({ label, value }: { label: string; value: string }) {
     </AccountCard>
   );
 }
-
-# session wip 0
