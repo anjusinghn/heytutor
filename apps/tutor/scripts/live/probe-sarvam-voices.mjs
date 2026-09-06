@@ -120,5 +120,3 @@ if (seconds > 0) {
   console.log(`latency p50 ${latencies[Math.floor(latencies.length / 2)]}ms, max ${latencies.at(-1)}ms`);
 }
 console.log(`\nClips: ${outDir}\nListen:  open ${outDir}`);
-
-# session wip 0
