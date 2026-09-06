@@ -29,5 +29,3 @@ export class TraceTagRegistry {
     return this.current(key, now) ? this.remember(key, tags, now) : undefined;
   }
 }
-
-# session wip 0

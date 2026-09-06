@@ -675,5 +675,3 @@ export function namedFrameLabels(renderedLabels: readonly string[], narration: s
   }
   return [...named];
 }
-
-# session wip 0
