@@ -121,5 +121,3 @@ export function toPlainMathText(raw: string): string {
     })
     .join("");
 }
-
-# session wip 0
