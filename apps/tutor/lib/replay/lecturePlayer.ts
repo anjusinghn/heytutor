@@ -530,5 +530,3 @@ export function msFromFraction(fraction: number, totalMs: number): number {
   if (!Number.isFinite(fraction) || !Number.isFinite(totalMs)) return 0;
   return Math.max(0, Math.min(fraction, 1)) * totalMs;
 }
-
-# session wip 0
