@@ -90,5 +90,3 @@ export function visibleSelectedProbes(
 ): ProbeQuestion[] {
   return probesByIds(index, selectedIds).filter((probe) => visibleIds.has(probe.id));
 }
-
-# session wip 0
