@@ -159,5 +159,3 @@ export default function PrivacyPage() {
     </LegalDocument>
   )
 }
-
-# session wip 0
