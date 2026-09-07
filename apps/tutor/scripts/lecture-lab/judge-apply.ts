@@ -56,5 +56,3 @@ if (process.argv[1]?.endsWith("judge-apply.ts")) {
   if (!round) throw new Error("Usage: judge-apply.ts <round>");
   console.log(JSON.stringify(applyJudgments(round), null, 2));
 }
-
-# session wip 0
