@@ -141,5 +141,3 @@ assert.ok(
 console.log(
   'verify-use-case-demo: click → question → circle → same-board answer → continue; all demos complete',
 )
-
-# session wip 0

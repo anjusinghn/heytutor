@@ -78,5 +78,3 @@ export function resetProgressMap(): ProgressMap {
 export function exportProgressJson(map: ProgressMap): string {
   return JSON.stringify(map, null, 2);
 }
-
-# session wip 0
