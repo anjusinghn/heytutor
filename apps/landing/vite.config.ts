@@ -20,5 +20,3 @@ export default defineConfig({
     port: 5173,
   },
 });
-
-# session wip 0
