@@ -3,5 +3,3 @@ interface:
   short_description: "Move issues through triage roles"
 policy:
   allow_implicit_invocation: false
-
-# session wip 0

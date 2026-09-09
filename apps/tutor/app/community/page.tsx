@@ -14,5 +14,3 @@ export const metadata: Metadata = {
 export default function CommunityPage() {
   return <CommunityGallery />;
 }
-
-# session wip 0

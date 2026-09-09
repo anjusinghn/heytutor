@@ -405,5 +405,3 @@ function WatchDrawerFrame({
     </div>
   );
 }
-
-# session wip 0
