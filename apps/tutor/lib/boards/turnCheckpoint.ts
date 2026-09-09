@@ -1059,5 +1059,3 @@ async function applyCheckpoint(
     throw error;
   }
 }
-
-# session wip 0
