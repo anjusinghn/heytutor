@@ -389,5 +389,3 @@ export function acquirePaidCall(grant: TurnGrant, kind: PaidCallKind, traceId = 
     grant.paidCallsPending.set(group, Math.max(0, (grant.paidCallsPending.get(group) ?? 1) - 1));
   } };
 }
-
-# session wip 0
