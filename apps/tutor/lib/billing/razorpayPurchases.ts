@@ -100,5 +100,3 @@ export async function createRazorpayCheckout(userId: string, planId: PurchasePla
     amount: purchase.amount, currency: purchase.currency, planId: purchase.planId, testMode: purchase.testMode,
   };
 }
-
-# session wip 0

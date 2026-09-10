@@ -135,5 +135,3 @@ if (process.argv[1]?.endsWith("judge-prep.ts")) {
   if (!round) throw new Error("Usage: judge-prep.ts <round>");
   console.log(JSON.stringify(prepareJudgingRound(round), null, 2));
 }
-
-# session wip 0
