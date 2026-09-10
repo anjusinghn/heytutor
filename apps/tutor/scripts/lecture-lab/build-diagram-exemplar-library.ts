@@ -253,5 +253,3 @@ if (process.argv[1]?.endsWith("build-diagram-exemplar-library.ts")) {
     [subject, exemplars.filter((entry) => entry.subject === subject).length]));
   console.log(JSON.stringify({ output, exemplars: exemplars.length, groups: groups.size, subjects }, null, 2));
 }
-
-# session wip 0
