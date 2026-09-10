@@ -196,5 +196,3 @@ export function resolveSnappedAnnotationParams(
 
   return { params, snapped: false, rect: null };
 }
-
-# session wip 0

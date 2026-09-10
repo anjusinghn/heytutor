@@ -47,5 +47,3 @@ export async function fetchDsaTeachingPolicy(input: {
     return FALLBACK_DSA_TEACHING_POLICY;
   }
 }
-
-# session wip 0
