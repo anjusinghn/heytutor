@@ -88,5 +88,3 @@ export async function POST(request: Request): Promise<Response> {
     await reservation.finish();
   }
 }
-
-# session wip 0
