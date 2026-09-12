@@ -196,5 +196,3 @@ export function NotesChatComposer({
     </div>
   );
 }
-
-# session wip 0
