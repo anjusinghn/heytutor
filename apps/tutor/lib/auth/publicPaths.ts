@@ -52,5 +52,3 @@ export function safeNextPath(value: unknown, fallback = "/"): string {
     return fallback;
   }
 }
-
-# session wip 0

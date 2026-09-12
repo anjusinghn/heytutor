@@ -127,5 +127,3 @@ export default function UseCaseBoard({ frame }: { frame: DemoFrame }) {
     </div>
   )
 }
-
-# session wip 0
