@@ -53,5 +53,3 @@ export function OutcomePill({ outcome, className }: OutcomePillProps) {
     </span>
   );
 }
-
-# session wip 0
