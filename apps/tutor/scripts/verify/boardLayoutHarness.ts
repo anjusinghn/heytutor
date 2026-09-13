@@ -114,5 +114,3 @@ export function mountBoardLayout(options: { diagramActive?: boolean } = {}) {
 }
 
 export type MountedBoardLayout = ReturnType<typeof mountBoardLayout>;
-
-# session wip 0
