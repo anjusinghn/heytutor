@@ -205,5 +205,3 @@ export function LoginScreen({
     </main>
   );
 }
-
-# session wip 0
