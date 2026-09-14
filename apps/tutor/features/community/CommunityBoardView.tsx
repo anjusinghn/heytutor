@@ -210,5 +210,3 @@ export function CommunityBoardView({ boardId }: { boardId: string }) {
     </div>
   );
 }
-
-# session wip 0

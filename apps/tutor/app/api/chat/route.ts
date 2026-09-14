@@ -1387,5 +1387,3 @@ export async function POST(request: Request): Promise<Response> {
     }
   }
 }
-
-# session wip 0
