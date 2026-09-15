@@ -91,5 +91,3 @@ export function customerIdFromWebhookPayload(payload: unknown): string | null {
         : null;
   return typeof id === "string" && id.trim() ? id.trim() : null;
 }
-
-# session wip 0
