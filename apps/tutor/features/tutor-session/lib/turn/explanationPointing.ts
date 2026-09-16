@@ -101,5 +101,3 @@ export async function pointThroughExplanation(input: {
     },
   });
 }
-
-# session wip 0
