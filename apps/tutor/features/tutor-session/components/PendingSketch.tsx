@@ -182,5 +182,3 @@ export function PendingSketch({ index, ink, beatMs }: PendingSketchProps) {
     </svg>
   );
 }
-
-# session wip 0
