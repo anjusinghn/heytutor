@@ -138,5 +138,3 @@ export async function requestReferencePicture(input: ReferencePictureRequest): P
     };
   }
 }
-
-# session wip 0
