@@ -276,5 +276,3 @@ export function waitForRequiredScenePeers(visualRequirement: VisualRequirement):
   return visualRequirement === "required";
 }
 
-
-# session wip 0
