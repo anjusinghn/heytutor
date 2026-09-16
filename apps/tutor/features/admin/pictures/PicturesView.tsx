@@ -94,5 +94,3 @@ export function PicturesView() {
     </div>
   );
 }
-
-# session wip 0
