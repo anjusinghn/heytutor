@@ -458,5 +458,3 @@ export async function requireNotesAccess(
 
 export { isSpendActor, requireSpendActor };
 export type { SpendActor };
-
-# session wip 0
