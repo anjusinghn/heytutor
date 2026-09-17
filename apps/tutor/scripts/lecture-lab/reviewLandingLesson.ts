@@ -15,5 +15,3 @@ export function reviewLandingLesson(segments: TutorSegment[]): TutorSegment[] {
     return { ...segment, narration, command: reviewed[0] ?? null, commands: reviewed };
   });
 }
-
-# session wip 0
