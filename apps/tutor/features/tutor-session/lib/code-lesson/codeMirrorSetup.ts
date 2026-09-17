@@ -240,5 +240,3 @@ export function baseCodeLessonExtensions(language: CodeLessonLanguage): Extensio
     EditorView.lineWrapping,
   ];
 }
-
-# session wip 0
