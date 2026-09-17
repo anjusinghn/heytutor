@@ -195,5 +195,3 @@ export function speechPlaybackOverdue(input: {
   const expectedWallMs = input.audioDurationMs / input.playbackRate;
   return input.elapsedMs > Math.max(8_000, expectedWallMs * 1.35 + 3_000);
 }
-
-# session wip 0
