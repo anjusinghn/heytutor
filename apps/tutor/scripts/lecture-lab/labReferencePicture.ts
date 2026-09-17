@@ -444,5 +444,3 @@ export function summarizeReferencePictures(runs: readonly { referencePicture?: L
     chargedUsd: Math.round(records.reduce((sum, { record }) => sum + (record.accounting?.chargedUsd ?? 0), 0) * 1_000_000) / 1_000_000,
   };
 }
-
-# session wip 0
