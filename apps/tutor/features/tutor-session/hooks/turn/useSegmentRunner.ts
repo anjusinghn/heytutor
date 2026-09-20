@@ -1309,5 +1309,3 @@ export function useSegmentRunner({
 
   return { runSegment, pauseFallbackSpeech, resumeFallbackSpeech, stopFallbackSpeech, speakingNarrationRef };
 }
-
-# session wip 0
