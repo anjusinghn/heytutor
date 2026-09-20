@@ -65,5 +65,3 @@ export default {
   },
   plugins: [],
 };
-
-# session wip 0

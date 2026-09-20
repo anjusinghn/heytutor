@@ -172,5 +172,3 @@ export function lessonFigureSceneInput(lessonQuestion: string, lessonPlan: unkno
 export function resolveLessonFiguresEnabled(env: Record<string, string | undefined> = process.env): boolean {
   return env.DIAGRAM_LESSON_FIGURES === "on";
 }
-
-# session wip 0
