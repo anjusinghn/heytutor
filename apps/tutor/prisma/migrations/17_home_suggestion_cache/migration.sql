@@ -10,5 +10,3 @@ CREATE TABLE "home_suggestion_cache" (
   CONSTRAINT "home_suggestion_cache_pkey" PRIMARY KEY ("user_id"),
   CONSTRAINT "home_suggestion_cache_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
-
-# session wip 0
