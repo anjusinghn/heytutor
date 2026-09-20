@@ -127,5 +127,3 @@ export function CoverageView() {
     </div>
   );
 }
-
-# session wip 0
