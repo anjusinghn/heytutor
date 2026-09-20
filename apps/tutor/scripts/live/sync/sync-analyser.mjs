@@ -539,5 +539,3 @@ const report = md.join("\n");
 console.log(report);
 if (opts.md) writeFileSync(opts.md, report);
 if (opts.json) writeFileSync(opts.json, JSON.stringify(runs, null, 2));
-
-# session wip 0
