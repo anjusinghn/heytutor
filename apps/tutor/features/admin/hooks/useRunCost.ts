@@ -80,5 +80,3 @@ export function useRunCost(sessionIds: string[], busy: boolean) {
 
   return { data, loading, error };
 }
-
-# session wip 0

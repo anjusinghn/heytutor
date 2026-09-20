@@ -11,5 +11,3 @@ export default async function SettingsSectionPage({ params }: SettingsSectionPag
   if (!isSettingsSection(section)) notFound();
   return <SettingsScreen section={section} />;
 }
-
-# session wip 0
