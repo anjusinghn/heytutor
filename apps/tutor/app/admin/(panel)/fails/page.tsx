@@ -8,5 +8,3 @@ export const metadata: Metadata = {
 export default function AdminFailsPage() {
   return <FailsView />;
 }
-
-# session wip 0
