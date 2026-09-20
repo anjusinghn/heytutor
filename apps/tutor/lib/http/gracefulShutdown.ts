@@ -142,5 +142,3 @@ export function installGracefulShutdown(options: GracefulShutdownOptions): { dra
   process.on("SIGTERM", drain);
   return { drain, activeRequests: () => active.size };
 }
-
-# session wip 0
