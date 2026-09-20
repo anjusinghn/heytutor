@@ -180,5 +180,3 @@ export default function LessonShowcase() {
     </section>
   )
 }
-
-# session wip 0
