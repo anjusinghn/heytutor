@@ -10,5 +10,3 @@ export function isTurnMetadataPersistable(metadata: PersistableTurnMetadata): bo
   if (metadata.rawResponse?.trim()) return true;
   return metadata.visualStatus === "retry_required" && metadata.sceneArtifacts != null;
 }
-
-# session wip 0
