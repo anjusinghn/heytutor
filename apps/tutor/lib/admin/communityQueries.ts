@@ -144,5 +144,3 @@ export async function applyAdminCommunityAction(boardId: string, action: AdminCo
     return true;
   });
 }
-
-# session wip 0
