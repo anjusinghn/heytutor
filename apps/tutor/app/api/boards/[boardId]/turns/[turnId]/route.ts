@@ -13,5 +13,3 @@ export async function PUT(request: Request, context: RouteContext) {
 export async function PATCH(request: Request, context: RouteContext) {
   return handleTurnClose(request, await context.params);
 }
-
-# session wip 0
