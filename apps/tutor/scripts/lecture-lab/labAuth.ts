@@ -20,5 +20,3 @@ export function lectureLabToken(env: NodeJS.ProcessEnv = process.env): string {
 export function applyLectureLabHeaders(headers: Headers, env: NodeJS.ProcessEnv = process.env): void {
   headers.set(LECTURE_LAB_HEADER, lectureLabToken(env));
 }
-
-# session wip 0
