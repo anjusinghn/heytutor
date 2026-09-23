@@ -352,5 +352,3 @@ export async function fetchRunCostForSessions(sessionIds: string[]): Promise<{
     return { configured: true, report: aggregateRunCost([]), error: "langfuse_unavailable" };
   }
 }
-
-# session wip 0
