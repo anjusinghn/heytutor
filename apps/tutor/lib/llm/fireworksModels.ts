@@ -234,5 +234,3 @@ export function resolveCheapFireworksModel(options: {
   if (deployment) return deployment;
   return trimModel(env.FIREWORKS_PROBLEM_IR_MODEL) || DEFAULT_CHEAP_FIREWORKS_MODEL;
 }
-
-# session wip 0
