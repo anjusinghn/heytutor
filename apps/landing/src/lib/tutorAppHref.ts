@@ -44,5 +44,3 @@ export function tutorQuestionHref(question: string): string {
   }
   return tutorLoginHref(`${destination.pathname}${destination.search}`)
 }
-
-# session wip 0

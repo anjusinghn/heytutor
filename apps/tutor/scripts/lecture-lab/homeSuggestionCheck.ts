@@ -376,5 +376,3 @@ export function recordingFromRun(
   recording.expected = replayRecording(recording);
   return recording;
 }
-
-# session wip 0
