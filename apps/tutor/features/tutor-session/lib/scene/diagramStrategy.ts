@@ -122,5 +122,3 @@ export function diagramStrategyAllowsFigureSource(
     source === "linear_source" ||
     source === "text_only";
 }
-
-# session wip 0

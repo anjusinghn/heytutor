@@ -19,5 +19,3 @@ CREATE TABLE "reference_picture_queries" (
   "created_at" TIMESTAMPTZ(6) NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT "reference_picture_queries_pkey" PRIMARY KEY ("query_key")
 );
-
-# session wip 0
