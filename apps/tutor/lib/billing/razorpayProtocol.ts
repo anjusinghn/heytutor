@@ -76,5 +76,3 @@ export function addBillingMonth(start: Date): Date {
   end.setUTCDate(Math.min(day, lastDay));
   return end;
 }
-
-# session wip 0
