@@ -211,5 +211,3 @@ export function UnitSection({
     </section>
   );
 }
-
-# session wip 0
