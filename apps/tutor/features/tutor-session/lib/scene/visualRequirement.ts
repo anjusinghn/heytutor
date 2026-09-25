@@ -25,5 +25,3 @@ export function resolveSelectedVisualStatus(
   if (hasReadableScene) return "validated";
   return diagramFailureVisualStatus(requirement);
 }
-
-# session wip 0
