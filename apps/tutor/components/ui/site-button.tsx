@@ -68,5 +68,3 @@ export const PlainButton = React.forwardRef<HTMLButtonElement, PlainButtonProps>
   ),
 );
 PlainButton.displayName = "PlainButton";
-
-# session wip 0

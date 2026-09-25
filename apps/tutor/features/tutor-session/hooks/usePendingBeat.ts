@@ -21,5 +21,3 @@ export function usePendingBeat(periodMs = PENDING_BEAT_MS) {
 
   return { index, label: LESSON_PENDING_BEATS[index] ?? LESSON_PENDING_BEATS[0] };
 }
-
-# session wip 0
