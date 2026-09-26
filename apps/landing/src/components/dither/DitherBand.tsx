@@ -119,5 +119,3 @@ export default function DitherBand({
     </div>
   )
 }
-
-# session wip 0

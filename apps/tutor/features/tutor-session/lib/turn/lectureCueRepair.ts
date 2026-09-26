@@ -378,5 +378,3 @@ export class LectureMarkupBuffer {
     return this.pushed;
   }
 }
-
-# session wip 0
