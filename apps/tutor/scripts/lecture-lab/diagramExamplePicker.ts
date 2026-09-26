@@ -332,5 +332,3 @@ export async function pickDiagramExamples(
     };
   }
 }
-
-# session wip 0
