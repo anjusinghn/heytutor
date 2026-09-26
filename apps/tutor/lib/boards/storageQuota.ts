@@ -315,5 +315,3 @@ export async function abandonTurnStorage(reservation: TurnStorageReservation, tr
   if (transaction) await abandon(transaction);
   else await withUserStorageLock(reservation.userId, abandon);
 }
-
-# session wip 0
