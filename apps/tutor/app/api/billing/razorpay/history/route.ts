@@ -24,5 +24,3 @@ export async function GET(request: Request): Promise<Response> {
   const purchases = [...completed, ...pending].sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime() || left.id.localeCompare(right.id));
   return Response.json({ purchases: purchases.map(({ orderId, ...purchase }) => ({ ...purchase, status: purchasePreparationStatus({ ...purchase, orderId }) })) }, { headers: { "cache-control": "no-store" } });
 }
-
-# session wip 0

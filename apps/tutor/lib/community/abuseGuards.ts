@@ -59,5 +59,3 @@ export function visitorKey(userId: string | null, request: Request, clientIp: (f
   if (userId) return `u:${userId}`;
   return `ip:${clientIp(request.headers.get("x-forwarded-for") ?? undefined, request.headers.get("x-real-ip") ?? undefined)}`;
 }
-
-# session wip 0
