@@ -45,5 +45,3 @@ export function useHeroInk(whiteboardRef: RefObject<WhiteboardHandle | null>) {
   }, [resetBoardLayout, boardLayoutRef])
   return { executeCommand, reset, cancelRef }
 }
-
-# session wip 0
