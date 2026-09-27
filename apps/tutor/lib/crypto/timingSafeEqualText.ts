@@ -10,5 +10,3 @@ export function timingSafeEqualText(left: string, right: string): boolean {
   }
   return timingSafeEqual(a, b);
 }
-
-# session wip 0

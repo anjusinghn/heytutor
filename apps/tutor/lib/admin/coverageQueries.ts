@@ -68,5 +68,3 @@ export async function loadProductionCoverage(database: PrismaClient, window: Cov
     return aggregateCoverage(facts, window);
   }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, timeout: 30_000 });
 }
-
-# session wip 0
