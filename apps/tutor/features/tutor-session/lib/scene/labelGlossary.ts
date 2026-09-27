@@ -179,5 +179,3 @@ export function lookupLabel(glossary: LabelGlossary, text: string | undefined): 
   if (!text) return null;
   return glossary[normalizeSymbol(text)] ?? null;
 }
-
-# session wip 0
