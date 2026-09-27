@@ -22,5 +22,3 @@ export function RatingLog({ ratings }: { ratings: AdminLectureRatingLog[] }) {
     </ul>
   );
 }
-
-# session wip 0
