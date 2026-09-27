@@ -11,5 +11,3 @@ createRoot(document.getElementById('root')!).render(
     </div>
   </div>,
 )
-
-# session wip 0
