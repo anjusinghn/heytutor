@@ -123,5 +123,3 @@ export default function DemoComposer({ frame }: { frame: DemoFrame }) {
     </div>
   )
 }
-
-# session wip 0
