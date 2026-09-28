@@ -142,5 +142,3 @@ export function OverviewCost({ cost }: { cost: OverviewCostPayload }) {
     </section>
   );
 }
-
-# session wip 0
