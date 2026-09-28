@@ -32,5 +32,3 @@ export default function HeroPixelDecor({ className = '' }: { className?: string 
     </div>
   )
 }
-
-# session wip 0
