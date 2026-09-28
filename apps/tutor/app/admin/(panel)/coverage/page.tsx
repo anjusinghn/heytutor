@@ -8,5 +8,3 @@ export const metadata: Metadata = {
 export default function AdminCoveragePage() {
   return <CoverageView />;
 }
-
-# session wip 0

@@ -76,5 +76,3 @@ export function parseRatingTurnSnapshot(snapshot: string): (RatingPromptTurn & {
     taught: taught === "1",
   };
 }
-
-# session wip 0
