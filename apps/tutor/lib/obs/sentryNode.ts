@@ -54,5 +54,3 @@ export function captureTtsRelayFailure(error: unknown): void {
   scrubbed.name = error instanceof Error ? error.name : "Error";
   Sentry.captureException(scrubbed, { tags: { area: "tts-relay" } });
 }
-
-# session wip 0
