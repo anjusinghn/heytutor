@@ -47,5 +47,3 @@ export async function assessVisualNeed(input: {
   );
   return { decision: visualNeedFromAssessment(assessment), assessment };
 }
-
-# session wip 0
