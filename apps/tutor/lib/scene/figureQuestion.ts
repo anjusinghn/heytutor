@@ -36,5 +36,3 @@ export function figureQuestionNote(question: string, doubtPageQuestion?: string)
   if (page && asked) return figureQuestionChars(composeDoubtFigureQuestion(page, asked)) > FIGURE_QUESTION_CHARS ? FIGURE_DOUBT_NOTE : null;
   return figureQuestionChars(question) > FIGURE_QUESTION_CHARS ? FIGURE_QUESTION_NOTE : null;
 }
-
-# session wip 0
