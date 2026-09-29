@@ -46,5 +46,3 @@ export function Pagination({ page, pageSize, total, onPageChange }: PaginationPr
     </div>
   );
 }
-
-# session wip 0

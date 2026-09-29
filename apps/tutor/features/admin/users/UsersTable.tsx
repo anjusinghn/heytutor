@@ -82,5 +82,3 @@ export function UsersTable({ users }: { users: AdminUserRow[] }) {
     </div>
   );
 }
-
-# session wip 0
