@@ -478,5 +478,3 @@ async function drawWorkExportCue(options: {
       ...(completedTarget ? { completedTarget, getDiagram: options.getDiagram } : {}) });
   }
 }
-
-# session wip 0
