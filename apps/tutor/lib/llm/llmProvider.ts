@@ -425,5 +425,3 @@ export function readProviderPerf(payload: unknown): unknown {
   if (isRecord(payload.usage) && isRecord(payload.usage.latency_checkpoint)) return payload.usage.latency_checkpoint;
   return undefined;
 }
-
-# session wip 0

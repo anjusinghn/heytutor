@@ -78,5 +78,3 @@ ALTER TABLE "turns" ADD CONSTRAINT "turns_user_id_fkey" FOREIGN KEY ("user_id") 
 
 -- AddForeignKey
 ALTER TABLE "segments" ADD CONSTRAINT "segments_turn_id_fkey" FOREIGN KEY ("turn_id") REFERENCES "turns"("id") ON DELETE CASCADE ON UPDATE CASCADE;
-
-# session wip 0
