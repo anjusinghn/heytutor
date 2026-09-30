@@ -56,5 +56,3 @@ export function statusLabel(status: ItemStatus): string {
   }
   return STATUS_CONFIG[status].label;
 }
-
-# session wip 0
