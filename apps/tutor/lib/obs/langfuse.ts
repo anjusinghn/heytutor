@@ -413,5 +413,3 @@ export async function flushSafely(): Promise<void> {
 export function flushInBackground(): void {
   void flushSafely();
 }
-
-# session wip 0
