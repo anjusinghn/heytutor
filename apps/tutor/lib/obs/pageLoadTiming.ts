@@ -82,5 +82,3 @@ export function createPageLoadTiming(perf: PageLoadPerformance | null): PageLoad
 export const pageLoadTiming = createPageLoadTiming(
   typeof performance !== "undefined" ? performance : null,
 );
-
-# session wip 0
