@@ -921,5 +921,3 @@ export default function SketchWallpaper({
     </div>
   )
 }
-
-# session wip 0
