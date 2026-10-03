@@ -269,5 +269,3 @@ export function formatLessonNotesForPrompt(snapshot: LessonNotesSnapshot): strin
     : "";
   return `${prefix}${blocks.join("\n\n")}`;
 }
-
-# session wip 0
