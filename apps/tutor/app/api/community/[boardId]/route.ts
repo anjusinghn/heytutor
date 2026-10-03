@@ -37,5 +37,3 @@ export async function GET(request: Request, context: RouteContext) {
     turns,
   });
 }
-
-# session wip 0

@@ -58,5 +58,3 @@ export function useLecturePageHalt(haltSession: () => void): void {
     };
   }, []);
 }
-
-# session wip 0
