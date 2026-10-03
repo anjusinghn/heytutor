@@ -40,5 +40,3 @@ export function useHeroLessonLocale(): HeroLessonLocale {
 
   return locale
 }
-
-# session wip 0
