@@ -41,5 +41,3 @@ export function PicturesKpis({ report }: { report: PicturesReport }) {
     </section>
   );
 }
-
-# session wip 0
