@@ -389,5 +389,3 @@ export function partsFrom(located: readonly LocatedName[], labels: readonly stri
   }
   return parts;
 }
-
-# session wip 0
