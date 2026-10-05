@@ -327,5 +327,3 @@ export async function factCheckPicture(input: Pick<PictureJudgeInput, "mustShow"
   const content = data.choices?.[0]?.message?.content;
   return { result: parseFactCheck(typeof content === "string" ? content : ""), model, usage: data.usage };
 }
-
-# session wip 0
