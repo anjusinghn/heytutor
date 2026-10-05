@@ -775,5 +775,3 @@ export function articleWordCount(page: SeoPage): number {
   }
   return chunks.join(' ').split(/\s+/).filter(Boolean).length
 }
-
-# session wip 0
