@@ -110,5 +110,3 @@ export function LessonActions({
     </div>
   );
 }
-
-# session wip 0
