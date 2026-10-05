@@ -33,5 +33,3 @@ export function heroLessonAssets(locale: HeroLessonLocale): { audio: string; tim
     timings: `/hero/lesson-timings-${slug}.json`,
   }
 }
-
-# session wip 0
