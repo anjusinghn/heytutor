@@ -9,5 +9,3 @@ export default function region(request: Request): Response {
   if (request.method !== 'GET') return new Response(null, { status: 405, headers })
   return Response.json({ country: country && /^[A-Z]{2}$/.test(country) && country !== 'XX' ? country : null }, { headers })
 }
-
-# session wip 0

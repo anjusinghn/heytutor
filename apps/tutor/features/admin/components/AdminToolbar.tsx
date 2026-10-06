@@ -303,5 +303,3 @@ export function AdminToolbar({
     </header>
   );
 }
-
-# session wip 0
