@@ -44,5 +44,3 @@ assert.match(hook, /heroLessonAssets\(locale\)/)
 assert.match(hook, /runHeroLessonLoop[\s\S]*timedSegments/)
 
 console.log('verify-hero-voice: complete native UK and Hinglish tracks share the live ink clock')
-
-# session wip 0
