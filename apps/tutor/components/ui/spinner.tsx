@@ -42,5 +42,3 @@ export function Spinner({ size = 16, thickness, label, className, style }: Spinn
     />
   );
 }
-
-# session wip 0
