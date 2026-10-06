@@ -208,5 +208,3 @@ export function typeAlongProgress(state: TypeAlongState): {
   }
   return { typedChars, totalChars };
 }
-
-# session wip 0
