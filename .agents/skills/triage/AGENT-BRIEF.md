@@ -205,5 +205,3 @@ This is bad because:
 - No acceptance criteria
 - No scope boundaries
 - No description of current vs desired behavior
-
-# session wip 0
