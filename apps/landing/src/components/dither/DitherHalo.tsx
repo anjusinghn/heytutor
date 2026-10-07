@@ -68,5 +68,3 @@ export default function DitherHalo({
     />
   )
 }
-
-# session wip 0
