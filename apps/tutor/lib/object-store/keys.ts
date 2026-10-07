@@ -164,5 +164,3 @@ export function boardThumbnailPrefix(boardId: string): string | null {
   const key = boardThumbnailKey(boardId);
   return key ? key.slice(0, key.lastIndexOf("/") + 1) : null;
 }
-
-# session wip 0

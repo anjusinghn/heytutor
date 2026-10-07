@@ -93,5 +93,3 @@ module.exports = {
     },
   },
 };
-
-# session wip 0
