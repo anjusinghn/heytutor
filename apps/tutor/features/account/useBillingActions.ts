@@ -56,5 +56,3 @@ export function useBillingActions(catalog: PaymentCatalog | null, refreshCatalog
     portal: () => run("portal", () => openCustomerPortal()),
   };
 }
-
-# session wip 0

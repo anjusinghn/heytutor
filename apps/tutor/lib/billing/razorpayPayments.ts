@@ -101,5 +101,3 @@ export async function reconcileRazorpayPurchase(userId: string, purchaseId: stri
   const updated = await prisma.billingPurchase.findUniqueOrThrow({ where: { id: purchaseId } });
   return { purchaseId, status: purchasePreparationStatus(updated), planId: updated.planId };
 }
-
-# session wip 0
