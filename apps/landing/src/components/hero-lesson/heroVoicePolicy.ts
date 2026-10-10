@@ -38,5 +38,3 @@ export function shouldAttemptHeroPlayback(input: {
 }): boolean {
   return input.soundOn && input.sectionVisible && input.documentVisible
 }
-
-# session wip 0
