@@ -30,5 +30,3 @@ export async function generateMetadata({ params }: SessionPageProps): Promise<Me
 export default function SessionPage() {
   return null;
 }
-
-# session wip 0
