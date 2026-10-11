@@ -7,5 +7,3 @@ const result = spawnSync('pnpm', ['exec', 'tsx', 'scripts/lecture-lab/generateLa
   cwd: tutorRoot, stdio: 'inherit', env: process.env,
 })
 process.exitCode = result.status ?? 1
-
-# session wip 0
