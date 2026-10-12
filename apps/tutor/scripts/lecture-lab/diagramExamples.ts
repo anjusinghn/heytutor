@@ -411,5 +411,3 @@ export function loadDiagramExemplarLibrary(
     },
   }));
 }
-
-# session wip 0
