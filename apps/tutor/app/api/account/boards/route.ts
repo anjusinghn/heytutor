@@ -37,5 +37,3 @@ export async function PATCH(request: Request) {
   }
   return NextResponse.json({ error: "unknown_action" }, { status: 400 });
 }
-
-# session wip 0
