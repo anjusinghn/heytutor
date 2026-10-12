@@ -236,5 +236,3 @@ export async function POST(request: Request): Promise<Response> {
     flushInBackground();
   }
 }
-
-# session wip 0
