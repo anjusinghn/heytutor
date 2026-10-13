@@ -128,5 +128,3 @@ if (process.argv[1]?.endsWith("regrade-strict-suppression.ts")) {
   if (!round) throw new Error("Usage: regrade-strict-suppression.ts <strict round dir>");
   console.log(JSON.stringify(regradeStrictSuppression(round), null, 2));
 }
-
-# session wip 0

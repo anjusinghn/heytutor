@@ -32,5 +32,3 @@ export async function GET(request: Request): Promise<Response> {
     picturesSlot.picturesReads = picturesReads() - 1;
   }
 }
-
-# session wip 0
