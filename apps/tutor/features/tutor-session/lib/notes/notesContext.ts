@@ -82,5 +82,3 @@ function formatProjected(
     lectureInProgress: snapshot.lectureInProgress,
   });
 }
-
-# session wip 0
