@@ -74,5 +74,3 @@ export function applySecurityHeaders(
     headers.set(key, value);
   }
 }
-
-# session wip 0
