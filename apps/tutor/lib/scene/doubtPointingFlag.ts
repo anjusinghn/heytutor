@@ -15,5 +15,3 @@
 export function resolveDoubtPointingEnabled(raw = process.env.DIAGRAM_DOUBT_POINTING): boolean {
   return raw?.trim().toLowerCase() === "on";
 }
-
-# session wip 0
