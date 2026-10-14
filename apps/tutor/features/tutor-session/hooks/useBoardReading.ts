@@ -121,5 +121,3 @@ export function useBoardReading({
     return () => cancelAnimationFrame(frame);
   }, [enabled, boardRef, paneRef, scope, diagram, onMinimumFontSize]);
 }
-
-# session wip 0
