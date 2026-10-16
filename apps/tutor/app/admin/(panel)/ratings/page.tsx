@@ -8,5 +8,3 @@ export const metadata: Metadata = {
 export default function AdminRatingsPage() {
   return <RatingsView />;
 }
-
-# session wip 0
