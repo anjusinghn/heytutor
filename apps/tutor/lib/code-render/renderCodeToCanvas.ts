@@ -339,5 +339,3 @@ export function renderCodePanelFrame(
 
   ctx.restore();
 }
-
-# session wip 0
