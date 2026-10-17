@@ -225,5 +225,3 @@ export default memo(LiveLessonBoard, (prev, next) =>
   prev.cursorState === next.cursorState &&
   prev.boardRef === next.boardRef,
 )
-
-# session wip 0
