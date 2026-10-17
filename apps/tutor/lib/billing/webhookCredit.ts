@@ -27,5 +27,3 @@ export async function applyAutumnWebhookEvent(input: { eventId: string; userId: 
     }
   });
 }
-
-# session wip 0

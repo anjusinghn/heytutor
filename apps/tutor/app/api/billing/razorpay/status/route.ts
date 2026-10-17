@@ -13,5 +13,3 @@ export async function GET(request: Request): Promise<Response> {
     return Response.json(await reconcileRazorpayPurchase(actor.userId, purchaseId), { headers: { "cache-control": "no-store" } });
   } catch (error) { return paymentErrorResponse(error); }
 }
-
-# session wip 0
