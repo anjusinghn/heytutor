@@ -35,5 +35,3 @@ export async function assertOwnedTrace(userId: string, traceId: string, sessionI
   }
   return true;
 }
-
-# session wip 0
