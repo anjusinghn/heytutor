@@ -325,5 +325,3 @@ export function useLessonSimulation(
     : reduced ? 'unavailable' : 'loading'
   return { snapshot, sound: reportedSound, toggleSound, boardRef, cursorState }
 }
-
-# session wip 0
