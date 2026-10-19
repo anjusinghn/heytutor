@@ -55,5 +55,3 @@ export function seoPlugin(): Plugin {
     },
   };
 }
-
-# session wip 0
