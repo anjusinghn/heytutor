@@ -206,5 +206,3 @@ export function recordWithParts<T extends object>(record: T, parts: readonly Ref
   delete rest.parts;
   return (parts.length ? { ...rest, parts: parts.map((part) => ({ ...part, box: { ...part.box } })) } : rest) as Omit<T, "parts"> & { parts?: ReferencePicturePart[] };
 }
-
-# session wip 0
