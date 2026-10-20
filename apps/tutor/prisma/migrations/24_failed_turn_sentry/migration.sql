@@ -9,5 +9,3 @@ CREATE INDEX turns_sentry_pending_idx ON turns (sentry_next_attempt_at, id)
 
 CREATE INDEX turns_sentry_abandoned_idx ON turns (updated_at)
   WHERE status = 'live' AND sentry_event_id IS NULL;
-
-# session wip 0
