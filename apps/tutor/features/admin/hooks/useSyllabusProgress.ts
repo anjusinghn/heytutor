@@ -83,5 +83,3 @@ export function useSyllabusProgress() {
     exportJson,
   };
 }
-
-# session wip 0
