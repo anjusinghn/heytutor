@@ -29,5 +29,3 @@ export default async function CommunityBoardPage({ params }: CommunityBoardPageP
   const { boardId } = await params;
   return <CommunityBoardView boardId={boardId} />;
 }
-
-# session wip 0
