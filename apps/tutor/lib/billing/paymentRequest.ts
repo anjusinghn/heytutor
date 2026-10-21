@@ -38,5 +38,3 @@ export async function readPaymentJson(request: Request): Promise<Record<string, 
     return value as Record<string, unknown>;
   } catch { throw new PaymentError("invalid_request", 400); }
 }
-
-# session wip 0
