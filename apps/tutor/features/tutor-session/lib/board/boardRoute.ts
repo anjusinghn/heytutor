@@ -94,5 +94,3 @@ export function isUntouchedHomeBoard(input: {
   if (boardTitleNamesLesson(input.boardTitle)) return false;
   return true;
 }
-
-# session wip 0
