@@ -272,5 +272,3 @@ function normalizeQuantityKey(value) {
     .replace(/[^a-z0-9]+/g, "")
     .replace(/(?:computed|calculated|calculation|calc|result|answer|value|val)$/, "");
 }
-
-# session wip 0

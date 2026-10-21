@@ -226,5 +226,3 @@ export function buildSnapshot(input: {
     history: input.recent.filter((row) => row.cycleKey !== cycle.key).map((row) => ({ cycleKey: row.cycleKey, spentUsd: row.spentCents / 100 })),
   };
 }
-
-# session wip 0
