@@ -10,5 +10,3 @@ export function isAuthDisabled(
   if (nodeEnv === "production") return false;
   return env.AUTH_DISABLED === "1" && env.NEXT_PUBLIC_AUTH_DISABLED === "1";
 }
-
-# session wip 0
