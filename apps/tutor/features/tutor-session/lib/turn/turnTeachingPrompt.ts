@@ -1058,5 +1058,3 @@ export function buildTurnTeachingPrompt(input: TurnTeachingPromptInput): TurnTea
       : continuationBase,
   };
 }
-
-# session wip 0
