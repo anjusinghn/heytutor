@@ -104,5 +104,3 @@ export function segmentWithoutFocusKeep(segment: TutorSegment): TutorSegment {
   else delete next.commands;
   return next;
 }
-
-# session wip 0
