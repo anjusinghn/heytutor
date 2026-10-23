@@ -103,5 +103,3 @@ export function rememberLectureExport(key: string, value: CachedLectureExport): 
   memory.set(key, value);
   void indexedDbEntry(key, value);
 }
-
-# session wip 0
