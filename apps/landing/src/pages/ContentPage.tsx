@@ -105,5 +105,3 @@ export default function ContentPage({ path }: { path: string }) {
     </div>
   )
 }
-
-# session wip 0
