@@ -64,5 +64,3 @@ export const ONBOARDING_COPY = {
     guardianError: "Enter a valid guardian email.",
   },
 } as const;
-
-# session wip 0
