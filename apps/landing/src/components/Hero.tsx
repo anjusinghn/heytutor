@@ -115,5 +115,3 @@ export default function Hero() {
     </div>
   )
 }
-
-# session wip 0

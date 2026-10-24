@@ -27,5 +27,3 @@ CREATE UNIQUE INDEX "billing_purchases_user_id_idempotency_key_key" ON "billing_
 CREATE UNIQUE INDEX "billing_purchases_order_id_key" ON "billing_purchases"("order_id");
 CREATE UNIQUE INDEX "billing_purchases_payment_id_key" ON "billing_purchases"("payment_id");
 CREATE INDEX "billing_purchases_user_id_test_mode_status_access_ends_at_idx" ON "billing_purchases"("user_id", "test_mode", "status", "access_ends_at");
-
-# session wip 0
