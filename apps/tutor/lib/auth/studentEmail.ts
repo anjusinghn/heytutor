@@ -23,5 +23,3 @@ export function isAllowedLoginEmail(email: string | null | undefined): boolean {
   const at = trimmed.lastIndexOf("@");
   return at > 0 && at < trimmed.length - 1;
 }
-
-# session wip 0
