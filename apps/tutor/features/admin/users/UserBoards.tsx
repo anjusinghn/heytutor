@@ -65,5 +65,3 @@ export function UserBoards({ boards }: { boards: AdminUserBoard[] }) {
     </section>
   );
 }
-
-# session wip 0
