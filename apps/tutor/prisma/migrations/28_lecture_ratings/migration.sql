@@ -23,5 +23,3 @@ CREATE UNIQUE INDEX IF NOT EXISTS "lecture_ratings_turn_id_moment_key" ON "lectu
 CREATE INDEX IF NOT EXISTS "lecture_ratings_created_at_idx" ON "lecture_ratings" ("created_at");
 CREATE INDEX IF NOT EXISTS "lecture_ratings_user_id_idx" ON "lecture_ratings" ("user_id");
 CREATE INDEX IF NOT EXISTS "lecture_ratings_board_id_idx" ON "lecture_ratings" ("board_id");
-
-# session wip 0
