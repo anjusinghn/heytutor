@@ -14,5 +14,3 @@ export async function GET() {
   const progress = await loadProgressV1(userId, parseSubjects(user?.subjects));
   return NextResponse.json({ progress });
 }
-
-# session wip 0
