@@ -45,5 +45,3 @@ export function UserMessages({ messages }: { messages: AdminUserChatMessage[] })
     </section>
   );
 }
-
-# session wip 0
