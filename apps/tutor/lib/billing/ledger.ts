@@ -251,5 +251,3 @@ export async function settlePeriodUsage(input: { userId: string; reservationId: 
     await tx.paidUsageReservation.update({ where: { id: receipt.id }, data: { settledMillicents: actual } });
   });
 }
-
-# session wip 0
