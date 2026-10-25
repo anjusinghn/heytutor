@@ -269,5 +269,3 @@ export function projectileSpeedLiteralIssues(
   });
   return issues;
 }
-
-# session wip 0

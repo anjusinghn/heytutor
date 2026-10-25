@@ -230,5 +230,3 @@ export async function downloadPicture(url: string, options: { maxBytes?: number;
   }
   return { bytes: Buffer.concat(chunks), contentType };
 }
-
-# session wip 0
