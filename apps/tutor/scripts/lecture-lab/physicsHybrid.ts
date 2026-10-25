@@ -138,5 +138,3 @@ if (process.argv[1]?.endsWith("physicsHybrid.ts")) {
   console.log(JSON.stringify(report.thresholds.map(({ threshold, current, strict, hybrid, allowlist, qualifiesForLive }) =>
     ({ threshold, current, strict, hybrid, allowlist, qualifiesForLive })), null, 2));
 }
-
-# session wip 0
