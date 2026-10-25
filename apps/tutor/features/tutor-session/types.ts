@@ -200,5 +200,3 @@ export function resolveCommandInkBudgetMs(input: {
   }
   return adaptiveShapeBudget(input.command.type, undefined, 1, input.pace);
 }
-
-# session wip 0
