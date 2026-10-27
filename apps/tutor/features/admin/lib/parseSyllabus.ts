@@ -179,5 +179,3 @@ export function flattenItems(tree: SyllabusTree): SyllabusItem[] {
 export function countItems(tree: SyllabusTree): number {
   return flattenItems(tree).length;
 }
-
-# session wip 0
