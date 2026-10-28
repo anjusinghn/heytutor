@@ -16,5 +16,3 @@ export default function Root() {
   if (page?.kind === 'article') return <ContentPage path={page.path} />
   return <App />
 }
-
-# session wip 0
