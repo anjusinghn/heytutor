@@ -174,5 +174,3 @@ export function codeLessonFrameSpec(
     caretClockMs: timeMs,
   };
 }
-
-# session wip 0
