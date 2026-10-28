@@ -249,5 +249,3 @@ export function summarizeVisualNeedCalls(calls: readonly VisualNeedCallAccountin
     inputTokens: calls.reduce((sum, call) => sum + call.inputTokens, 0),
     outputTokens: calls.reduce((sum, call) => sum + call.outputTokens, 0), unavailableCounts };
 }
-
-# session wip 0
