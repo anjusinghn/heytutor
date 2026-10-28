@@ -495,5 +495,3 @@ export function speedAwareDelay(
     schedule(step, 16);
   });
 }
-
-# session wip 0
