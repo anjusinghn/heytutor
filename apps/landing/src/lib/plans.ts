@@ -53,5 +53,3 @@ export const PLANS: readonly LandingPlan[] = [
     hrefKind: 'contact',
   },
 ]
-
-# session wip 0
