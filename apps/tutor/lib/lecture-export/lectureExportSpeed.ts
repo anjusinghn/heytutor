@@ -25,5 +25,3 @@ export function lectureExportMediaMs(
 ): number {
   return Math.max(0, fileMs) * clampLectureExportPlaybackRate(rate);
 }
-
-# session wip 0
