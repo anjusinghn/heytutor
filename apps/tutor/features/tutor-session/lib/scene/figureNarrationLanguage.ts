@@ -153,5 +153,3 @@ function balanced(text: string): boolean {
   }
   return depth === 0;
 }
-
-# session wip 0
