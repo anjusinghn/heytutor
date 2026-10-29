@@ -74,5 +74,3 @@ export function LandingPixelField() {
     </div>
   );
 }
-
-# session wip 0
