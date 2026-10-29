@@ -37,5 +37,3 @@ export async function prettierSyntaxCheck(
     return { ok: false, message };
   }
 }
-
-# session wip 0
