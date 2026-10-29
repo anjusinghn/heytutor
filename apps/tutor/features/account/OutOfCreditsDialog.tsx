@@ -53,5 +53,3 @@ export function OutOfCreditsDialog({
     </Dialog>
   );
 }
-
-# session wip 0

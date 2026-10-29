@@ -35,5 +35,3 @@ export function ttsWsCharsWithinCeiling(used: number, incoming: number): boolean
   if (incoming < 0 || used < 0) return false;
   return used + incoming <= TTS_WS_MAX_CHARS_PER_CONNECTION;
 }
-
-# session wip 0
