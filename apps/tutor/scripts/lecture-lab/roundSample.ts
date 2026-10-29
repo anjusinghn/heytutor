@@ -267,5 +267,3 @@ if (process.argv[1]?.endsWith("roundSample.ts")) {
     sourceRefs,
   }, null, 2));
 }
-
-# session wip 0
