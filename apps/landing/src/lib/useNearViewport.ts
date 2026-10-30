@@ -20,5 +20,3 @@ export function useNearViewport(ref: RefObject<Element | null>, rootMargin = '15
 
   return near
 }
-
-# session wip 0
