@@ -68,5 +68,3 @@ export async function findOrCreateSignedInUser(
   });
   return created;
 }
-
-# session wip 0

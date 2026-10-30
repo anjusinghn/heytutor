@@ -3,5 +3,3 @@ interface:
   short_description: "Configure a repo for the skills"
 policy:
   allow_implicit_invocation: false
-
-# session wip 0
