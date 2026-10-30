@@ -103,5 +103,3 @@ export function outOfCreditsDescription(ageBand?: string | null): string {
   if (isTeenAgeBand(ageBand)) return `${base} ${TEEN_CHECKOUT_COPY}`;
   return base;
 }
-
-# session wip 0
