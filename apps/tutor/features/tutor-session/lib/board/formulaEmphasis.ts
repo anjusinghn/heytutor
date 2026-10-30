@@ -92,5 +92,3 @@ export function resultSpanOfRow(row: BoardTextRect): EmphasisSpan | null {
   if (!range) return null;
   return spanRectInRow(row, range.start, range.end);
 }
-
-# session wip 0
