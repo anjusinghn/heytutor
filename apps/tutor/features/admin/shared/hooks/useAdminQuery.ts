@@ -88,5 +88,3 @@ export function useAdminQuery<T>(url: string | null, pollMs?: number): AdminQuer
 
   return { data, loading, error, refresh };
 }
-
-# session wip 0
