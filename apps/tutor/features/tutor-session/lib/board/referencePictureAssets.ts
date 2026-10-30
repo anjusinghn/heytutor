@@ -254,5 +254,3 @@ export async function awaitReferencePicture(
   }
   return outcome.asset;
 }
-
-# session wip 0
