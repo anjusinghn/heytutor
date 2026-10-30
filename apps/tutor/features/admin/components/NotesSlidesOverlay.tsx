@@ -308,5 +308,3 @@ export function NotesSlidesOverlay({ boardId, title, onClose }: NotesSlidesOverl
     </>
   );
 }
-
-# session wip 0
